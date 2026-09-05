@@ -1876,7 +1876,7 @@ export class GatewayService {
         : { state: "ambiguous", safeErrorCode: authorizationUncertain ? "WRITE_AUTHORIZATION_UNCERTAIN" : "PEER_HANDOFF_OUTCOME_UNKNOWN" };
     }
     const requeued = await this.applyDispatchResult(attempt.messageId, attempt.attemptId, result,
-      armed, conversation, attempt.sourceAlias, attempt.targetAlias);
+      armed, conversation, source.alias, target.alias);
     this.activeAttempts.delete(attempt.messageId);
     return requeued;
   }

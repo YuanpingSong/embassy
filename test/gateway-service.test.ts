@@ -1604,6 +1604,17 @@ test("peer handoff preserves every write boundary and never replays uncertainty"
         const original = subject.store.acceptMessage.bind(subject.store);
         subject.store.acceptMessage = async (input) => { await original(input); throw new Error("accept commit uncertain"); };
       }
+      const runner = subject.service as unknown as { applyDispatchResult: (...args: unknown[]) => Promise<boolean> };
+      const apply = runner.applyDispatchResult.bind(subject.service);
+      let appliedAliases: unknown[] = [];
+      runner.applyDispatchResult = async (...args) => { appliedAliases = args.slice(-2); return await apply(...args); };
+      const reserve = subject.store.reserveMessage.bind(subject.store);
+      subject.store.reserveMessage = async (...args) => {
+        const result = await reserve(...args);
+        if (mode === "confirmed" && result.status === "reserved")
+          await subject.store.installClaudeRoute({ ...local, alias: "advisor-current@studio" });
+        return result;
+      };
       const sent = await subject.handlers.send({ fromAlias: local.alias, toAlias: remote.alias,
         text: `peer ${mode}`, replyAddress: "uds:/test/reply.sock", expectsReply: false });
       assert.equal(sent.accepted, true, JSON.stringify(sent));
@@ -1617,6 +1628,7 @@ test("peer handoff preserves every write boundary and never replays uncertainty"
       assert.equal(writes, mode === "authorization" ? 0 : 1);
       await new Promise<void>((resolve) => setImmediate(resolve));
       assert.equal(writes, mode === "authorization" ? 0 : 1);
+      assert.deepEqual(appliedAliases, [mode === "confirmed" ? "advisor-current@studio" : local.alias, remote.alias]);
       if (mode === "confirmed") {
         const state = JSON.parse(await readFile(subject.store.stateFilePath, "utf8")) as { messages: Record<string, unknown>[] };
         assert.equal(Object.hasOwn(state.messages.at(-1)!, "body"), false);
