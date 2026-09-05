@@ -216,10 +216,11 @@ broker.
   included in bounded rejection evidence. Every Codex endpoint used by a
   delivery must negotiate its current interface and resume the exact task
   before that operation receives final write authorization.
-- Embassy publishes at most one process-owned `codex-*` record in Claude's
-  registry with the supported explicit versioned Embassy-advertisement marker.
+- Each supervised advertisement helper publishes at most one process-owned
+  `codex-*` record in Claude's registry with the supported explicit versioned
+  Embassy-advertisement marker.
   The prefix is a visible alias convention, not the discriminator: an unmarked
-  genuine Claude session named `codex-*` remains discoverable. Embassy creates
+  genuine Claude session named `codex-*` remains discoverable. Each helper creates
   one callback socket and removes only exact-owned artifacts whose generation
   still matches during graceful shutdown.
 - App Server methods are allowlisted. Connectors expose no archive, deletion,
@@ -276,7 +277,8 @@ Embassy's provider-facing access is intentionally enumerable:
 - read the live Claude session registry and validate only the registry record,
   peer socket, PID, workspace, state-root, and generation evidence used by the
   current operation;
-- create and later remove its one callback socket and one registry record;
+- create and later remove one callback socket and one registry record per
+  supervised advertisement helper;
 - resolve the managed Codex installation and open one attested local App Server
   connection per operation; and
 - inspect canonical filesystem metadata needed to validate provider-advertised

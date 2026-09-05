@@ -14,7 +14,7 @@ async function readSkill(): Promise<string> {
   return readFile(path.join(skillRoot, "SKILL.md"), "utf8");
 }
 
-test("repo-scoped peer skill has complete discoverable metadata", async () => {
+test("repo-shipped peer skill has complete discoverable metadata", async () => {
   const skill = await readSkill();
   const interfaceYaml = await readFile(
     path.join(skillRoot, "agents", "openai.yaml"),

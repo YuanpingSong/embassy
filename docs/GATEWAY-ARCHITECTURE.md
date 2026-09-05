@@ -81,9 +81,9 @@ tolerated because Embassy never consumes them; malformed required fields and
 records whose peer protocol is not 1 remain isolated and counted. Version
 metadata describes what was observed but grants no runtime authority.
 
-For the lowest-impedance native path, the gateway publishes one process-owned
-registry record whose name is visibly prefixed `codex-` and which carries the
-supported explicit versioned Embassy-advertisement marker. The listener remains
+For the lowest-impedance native path, each supervised advertisement helper publishes
+one process-owned registry record whose name is visibly prefixed `codex-` and carries
+the supported explicit versioned Embassy-advertisement marker. The listener remains
 gateway-owned and does not claim to be a Claude model session; the marker, not
 the name prefix alone, distinguishes Embassy's advertisement. The record uses
 the validated native peer shape so Claude's own `ListAgents` and
@@ -91,16 +91,14 @@ the validated native peer shape so Claude's own `ListAgents` and
 
 Consequences:
 
-- Native Claude `ListAgents` discovers real Claude sessions plus the one
-  explicitly marked `codex-*` gateway peer.
+- Native Claude `ListAgents` discovers real Claude sessions plus the
+  explicitly marked `codex-*` gateway peers, one per advertisement helper.
 - The gateway discovers compatible real Claude sessions as transient
   candidates, but publishes only sanitized aliases and state. A send from a
   registered Codex task addresses a session by its current name or its UUID,
   and the broker installs that session's logical route on this first use.
   Per-message consent stays native: delivery lands in the
   Claude session's own `crossSessionInbound` policy and approval flow.
-- Codex aliases are discovered through the gateway CLI/skill, not through
-  `ListAgents`.
 - A gateway-owned anonymous callback UDS can receive a correlated reply. It
   does not need, and must not create, a Claude registry record.
 
@@ -158,7 +156,7 @@ a separately authorized operator action (see [Validation boundary](#validation-b
 | Delivery receipt/status lifecycle | **Implemented**, deterministic synthetic tests cover stable-UUID native receipt re-resolution, the merged/verbose/quiet Claude notice policy, one bounded stall notice with pending age where enabled, opaque private-v5 correlation handles, restart continuity, the closed status/terminal schema, and one-shot/bounded-wait CLI behavior |
 | Broker-owned cross-provider provenance framing | **Implemented**, deterministic tests cover exact Codex and Claude wire shapes, bounded long-alias attribution, recipient reply hints, reserved-tag neutralization, single wrapping across clean retries, and pre-write failure |
 | Operator/agent client CLI and package binary | **Implemented**, deterministic private-UDS tests cover the closed command family, inherited provider identity, bounded stdin-only bodies, normalized output, and ambiguous no-retry behavior |
-| Repo-shipped cross-provider skill | **Implemented** as a repo-scoped workflow over the client CLI; it is not installed into either provider's global configuration |
+| Repo-shipped cross-provider skill | **Implemented** as a packaged workflow over the client CLI; the operator copies it into each agent's skill directory, with no automatic installation |
 | Foreground local broker launcher and provider assembly | **Implemented** as `embassy serve`; local-host-only with native messaging enabled |
 
 Synthetic tests do not scan `~/.claude`, connect `/tmp/cc-socks`, attach to a
@@ -259,8 +257,8 @@ pane also carries the bounded ledger's retained message bodies, so its output
 is as sensitive as the messages themselves.
 The thin skill/CLI exposes the same safe alias list to either provider.
 
-That pane has two forms of the same snapshot. Piped, or with `--json`, it is
-the snapshot verbatim — the form every script and the skill read. On a
+That pane has two forms of the same snapshot. Piped, or with `--json`, it emits
+`{ok,command,result}` with the snapshot under `result` (routes at `.result.routes`). On a
 terminal it is rendered by `status-view.ts`, a pure function of the snapshot
 and the reader's clock: it derives one of four plain words per connector
 (`ok`, `stale`, `degraded`, `offline`) and pairs every word that is not `ok`
@@ -600,8 +598,8 @@ The closed version 3 method family is exactly these fourteen methods:
   rate rows, and journal entries), excluded from the federation catalog, and
   retired by the broker's own clock, so it cannot survive a restart or be
   restored on another node. Removal — by `unregister_peer` or by that clock —
-  takes the same rows out of the live state in the same write, so nothing of
-  it is written afterwards either; a retirement that fails is retried twice,
+  takes the same attributable rows and bodies out of live state in the same write;
+  aggregate counters still advance and are not erased. A retirement that fails is retried twice,
   five seconds apart, then left to the next restart. The clock is guarded by
   the registration's identity, so a durable route that later takes the same
   alias is never retired by it. `embassy check` uses one.
@@ -618,9 +616,9 @@ delivered in older envelopes have aged out. Message bodies are non-empty
 UTF-8 from standard input only, with a 16 KiB ceiling; they are never accepted
 in an argument or file. The client emits one bounded normalized JSON line, and
 for every broker-protocol command it never returns a thread ID,
-provider-native ID, path, or address, and only `status` and `watch` return
-message bodies — the snapshot's own. There are three deliberate
-exceptions, each of them about something the operator alone is looking at.
+provider-native ID, path, or address. `status` and `watch` return retained snapshot
+bodies; `await` returns one framed mailbox message and acknowledges only after
+stdout flushes. Other deliberate output exceptions follow.
 `service` reports its own plist path, its log path, and any program path in
 the plist that is no longer on disk, because managing local files is what it
 does. `status` on a terminal, `watch`, and `check` render for a person instead

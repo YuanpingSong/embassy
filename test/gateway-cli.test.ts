@@ -143,6 +143,10 @@ test("bare invocation and help flags print usage without side effects", async ()
     assert.match(help, /register-peer/);
     assert.match(help, /unregister-peer/);
     assert.match(help, /--token-stdin/);
+    assert.ok(help.includes("register-codex --alias <codex-alias> [--succeeds <old-alias>]"));
+    assert.ok(help.includes("send --from <own-alias> --to <alias-or-uuid> [--expects-reply]"));
+    assert.ok(help.includes("send --from <own-alias> --conversation <token>"));
+    assert.ok(help.includes("Exactly one of --to and --conversation"));
     assert.doesNotMatch(help, /select-claude|unselect-claude|\bpair\b|unpair|--inbound/);
     assert.doesNotMatch(help, /compat-(?:check|certify)|--with-turn/);
     assert.doesNotMatch(help, /dashboard/i);
@@ -1773,7 +1777,15 @@ test("each refusal reason renders exactly the remedy that fits it", async () => 
   ]);
   assert.deepEqual(await decide(send, { accepted: false, code: "rejected", reason: "CLAUDE_PEER_WORKSPACE_BROAD" }), [
     decision,
-    "[embassy] that session's workspace contains the gateway state directory; move one so they no longer overlap, then retry.",
+    "[embassy] that session's workspace is a filesystem root or overlaps a temporary root; reopen the session in a specific project directory outside temporary roots.",
+  ]);
+  assert.deepEqual(await decide(send, { accepted: false, code: "rejected", reason: "CLAUDE_PEER_WORKSPACE_UNSAFE" }), [
+    decision,
+    "[embassy] the session workspace or user home failed directory checks; verify access, ownership, permissions and canonical, non-symlink paths before retrying.",
+  ]);
+  assert.deepEqual(await decide(send, { accepted: false, code: "rejected", reason: "CLAUDE_PEER_WORKSPACE_UNATTESTED" }), [
+    decision,
+    "[embassy] the session workspace has not been validated for this route; report CLAUDE_PEER_WORKSPACE_UNATTESTED with the session's current alias.",
   ]);
   assert.deepEqual(await decide(send, { accepted: false, code: "route_mismatch", reason: "CLAUDE_ROUTE_MISMATCH" }), [
     decision,

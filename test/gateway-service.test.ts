@@ -3214,14 +3214,17 @@ test("an ephemeral peer registration routes in memory but is never written down,
       return status.found && status.terminal;
     });
 
-    // Never on disk: neither the route nor the message it carried, so the
-    // written document stays loadable and the check leaves no trace.
+    // No attributable rows or body on disk; aggregate counters still advance.
     const raw = await readFile(subject.store.stateFilePath, "utf8");
     const written = JSON.parse(raw) as { routes: { alias: string }[]; messages: { sourceAlias: string }[] };
     assert.deepEqual(written.routes.map((route) => route.alias), [codex.alias]);
     assert.equal(written.messages.some((message) => message.sourceAlias === alias), false);
     assert.equal(raw.includes(alias), false);
     assert.equal(raw.includes("round trip"), false);
+    const accounting = JSON.parse(raw).accounting;
+    assert.equal(accounting.accepted, 1);
+    assert.equal(accounting.delivered, 1);
+    assert.equal(accounting.bytesAccepted, Buffer.byteLength("[embassy check 0a1b2c3d] round trip"));
 
     // Never published to a federation peer.
     const catalog = await subject.handlers.peerCatalog?.({ peerHost: "m5dev" });

@@ -19,6 +19,16 @@ npm install -g agent-embassy
 embassy service install
 ```
 
+Use one global package manager for Embassy (npm or pnpm), not both. Check for shadowing installations in each launch environment:
+
+```bash
+which -a embassy
+embassy --version
+ssh <node> 'which -a embassy; embassy --version'
+```
+
+The SSH check uses the non-interactive environment that federation launches in. Update or remove a shadowing install through the package manager that owns it; updating npm does not update a separate pnpm install.
+
 `service install` runs the broker as your user's launchd agent: it starts at login, restarts after a crash, and logs to `~/Library/Logs/agent-embassy/broker.log`. Prefer a process you start by hand? Run `embassy serve` in a terminal and leave it running instead. You need macOS, Node.js 20+, Claude Code (with its [`crossSessionInbound`](docs/CONFIGURATION.md#claude-codes-own-setting-crosssessioninbound) setting enabled on any session that should receive mail), and Codex CLI with the managed standalone App Server — the official installer `curl -fsSL https://chatgpt.com/codex/install.sh | sh`, then `codex app-server daemon start`. From source: `git clone https://github.com/YuanpingSong/embassy && cd embassy && npm ci && npm run build && npm link`.
 
 Every alias below ends in `@your-host`. Replace `your-host` with this machine's host — the `hostId` on the broker's ready line (in the log, under launchd); name the wrong host and the CLI says which one this machine uses.
@@ -61,7 +71,7 @@ The same `send` runs from a Claude Code session, inheriting that session's ident
 embassy check
 ```
 
-`check` is the upstream-drift tripwire. It registers an ephemeral shell peer of its own — kept out of the durable state document and the federation catalog, expiring on its own; its only trace is the native advertisement to Claude sessions, released with it, and a broker that dies mid-check can leave that record until the alias is next registered and released — sends one marked message through the ordinary send path to the most recently observed registered Codex task (observed within ten minutes; a task never observed is not eligible), waits for `delivered`, awaits the echo on its own mailbox, releases the registration, and prints every hop with its timing; any failing hop exits non-zero with the safe code that explains it. `--to <alias>` picks a target and `--timeout <s>` bounds each wait. The peer answers because the shipped [skill](skills/embassy-peer/SKILL.md) tells it to — a message whose verified sender starts with `peer-check-` and whose body starts `[embassy check` is echoed in one line; either half alone is ordinary untrusted text. It costs the peer one model turn, so it is a deliberate command, not something to poll.
+`check` is the upstream-drift tripwire. It registers an ephemeral shell peer of its own — its attributable rows and bodies are omitted from durable state and its route from the federation catalog, but aggregate counters still advance. Its native advertisement to Claude sessions is released with it; a broker that dies mid-check can leave that record until the alias is next registered and released. The check sends one marked message through the ordinary send path to the most recently observed registered Codex task (observed within ten minutes; a task never observed is not eligible), waits for `delivered`, awaits the echo on its own mailbox, releases the registration, and prints every hop with its timing; any failing hop exits non-zero with the safe code that explains it. `--to <alias>` picks a target and `--timeout <s>` bounds each wait. The peer answers because the shipped [skill](skills/embassy-peer/SKILL.md) tells it to — a message whose verified sender starts with `peer-check-` and whose body starts `[embassy check` is echoed in one line; either half alone is ordinary untrusted text. It costs the peer one model turn, so it is a deliberate command, not something to poll.
 
 ```text
 embassy check 50066f60 → codex-reviewer@this-mac
@@ -75,12 +85,14 @@ embassy check 50066f60 → codex-reviewer@this-mac
 check passed
 ```
 
-Install the skill where each agent discovers skills — Codex tasks can then be prompted with `$embassy-peer`, and Claude Code finds it as a user skill:
+The operator copies the repo-shipped, packaged skill where each agent discovers skills — Codex tasks can then be prompted with `$embassy-peer`, and Claude Code finds it as a user skill:
 
 ```bash
 cp -R "$(npm root -g)/agent-embassy/skills/embassy-peer" ~/.codex/skills/
 cp -R "$(npm root -g)/agent-embassy/skills/embassy-peer" ~/.claude/skills/
 ```
+
+For a pnpm installation, substitute `pnpm root -g` for `npm root -g` in both copy commands. Embassy does not install the skill automatically.
 
 ## Shell-peer fallback
 
@@ -92,7 +104,7 @@ Any local harness that can run the CLI can join as a `peer-*` route — no plugi
 
 ## Observability
 
-`embassy status` is the one command for "what is going on". It is read-only — it never rescans; `embassy refresh` does — and prints prose in a terminal but the unchanged JSON snapshot when piped or with `--json`, so `embassy status --json | jq .routes` and every script keep working. `--recent <n>` (1–100, default 10) sizes the message list.
+`embassy status` is the one command for "what is going on". It is read-only — it never rescans; `embassy refresh` does — and prints prose in a terminal. Piped or with `--json`, it emits `{ok,command,result}` with the snapshot under `result`: use `embassy status --json | jq .result.routes`. `--recent <n>` (1–100, default 10) sizes the message list.
 
 ```text
 embassy 3.0.0  broker ok · pid 41213 · snapshot just now

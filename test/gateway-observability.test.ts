@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -106,6 +106,13 @@ test("status renders for a terminal and stays byte-identical JSON everywhere els
     gatewayCliExitCodes.ok);
   assert.equal(text(piped), expectedJson);
   assert.deepEqual((JSON.parse(text(piped)) as { result: unknown }).result, SNAPSHOT);
+  const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
+  const selector = readme.match(/embassy status --json \| jq (\.[\w.]+)/)?.[1];
+  assert.equal(selector, ".result.routes");
+  const selected = selector.slice(1).split(".").reduce(
+    (value, key) => value[key], JSON.parse(text(piped)),
+  );
+  assert.deepEqual(selected, SNAPSHOT.routes);
 
   // A terminal gets the human view instead.
   const terminal = capture(true);

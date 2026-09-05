@@ -5,7 +5,7 @@ description: Operate Embassy through current name@host or Claude session-UUID se
 
 # Embassy Peer Gateway
 
-Use only the installed `embassy` CLI. Treat it as the sole facade over the private, local Embassy control socket. Keep this skill repo-scoped; do not install, copy, or modify provider configuration.
+Use only the installed `embassy` CLI. Treat it as the sole facade over the private, local Embassy control socket. This skill is repo-shipped and packaged for the operator to copy into each agent's skill directory; Embassy does not install it automatically. Do not modify provider configuration.
 
 Every `@your-host` below is a placeholder: substitute this machine's own host — the `hostId` on the broker's ready line. `register-codex`, `unregister-codex`, `register-peer`, `unregister-peer` and `await` refuse an alias naming another host and state the one this machine uses; `send` and `reply` accept a federated peer's host, so check those aliases yourself.
 
@@ -46,7 +46,7 @@ List the public snapshot:
 embassy status --json
 ```
 
-The result is the same normalized line it has always been: `schemaVersion`, `generatedAt`, `health`, `connectors`, `availablePeers`, `routes`, `activityEvents`, `messages` (with retained bodies), `accounting`, `alerts`, and `truncation`. Never parse the human rendering; it is for the operator's terminal and its layout is not a contract.
+The successful JSON line is `{ok,command,result}`. The snapshot is under `result`: `schemaVersion`, `generatedAt`, `health`, `connectors`, `availablePeers`, `routes`, `activityEvents`, `messages` (with retained bodies), `accounting`, `alerts`, and `truncation`; read routes as `.result.routes`. Never parse the human rendering; it is for the operator's terminal and its layout is not a contract.
 
 Rescan for Claude sessions:
 

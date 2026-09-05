@@ -106,7 +106,8 @@ Commands:
   check [--to <alias>] [--timeout <s>]
                          Round-trip self-test against a registered peer
   refresh                Rescan for Claude sessions
-  register-codex         Register or succeed a Codex task
+  register-codex --alias <codex-alias> [--succeeds <old-alias>]
+                         Register or succeed a Codex task
   unregister-codex       Unregister the current Codex task
   register-peer --alias <peer-alias> [--token-stdin|--emit-env]
                          Register a universal shell peer
@@ -115,9 +116,10 @@ Commands:
   await --alias <peer-alias> [--token-stdin]
                          Wait for one peer message and acknowledge stdout
   peer-stdio             Serve the bounded federation protocol on stdin/stdout
-  send                   Send stdin to a route with --to, or to a conversation
-                         you belong to with --conversation; a discovered Claude
-                         session's route installs on its first send
+  send --from <own-alias> --to <alias-or-uuid> [--expects-reply]
+  send --from <own-alias> --conversation <token>
+                         Exactly one of --to and --conversation; body from stdin.
+                         A discovered Claude session's route installs on first send
   reply                  Deprecated alias for send --conversation
   delivery-status        Read a delivery token
   wait-delivery          Wait for terminal delivery status
@@ -187,8 +189,12 @@ const CLI_HINT = {
     "no current route answers to that name. A Claude session is addressed by its live name: run embassy refresh, then read embassy status for the name it has now.",
   aliasCollision:
     "the alias names more than one live session; rename one, or address the session by UUID with --to <session-uuid>.",
-  workspaceOverlap:
-    "that session's workspace contains the gateway state directory; move one so they no longer overlap, then retry.",
+  workspaceBroad:
+    "that session's workspace is a filesystem root or overlaps a temporary root; reopen the session in a specific project directory outside temporary roots.",
+  workspaceUnsafe:
+    "the session workspace or user home failed directory checks; verify access, ownership, permissions and canonical, non-symlink paths before retrying.",
+  workspaceUnattested:
+    "the session workspace has not been validated for this route; report CLAUDE_PEER_WORKSPACE_UNATTESTED with the session's current alias.",
   callerAliasMismatch:
     "--from must be the sending session's own alias; read the name embassy status shows for this session.",
   targetChanged:
@@ -658,7 +664,9 @@ function refusalHint(
   const reason = (result as { reason?: unknown }).reason;
   const from = request.method === "send" ? request.params.fromAlias : undefined;
   if (reason === "PEER_ALIAS_COLLISION") return { hint: "aliasCollision" };
-  if (typeof reason === "string" && reason.startsWith("CLAUDE_PEER_WORKSPACE_")) return { hint: "workspaceOverlap" };
+  if (reason === "CLAUDE_PEER_WORKSPACE_BROAD") return { hint: "workspaceBroad" };
+  if (reason === "CLAUDE_PEER_WORKSPACE_UNSAFE") return { hint: "workspaceUnsafe" };
+  if (reason === "CLAUDE_PEER_WORKSPACE_UNATTESTED") return { hint: "workspaceUnattested" };
   // A Codex task with no registration under its alias — every task, after a
   // private state reset — is told to register; a registration held by another
   // task is a genuine mismatch with its own remedy; a conversation answered
