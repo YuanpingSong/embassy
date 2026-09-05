@@ -2771,6 +2771,34 @@ const healthySendRequest = (async ({ request }: { request: { method: string } })
   return { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true, result: { status: "ok" } };
 }) as NonNullable<GatewayCliDependencies["sendRequest"]>;
 
+test("service success transcript keeps complete output bytes and launchctl order", async () => {
+  const { home, stateDir, plistPath } = await serviceFixture();
+  const launchd = cliFakeLaunchd();
+  const target = `gui/${process.getuid!()}/${SERVICE_AGENT_LABEL}`;
+  const base = { label: SERVICE_AGENT_LABEL, plistPath,
+    logPath: path.join(home, "Library", "Logs", "agent-embassy", "broker.log") };
+  const results = [
+    { subcommand: "install", ...base, capturedEnv: ["EMBASSY_STATE_DIR"],
+      health: { ok: true, result: { status: "ok" }, elapsedMs: 0 } },
+    { subcommand: "status", ...base, plistExists: true, pid: 4242, launchdState: "running",
+      state: "loaded", note: "The broker is loaded as a launchd agent." },
+    { subcommand: "uninstall", ...base },
+  ];
+  for (const result of results) {
+    const stdout = capture(), stderr = capture();
+    assert.equal(await runGatewayCli(["service", result.subcommand], {
+      env: { EMBASSY_STATE_DIR: stateDir }, stdout, stderr,
+      serviceHomeDir: () => home, probeHostLease: freeHostLease, runLaunchctl: launchd.run,
+      validateControlSocket: async () => undefined, sendRequest: healthySendRequest,
+      ...sleepDrivenClock(),
+    }), 0);
+    assert.equal(stdout.chunks.join(""), `${JSON.stringify({ ok: true, command: "service", result })}\n`);
+    assert.equal(stderr.chunks.join(""), "");
+  }
+  assert.deepEqual(launchd.calls, [["print", target], ["bootstrap", `gui/${process.getuid!()}`, plistPath],
+    ["print", target], ["print", target], ["bootout", target], ["print", target]]);
+});
+
 test("service install writes a real plist under a temp home, drives the fake launchctl runner, and reports health", async () => {
   const { home, stateDir, plistPath } = await serviceFixture();
   const uid = process.getuid!();

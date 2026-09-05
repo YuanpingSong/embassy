@@ -1125,6 +1125,95 @@ async function runGatewayCheck(options: GatewayCheckOptions): Promise<number> {
 }
 
 /** Run one command; foreground runners own and release their signal handlers. */
+async function runServiceCommand(
+  args: readonly string[],
+  dependencies: GatewayCliDependencies,
+  loadIdentity: () => Promise<{ config: GatewayConfig }>,
+): Promise<number> {
+  const command = "service";
+  const env = dependencies.env ?? process.env;
+  const stdout = dependencies.stdout ?? process.stdout, stderr = dependencies.stderr ?? process.stderr;
+  const sendRequest = dependencies.sendRequest ?? sendGatewayControlRequest;
+  const validateSocket = dependencies.validateControlSocket ?? validatePrivateGatewayControlSocket;
+  const success = (result: unknown): void => {
+    stdout.write(serializedOutput({ ok: true, command, result }));
+  };
+  const subcommand = args[0];
+  if (args.length !== 1) fault();
+  if (subcommand !== "install" && subcommand !== "uninstall" && subcommand !== "status") fault();
+  // Identity and the state directory are validated before the first
+  // launchd side effect. Loading them afterwards meant a missing
+  // inventory or an unusable state root exited 2 "request rejected"
+  // while the agent was already bootstrapped and looping.
+  const config = subcommand === "install" ? (await loadIdentity()).config : undefined;
+  const serviceDeps: ServiceAgentDependencies = {
+    homeDir: (dependencies.serviceHomeDir ?? (() => userInfo().homedir))(),
+    runLaunchctl: dependencies.runLaunchctl ?? defaultRunLaunchctl,
+    env, execPath: process.execPath, cliPath: fileURLToPath(import.meta.url),
+    uid: process.getuid!(),
+    delay: dependencies.delay ?? defaultDelay, now: dependencies.now ?? monotonicNow,
+    probeHostLease: dependencies.probeHostLease ?? defaultProbeHostLease,
+  };
+  try {
+    if (subcommand === "install") {
+      const installed = await installServiceAgent(serviceDeps);
+      const health = await pollServiceHealth(config!, sendRequest, validateSocket,
+        dependencies.delay ?? defaultDelay, dependencies.now ?? monotonicNow);
+      if (!health.ok) {
+        // The agent stays installed either way: this is a report about
+        // the broker, not an install failure, so nothing is rolled back.
+        const elapsed = (health.elapsedMs / 1000).toFixed(1);
+        const decisive = SERVICE_HEALTH_DECISIVE.get(health.lastObserved);
+        writeFailure(stdout, stderr, command, "SERVICE_HEALTH_UNAVAILABLE", {
+          retryable: decisive?.retryable ?? true, kind: decisive?.kind ?? "unavailable",
+          detail: { lastObserved: health.lastObserved },
+        });
+        stderr.write(decisive === undefined
+          ? `[embassy] Installed, but the broker did not answer within ${elapsed} s; last observed ${health.lastObserved}. Run \`embassy service status\` or \`embassy health\`; log: ${installed.logPath}.\n`
+          : `[embassy] Installed, but the broker answered ${health.lastObserved} after ${elapsed} s. Run \`embassy health\` to diagnose it; log: ${installed.logPath}.\n`);
+        if (decisive?.hint !== undefined) stderr.write(hintLine(decisive.hint, env));
+        return decisive?.exitCode ?? gatewayCliExitCodes.unavailable;
+      }
+      success({ subcommand, ...installed, health });
+      return gatewayCliExitCodes.ok;
+    }
+    if (subcommand === "uninstall") {
+      success({ subcommand, ...(await uninstallServiceAgent(serviceDeps)) });
+      return gatewayCliExitCodes.ok;
+    }
+    const status = await serviceAgentStatus(serviceDeps);
+    success({ subcommand, ...status });
+    if (status.state !== "unknown") return gatewayCliExitCodes.ok;
+    stderr.write(fixedStderr("unavailable"));
+    stderr.write(`[embassy] ${status.note}${status.launchctlStderr === undefined ? "" : ` launchctl: ${status.launchctlStderr}`}\n`);
+    return gatewayCliExitCodes.unavailable;
+  } catch (error) {
+    // launchctl's own stderr and the instance lease's own message are the
+    // whole value of these failures; the generic handler below discards
+    // the message and reports only the code. A genuine filesystem failure
+    // on this path (an unreadable plist, an undeletable one) is a real,
+    // recoverable service failure, not an INTERNAL_ERROR — but only an
+    // errno-shaped one. A string `code` alone would also match CliFault
+    // and the lease's own spawn failures, relabelling faults that already
+    // carry a truer code of their own.
+    const errno = error !== null && typeof error === "object" &&
+      (typeof (error as { errno?: unknown }).errno === "number" ||
+        typeof (error as { syscall?: unknown }).syscall === "string");
+    if (!(error instanceof BridgeError) && !(errno && error instanceof Error)) throw error;
+    const failure = error instanceof BridgeError ? error : new BridgeError(
+      "SERVICE_AGENT_FILESYSTEM_FAILED",
+      `The service command could not complete: ${boundedServiceDetail((error as Error).message)}`,
+      true);
+    writeFailure(stdout, stderr, command, failure.code, {
+      retryable: failure.recoverable,
+      kind: failure.code === "SERVICE_AGENT_PATH_UNSAFE" ? "unsafe"
+        : failure.recoverable ? "unavailable" : "input",
+    });
+    stderr.write(`[embassy] ${failure.message}\n`);
+    return failure.recoverable ? gatewayCliExitCodes.unavailable : gatewayCliExitCodes.invalidInput;
+  }
+}
+
 export async function runGatewayCli(
   argv: readonly string[] = process.argv.slice(2),
   dependencies: GatewayCliDependencies = {},
@@ -1191,82 +1280,7 @@ export async function runGatewayCli(
         return gatewayCliExitCodes.unavailable;
       }
     }
-    if (command === "service") {
-      const subcommand = args[0];
-      if (args.length !== 1) fault();
-      if (subcommand !== "install" && subcommand !== "uninstall" && subcommand !== "status") fault();
-      // Identity and the state directory are validated before the first
-      // launchd side effect. Loading them afterwards meant a missing
-      // inventory or an unusable state root exited 2 "request rejected"
-      // while the agent was already bootstrapped and looping.
-      const config = subcommand === "install" ? (await loadIdentity()).config : undefined;
-      const serviceDeps: ServiceAgentDependencies = {
-        homeDir: (dependencies.serviceHomeDir ?? (() => userInfo().homedir))(),
-        runLaunchctl: dependencies.runLaunchctl ?? defaultRunLaunchctl,
-        env, execPath: process.execPath, cliPath: fileURLToPath(import.meta.url),
-        uid: process.getuid!(),
-        delay: dependencies.delay ?? defaultDelay, now: dependencies.now ?? monotonicNow,
-        probeHostLease: dependencies.probeHostLease ?? defaultProbeHostLease,
-      };
-      try {
-        if (subcommand === "install") {
-          const installed = await installServiceAgent(serviceDeps);
-          const health = await pollServiceHealth(config!, sendRequest, validateSocket,
-            dependencies.delay ?? defaultDelay, dependencies.now ?? monotonicNow);
-          if (!health.ok) {
-            // The agent stays installed either way: this is a report about
-            // the broker, not an install failure, so nothing is rolled back.
-            const elapsed = (health.elapsedMs / 1000).toFixed(1);
-            const decisive = SERVICE_HEALTH_DECISIVE.get(health.lastObserved);
-            writeFailure(stdout, stderr, command, "SERVICE_HEALTH_UNAVAILABLE", {
-              retryable: decisive?.retryable ?? true, kind: decisive?.kind ?? "unavailable",
-              detail: { lastObserved: health.lastObserved },
-            });
-            stderr.write(decisive === undefined
-              ? `[embassy] Installed, but the broker did not answer within ${elapsed} s; last observed ${health.lastObserved}. Run \`embassy service status\` or \`embassy health\`; log: ${installed.logPath}.\n`
-              : `[embassy] Installed, but the broker answered ${health.lastObserved} after ${elapsed} s. Run \`embassy health\` to diagnose it; log: ${installed.logPath}.\n`);
-            if (decisive?.hint !== undefined) stderr.write(hintLine(decisive.hint, env));
-            return decisive?.exitCode ?? gatewayCliExitCodes.unavailable;
-          }
-          success({ subcommand, ...installed, health });
-          return gatewayCliExitCodes.ok;
-        }
-        if (subcommand === "uninstall") {
-          success({ subcommand, ...(await uninstallServiceAgent(serviceDeps)) });
-          return gatewayCliExitCodes.ok;
-        }
-        const status = await serviceAgentStatus(serviceDeps);
-        success({ subcommand, ...status });
-        if (status.state !== "unknown") return gatewayCliExitCodes.ok;
-        stderr.write(fixedStderr("unavailable"));
-        stderr.write(`[embassy] ${status.note}${status.launchctlStderr === undefined ? "" : ` launchctl: ${status.launchctlStderr}`}\n`);
-        return gatewayCliExitCodes.unavailable;
-      } catch (error) {
-        // launchctl's own stderr and the instance lease's own message are the
-        // whole value of these failures; the generic handler below discards
-        // the message and reports only the code. A genuine filesystem failure
-        // on this path (an unreadable plist, an undeletable one) is a real,
-        // recoverable service failure, not an INTERNAL_ERROR — but only an
-        // errno-shaped one. A string `code` alone would also match CliFault
-        // and the lease's own spawn failures, relabelling faults that already
-        // carry a truer code of their own.
-        const errno = error !== null && typeof error === "object" &&
-          (typeof (error as { errno?: unknown }).errno === "number" ||
-            typeof (error as { syscall?: unknown }).syscall === "string");
-        if (!(error instanceof BridgeError) && !(errno && error instanceof Error)) throw error;
-        const failure = error instanceof BridgeError ? error : new BridgeError(
-          "SERVICE_AGENT_FILESYSTEM_FAILED",
-          `The service command could not complete: ${boundedServiceDetail((error as Error).message)}`,
-          true);
-        writeFailure(stdout, stderr, command, failure.code, {
-          retryable: failure.recoverable,
-          kind: failure.code === "SERVICE_AGENT_PATH_UNSAFE" ? "unsafe"
-            : failure.recoverable ? "unavailable" : "input",
-        });
-        stderr.write(`[embassy] ${failure.message}\n`);
-        return failure.recoverable ? gatewayCliExitCodes.unavailable : gatewayCliExitCodes.invalidInput;
-      }
-    }
+    if (command === "service") return await runServiceCommand(args, dependencies, loadIdentity);
     if (command === "status" || command === "watch" || command === "check") {
       // Options are parsed before anything is loaded or contacted, so an
       // unknown flag is a flat argument fault with no side effect at all.
