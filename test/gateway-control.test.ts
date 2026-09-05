@@ -1810,6 +1810,45 @@ test("client marks only lost mutation responses ambiguous after write starts", a
   assert.equal((await lstat(stateDir)).isDirectory(), true);
 });
 
+test("frame failures precede errno and started mutations remain ambiguous", async () => {
+  const { socketPath } = await privateState();
+  const createConnection = net.createConnection;
+  const cases = [
+    ["timeout", undefined, "CONTROL_TIMEOUT"],
+    ["data", Buffer.alloc(257), "CONTROL_RESPONSE_TOO_LARGE"],
+    ["end", undefined, "CONTROL_CONNECTION_CLOSED"],
+    ...[["EPERM", "CONTROL_CONNECT_DENIED"], ["EACCES", "CONTROL_CONNECT_DENIED"],
+      ["ENOENT", "CONTROL_SOCKET_MISSING"], ["ECONNREFUSED", "CONTROL_LISTENER_UNAVAILABLE"],
+      ["EOTHER", "CONTROL_CONNECT_FAILED"]].map(([code, expected]) =>
+      ["error", Object.assign(new Error("synthetic connect error"), { code }), expected]),
+  ] as const;
+  try {
+    for (const started of [false, true]) for (const mutation of [false, true]) {
+      for (const [event, payload, beforeCode] of cases) {
+        net.createConnection = (() => {
+          const socket = new net.Socket();
+          socket.write = (() => true) as typeof socket.write;
+          queueMicrotask(() => {
+            if (started) socket.emit("connect");
+            socket.emit(String(event), payload);
+            if (event !== "error") socket.emit("error", Object.assign(new Error("later errno"), { code: "EACCES" }));
+          });
+          return socket;
+        }) as typeof net.createConnection;
+        const request = mutation
+          ? { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "send" as const,
+            params: { fromAlias: "codex-main@this-mac", threadId: THREAD_ID, toAlias: "advisor@this-mac", text: "fixture" } }
+          : { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "health" as const, params: {} };
+        const expected = started && mutation ? "CONTROL_OUTCOME_AMBIGUOUS"
+          : started && event === "error" ? "CONTROL_CONNECT_FAILED" : beforeCode;
+        await assert.rejects(sendGatewayControlRequest({ socketPath, request, maxResponseBytes: 256 }),
+          (error: unknown) => error instanceof GatewayControlTransportError &&
+            error.code === expected && error.ambiguous === (started && mutation));
+      }
+    }
+  } finally { net.createConnection = createConnection; }
+});
+
 test("client distinguishes denied, missing, and unserved control sockets", async () => {
   const { socketPath } = await privateState();
   const request = { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION,

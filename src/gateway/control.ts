@@ -1053,13 +1053,22 @@ export async function sendGatewayControlRequest<M extends GatewayControlMethod>(
     }, (error: unknown) => {
       const kind = error instanceof FrameFault ? error.kind : "error";
       const systemCode = !writeStarted && error instanceof FrameFault ? error.systemCode : undefined;
-      const code = kind === "timeout" ? "CONTROL_TIMEOUT" :
-        kind === "too_large" ? "CONTROL_RESPONSE_TOO_LARGE" :
-          kind === "closed" ? "CONTROL_CONNECTION_CLOSED" :
-            systemCode === "EPERM" || systemCode === "EACCES"
-              ? "CONTROL_CONNECT_DENIED" : systemCode === "ENOENT"
-                ? "CONTROL_SOCKET_MISSING" : systemCode === "ECONNREFUSED"
-                  ? "CONTROL_LISTENER_UNAVAILABLE" : "CONTROL_CONNECT_FAILED";
+      let code: string;
+      if (kind === "timeout") {
+        code = "CONTROL_TIMEOUT";
+      } else if (kind === "too_large") {
+        code = "CONTROL_RESPONSE_TOO_LARGE";
+      } else if (kind === "closed") {
+        code = "CONTROL_CONNECTION_CLOSED";
+      } else if (systemCode === "EPERM" || systemCode === "EACCES") {
+        code = "CONTROL_CONNECT_DENIED";
+      } else if (systemCode === "ENOENT") {
+        code = "CONTROL_SOCKET_MISSING";
+      } else if (systemCode === "ECONNREFUSED") {
+        code = "CONTROL_LISTENER_UNAVAILABLE";
+      } else {
+        code = "CONTROL_CONNECT_FAILED";
+      }
       fail(controlTransportError(code));
     });
   });
