@@ -758,8 +758,8 @@ export class GatewayService {
       const stale = runtime.health === "healthy" &&
         (age === undefined || age > CONNECTOR_OBSERVATION_STALE_AFTER_MS);
       const socketHeld = runtime.adapter.identity.provider === "codex" && this.managedCodexSocketHeldOutside;
-      const connectorCode = stale ? "CONNECTOR_OBSERVATION_STALE" : runtime.safeErrorCode ??
-        (socketHeld ? "MANAGED_CODEX_UNAVAILABLE" : undefined);
+      const connectorCode = runtime.safeErrorCode ??
+        (socketHeld ? "MANAGED_CODEX_UNAVAILABLE" : stale ? "CONNECTOR_OBSERVATION_STALE" : undefined);
       return {
         provider: runtime.adapter.identity.provider,
         host: runtime.adapter.identity.hostId,

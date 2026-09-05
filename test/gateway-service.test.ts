@@ -1226,6 +1226,31 @@ test("idle connector age is informational while a real provider failure degrades
   } finally { await subject.close(); }
 });
 
+test("named connector faults outrank stale observation age", async () => {
+  for (const fault of ["socket", "runtime"] as const) {
+    const provider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
+    const subject = await fixture([provider, new FakeProvider({ provider: "codex", hostId: "this-mac" })],
+      { managedCodexSocketHeld: async () => fault === "socket", seed: async (store) => store.registerRoute(claude) });
+    try {
+      if (fault === "runtime") {
+        provider.callbacks!.onRouteState({ route: claude.binding, state: "unobserved",
+          observedAt: subject.clock.now().toISOString(), safeErrorCode: "CLAUDE_DISCOVERY_UNAVAILABLE" });
+        await eventually(async () => (await subject.handlers.health()).status === "degraded");
+        await subject.handlers.refreshDiscovery();
+        provider.discoverClaudePeers = async () => { throw new Error("discovery unavailable"); };
+        assert.equal((await subject.handlers.refreshDiscovery()).accepted, false);
+      }
+      subject.clock.advance(CONNECTOR_OBSERVATION_STALE_AFTER_MS + 1);
+      const snapshot = await subject.service.snapshot();
+      const connector = snapshot.connectors.find((row) => row.provider === (fault === "socket" ? "codex" : "claude"))!;
+      assert.equal(snapshot.routes.some((row) => row.provider === "codex"), false);
+      assert.equal(connector.safeErrorCode, fault === "socket" ? "MANAGED_CODEX_UNAVAILABLE" : "CLAUDE_DISCOVERY_UNAVAILABLE");
+      assert.equal(snapshot.health, "degraded");
+      assert.equal((await subject.handlers.health()).status, "degraded");
+    } finally { await subject.close(); }
+  }
+});
+
 test("native Claude STEER text reaches a peer mailbox only through the ordinary lane", async () => {
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const mailbox = new LocalPeerMailboxProvider({ hostId: "this-mac", receiptTimeoutMs: 10_000,
@@ -2684,7 +2709,7 @@ test("a foreign managed-socket holder degrades Codex with MANAGED_CODEX_UNAVAILA
     await eventually(async () => (await connector()).safeErrorCode === "MANAGED_CODEX_UNAVAILABLE");
     subject.clock.advance(CONNECTOR_OBSERVATION_STALE_AFTER_MS + 1);
     assert.equal((await connector()).health, "degraded");
-    assert.equal((await connector()).safeErrorCode, "CONNECTOR_OBSERVATION_STALE");
+    assert.equal((await connector()).safeErrorCode, "MANAGED_CODEX_UNAVAILABLE");
     assert.equal(Object.hasOwn(await connector(), "codexDoctor"), false);
   } finally {
     await subject.close();
