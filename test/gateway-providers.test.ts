@@ -1185,6 +1185,182 @@ test("stateless Codex dispatch authorizes exact raw and framed evidence", async 
   await provider.close();
 });
 
+test("rejected Codex acceptance cleanup preserves a competing accepted turn", async () => {
+  const { observed, operation, provider } = createCodexProviderFixture();
+  await provider.initialize(observed.callbacks);
+  const firstInput = codexDispatchInput(provider, { text: "first raw body" });
+  const secondInput = codexDispatchInput(provider, {
+    attemptId: "attempt_codex_start_2",
+    messageId: "msg_00000000-0000-7000-8000-000000000704",
+    text: "second raw body",
+  });
+  observeCodexFixture(provider, firstInput);
+  const order: string[] = [];
+  const evidence: Parameters<
+    GatewayAdapterDispatchInput["authorizeWrite"]
+  >[0][] = [];
+  let enteredFirst!: () => void;
+  const firstEntered = new Promise<void>((resolve) => {
+    enteredFirst = resolve;
+  });
+  let rejectFirst!: () => void;
+  const firstRejected = new Promise<void>((resolve) => {
+    rejectFirst = resolve;
+  });
+  let acceptedSecond!: () => void;
+  const secondAccepted = new Promise<void>((resolve) => {
+    acceptedSecond = resolve;
+  });
+
+  operation.handler = async (current) => {
+    const input = current.attemptId === firstInput.attemptId
+      ? firstInput
+      : secondInput;
+    assert.equal(
+      current.text,
+      composeProvenanceEnvelope({
+        body: input.text,
+        conversationId: input.conversationId,
+        recipientProvider: "codex",
+        sourceAlias: input.sourceAlias,
+        sourceProvider: input.sourceProvider,
+        targetAlias: input.targetAlias,
+      }),
+    );
+    await current.authorizeWrite({
+      attemptId: current.attemptId,
+      bodyBytes: Buffer.byteLength(current.text),
+      frameBytes: input === firstInput ? 701 : 702,
+      kind: "codex_turn_start",
+      sha256: (input === firstInput ? "a" : "b").repeat(64),
+    });
+    try {
+      await current.onAccepted({
+        attemptId: current.attemptId,
+        turnId: `turn_${current.attemptId}`,
+        steer: async (steer) => {
+          await steer.authorizeWrite({
+            attemptId: steer.attemptId,
+            bodyBytes: Buffer.byteLength(steer.text),
+            frameBytes: 803,
+            kind: "codex_turn_steer",
+            sha256: "c".repeat(64),
+          });
+          return {
+            attemptId: steer.attemptId,
+            outcome: "delivered",
+            phase: "terminal",
+            replyCode: "REPLY_UNAVAILABLE",
+            replyText: null,
+            state: "terminal",
+          };
+        },
+      });
+    } catch {
+      order.push("first-cleanup");
+      return {
+        attemptId: current.attemptId,
+        cleanupConfirmed: true,
+        phase: "accepted",
+        safeErrorCode: "ACCEPTANCE_UNCONFIRMED",
+        state: "unconfirmed",
+      };
+    }
+    return await new Promise<StatelessCodexOperationResult>((resolve) =>
+      current.signal?.addEventListener("abort", () => resolve({
+        attemptId: current.attemptId,
+        cleanupConfirmed: true,
+        phase: "clean",
+        safeErrorCode: "TRANSPORT_CLOSED",
+        state: "failed",
+      }), { once: true }));
+  };
+
+  const first = provider.dispatch({
+    ...firstInput,
+    authorizeWrite: async (value) => {
+      evidence.push(value);
+      return true;
+    },
+    onAccepted: async () => {
+      order.push("first-enter");
+      enteredFirst();
+      await firstRejected;
+      order.push("first-reject");
+      throw new Error("synthetic acceptance loss");
+    },
+  });
+  await firstEntered;
+  const second = provider.dispatch({
+    ...secondInput,
+    authorizeWrite: async (value) => {
+      evidence.push(value);
+      return true;
+    },
+    onAccepted: async () => {
+      order.push("second-accepted");
+      acceptedSecond();
+    },
+  });
+  await secondAccepted;
+  rejectFirst();
+  assert.deepEqual(await first, {
+    state: "unconfirmed",
+    safeErrorCode: "ACCEPTANCE_UNCONFIRMED",
+  });
+  assert.deepEqual(order, [
+    "first-enter",
+    "second-accepted",
+    "first-reject",
+    "first-cleanup",
+  ]);
+  assert.equal(operation.inputs[1]?.signal?.aborted, false);
+
+  const steer = codexDispatchInput(provider, {
+    attemptId: "attempt_codex_steer_competing",
+    messageId: "msg_00000000-0000-7000-8000-000000000705",
+    steer: true,
+    text: "STEER: competing turn survives",
+    authorizeWrite: async (value) => {
+      evidence.push(value);
+      return true;
+    },
+  });
+  assert.deepEqual(await provider.dispatch(steer), { state: "delivered" });
+  assert.deepEqual(evidence, [
+    {
+      attemptId: firstInput.attemptId,
+      bodyBytes: Buffer.byteLength(firstInput.text),
+      bodySha256: createHash("sha256").update(firstInput.text).digest("hex"),
+      frameBytes: 701,
+      kind: "codex_turn_start",
+      sha256: "a".repeat(64),
+    },
+    {
+      attemptId: secondInput.attemptId,
+      bodyBytes: Buffer.byteLength(secondInput.text),
+      bodySha256: createHash("sha256").update(secondInput.text).digest("hex"),
+      frameBytes: 702,
+      kind: "codex_turn_start",
+      sha256: "b".repeat(64),
+    },
+    {
+      attemptId: steer.attemptId,
+      bodyBytes: Buffer.byteLength(steer.text),
+      bodySha256: createHash("sha256").update(steer.text).digest("hex"),
+      frameBytes: 803,
+      kind: "codex_turn_steer",
+      sha256: "c".repeat(64),
+    },
+  ]);
+  await provider.close();
+  assert.equal(operation.inputs[1]?.signal?.aborted, true);
+  assert.deepEqual(await second, {
+    state: "failed",
+    safeErrorCode: "TRANSPORT_CLOSED",
+  });
+});
+
 test("Codex STEER uses only the exact accepted registration and raw body evidence", async () => {
   const { observed, operation, provider } = createCodexProviderFixture();
   await provider.initialize(observed.callbacks);

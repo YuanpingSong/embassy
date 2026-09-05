@@ -1125,37 +1125,47 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
       };
     }
 
-    if (input.steer === true) {
-      const active = this.activeTurns.get(input.binding.registrationId);
-      if (
-        active === undefined ||
-        active.alias !== input.targetAlias ||
-        active.routeHandle !== input.binding.routeHandle
-      ) {
-        return { state: "deferred", safeErrorCode: "ROUTE_BUSY" };
-      }
-      const steering = active.accepted.steer({
-        attemptId: input.attemptId,
-        authorizeWrite: async (evidence) =>
-          await input.authorizeWrite({
-            attemptId: input.attemptId,
-            kind: "codex_turn_steer",
-            bodyBytes: Buffer.byteLength(input.text, "utf8"),
-            bodySha256: createHash("sha256").update(input.text).digest("hex"),
-            frameBytes: evidence.frameBytes,
-            sha256: evidence.sha256,
-          }),
-        deadlineAt: input.deadlineAt,
-        text: content,
-      });
-      this.inFlightOperations.add(steering);
-      try {
-        return mapCodexSteerResult(await steering);
-      } finally {
-        this.inFlightOperations.delete(steering);
-      }
-    }
+    return input.steer === true
+      ? this.dispatchSteer(input, content)
+      : this.dispatchStart(input, content);
+  }
 
+  private async dispatchSteer(
+    input: GatewayAdapterDispatchInput, content: string,
+  ): Promise<GatewayAdapterDispatchResult> {
+    const active = this.activeTurns.get(input.binding.registrationId);
+    if (
+      active === undefined ||
+      active.alias !== input.targetAlias ||
+      active.routeHandle !== input.binding.routeHandle
+    ) {
+      return { state: "deferred", safeErrorCode: "ROUTE_BUSY" };
+    }
+    const steering = active.accepted.steer({
+      attemptId: input.attemptId,
+      authorizeWrite: async (evidence) =>
+        await input.authorizeWrite({
+          attemptId: input.attemptId,
+          kind: "codex_turn_steer",
+          bodyBytes: Buffer.byteLength(input.text, "utf8"),
+          bodySha256: createHash("sha256").update(input.text).digest("hex"),
+          frameBytes: evidence.frameBytes,
+          sha256: evidence.sha256,
+        }),
+      deadlineAt: input.deadlineAt,
+      text: content,
+    });
+    this.inFlightOperations.add(steering);
+    try {
+      return mapCodexSteerResult(await steering);
+    } finally {
+      this.inFlightOperations.delete(steering);
+    }
+  }
+
+  private async dispatchStart(
+    input: GatewayAdapterDispatchInput, content: string,
+  ): Promise<GatewayAdapterDispatchResult> {
     if (this.activeTurns.has(input.binding.registrationId)) {
       return { state: "deferred", safeErrorCode: "ROUTE_BUSY" };
     }
