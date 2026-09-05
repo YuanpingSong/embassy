@@ -6,8 +6,7 @@ import { test } from "node:test";
 
 import { BridgeError } from "../src/errors.js";
 import type { AttestedClaudePeerRuntime } from "../src/gateway/claude-runtime.js";
-import { LocalCodexTransportError, managedCodexControlSocketPath,
-  type LocalCodexTransportFactory } from "../src/gateway/codex-local-transport.js";
+import { LocalCodexTransportError, managedCodexControlSocketPath } from "../src/gateway/codex-local-transport.js";
 import type { StatelessCodexOperationTransport } from "../src/gateway/codex-stateless-transport.js";
 import { loadGatewayConfig as loadGatewayConfigBase } from "../src/gateway/config.js";
 import { loadGatewayNodeInventory } from "../src/gateway/federation-nodes.js";
@@ -78,22 +77,6 @@ function liveSnapshotProvider(
     dispatch: async () => ({ state: "deferred", safeErrorCode: "ROUTE_BUSY" }),
     close: async () => undefined,
   };
-}
-
-function factory(
-  onClose: () => void,
-  appServerVersion = SYNTHETIC_CODEX_VERSION,
-  availabilityFailure?: "CODEX_CONTROL_SOCKET_UNAVAILABLE",
-): LocalCodexTransportFactory {
-  return {
-    appServerVersion,
-    ...(availabilityFailure === undefined ? {} : { availabilityFailure }),
-    endpointGeneration: "synthetic_endpoint_generation",
-    hostId: "this-mac",
-    protocol: "codex-app-server",
-    protocolVersion: appServerVersion,
-    close: async () => onClose(),
-  } as unknown as LocalCodexTransportFactory;
 }
 
 function statelessOperation(): StatelessCodexOperationTransport {
@@ -258,11 +241,13 @@ test("foreground assembly wires the local providers and the managed-socket holde
       createCodexOperation: (options) => {
         events.push("create-codex-operation");
         codexOperationOptions = options as unknown as Record<string, unknown>;
-        return statelessOperation();
-      },
-      createCodexObservationFactory: async () => {
-        codexObservationAttempts += 1;
-        return factory(() => undefined);
+        return {
+          ...statelessOperation(),
+          observe: async () => {
+            codexObservationAttempts += 1;
+            return { state: "idle" };
+          },
+        };
       },
       createCodexProvider: (options) => {
         events.push("create-codex");
@@ -314,10 +299,8 @@ test("foreground assembly wires the local providers and the managed-socket holde
     "hostId",
     "nodeInventory",
     "operation",
-    "createObservationFactory",
   ]);
   assert.equal(codexProviderOptions?.hostId, "this-mac");
-  assert.equal(typeof codexProviderOptions?.createObservationFactory, "function");
   assert.equal(codexObservationAttempts, 0);
   assert.equal(serviceOptions?.store, store);
   assert.deepEqual(serviceOptions?.config, config);
@@ -411,9 +394,11 @@ test("a real boot snapshot passes the strict status client and degrades Codex on
       acquireInstanceLease: async () => instanceLease(() => undefined),
       attestClaudeRuntime: async () => runtime(),
       createClaudeProvider: () => liveSnapshotProvider("claude"),
-      createCodexOperation: () => statelessOperation(),
-      createCodexObservationFactory: async () =>
-        assert.fail("startup must not attach to a live App Server"),
+      createCodexOperation: () => ({
+        ...statelessOperation(),
+        observe: async () =>
+          assert.fail("startup must not attach to a live App Server"),
+      }),
       createCodexProvider: () => liveSnapshotProvider("codex"),
       resolveCodexInstallation: async () => {
         throw new LocalCodexTransportError("MANAGED_CODEX_UNAVAILABLE");
@@ -435,12 +420,12 @@ test("assembly constructs inert operations and keeps observation attestation laz
   const config = loadGatewayConfig(env);
   const abort = new AbortController();
   const signals = signalHarness();
-  const observer = factory(() => undefined);
+  const observation = { state: "idle" } as const;
   let operationCalls = 0;
   let observationCalls = 0;
   let providerOptions:
     | {
-        createObservationFactory?: () => Promise<LocalCodexTransportFactory>;
+        operation: StatelessCodexOperationTransport;
       }
     | undefined;
 
@@ -460,12 +445,14 @@ test("assembly constructs inert operations and keeps observation attestation laz
       createStore: () => inertStore(config),
       createCodexOperation: () => {
         operationCalls += 1;
-        return statelessOperation();
-      },
-      createCodexObservationFactory: async (options) => {
-        observationCalls += 1;
-        assert.equal(options.hostId, "this-mac");
-        return observer;
+        return {
+          ...statelessOperation(),
+          observe: async (route) => {
+            observationCalls += 1;
+            assert.equal(route.hostId, "this-mac");
+            return observation;
+          },
+        };
       },
       createCodexProvider: (options) => {
         providerOptions = options;
@@ -475,9 +462,14 @@ test("assembly constructs inert operations and keeps observation attestation laz
         start: async () => {
           assert.equal(operationCalls, 1);
           assert.equal(observationCalls, 0);
-          const observe = providerOptions?.createObservationFactory;
-          assert.notEqual(observe, undefined);
-          assert.strictEqual(await observe!(), observer);
+          const operation = providerOptions?.operation;
+          assert.notEqual(operation, undefined);
+          assert.strictEqual(await operation!.observe({
+            alias: "codex-main@this-mac",
+            hostId: "this-mac",
+            registrationId: "reg_observation_fixture",
+            threadId: "00000000-0000-7000-8000-000000000701",
+          }), observation);
         },
         close: async () => undefined,
       }),
@@ -498,7 +490,7 @@ test("Codex startup performs no installation resolution or App Server I/O", asyn
   const abort = new AbortController();
   const signals = signalHarness();
   let installationResolutions = 0;
-  let observationFactories = 0;
+  let observationAttempts = 0;
 
   await runGatewayServer(
     {
@@ -514,11 +506,13 @@ test("Codex startup performs no installation resolution or App Server I/O", asyn
       attestClaudeRuntime: async () => runtime(),
       createClaudeProvider: () => provider(() => undefined),
       createStore: () => inertStore(config),
-      createCodexOperation: () => statelessOperation(),
-      createCodexObservationFactory: async () => {
-        observationFactories += 1;
-        return factory(() => undefined);
-      },
+      createCodexOperation: () => ({
+        ...statelessOperation(),
+        observe: async () => {
+          observationAttempts += 1;
+          return { state: "idle" };
+        },
+      }),
       resolveCodexInstallation: async () => {
         installationResolutions += 1;
         throw new Error("diagnostic resolver must remain lazy");
@@ -532,7 +526,7 @@ test("Codex startup performs no installation resolution or App Server I/O", asyn
   );
 
   assert.equal(installationResolutions, 0);
-  assert.equal(observationFactories, 0);
+  assert.equal(observationAttempts, 0);
   assert.equal(signals.listenerCount(), 0);
 });
 
@@ -1080,7 +1074,6 @@ test("a real boot writes nodes.json, and a later hostname change never moves tha
         attestClaudeRuntime: async () => runtime(),
         createClaudeProvider: () => provider(() => undefined),
         createCodexOperation: () => statelessOperation(),
-        createCodexObservationFactory: async () => factory(() => undefined),
         resolveCodexInstallation: async () => {
           throw new Error("diagnostic resolver must remain lazy");
         },
@@ -1146,7 +1139,6 @@ test("a nodes.json that changed under a starting broker refuses, on the host and
           attestClaudeRuntime: async () => runtime(),
           createClaudeProvider: () => provider(() => undefined),
           createCodexOperation: () => statelessOperation(),
-          createCodexObservationFactory: async () => factory(() => undefined),
           createCodexProvider: () => provider(() => undefined),
           createService: () => { throw new Error("startup must refuse before any service is built"); },
         },

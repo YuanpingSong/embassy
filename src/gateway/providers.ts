@@ -12,9 +12,6 @@ import {
 } from "./claude-peer.js";
 import type { AttestedClaudePeerRuntime } from "./claude-runtime.js";
 import type {
-  LocalCodexTransportFactory,
-} from "./codex-local-transport.js";
-import type {
   StatelessCodexAcceptedOperation,
   StatelessCodexActiveSteerResult,
   StatelessCodexOperationResult,
@@ -842,7 +839,6 @@ export type LocalCodexGatewayProviderOptions = {
   hostId: string;
   nodeInventory: GatewayNodeInventory;
   operation: StatelessCodexOperationTransport;
-  createObservationFactory?: () => Promise<LocalCodexTransportFactory>;
   observationPollMs?: number;
   observationTimeoutMs?: number;
   observationBackoffMaxMs?: number;

@@ -120,7 +120,6 @@ export type GatewayAdapterCallbacks = Readonly<{
 
 export type GatewayAdapterStart = Readonly<{
   health: "healthy" | "degraded"; safeErrorCode?: string;
-  ownedRoute?: Readonly<{ alias: string; routeHandle: string; state: GatewayAdapterRouteState }>;
 }>;
 
 export type GatewayAdapterDispatchResult =
@@ -479,9 +478,6 @@ export class GatewayService {
         const registry = adapter.latestRegistryObservation?.();
         if (registry !== undefined) runtime.registry = publicRegistry(registry, false);
         this.connectors.set(key, runtime);
-        if (started.ownedRoute !== undefined) {
-          await this.installOwnedRoute(adapter, started.ownedRoute);
-        }
       }
       await this.refreshClaudeDiscovery().catch(() => undefined);
       await this.refreshManagedCodexSocket().catch(() => undefined);
@@ -760,35 +756,6 @@ export class GatewayService {
   private health(): "ok" | "degraded" {
     return this.connectors.size > 0 &&
       [...this.connectors.values()].every((runtime) => runtime.health === "healthy") ? "ok" : "degraded";
-  }
-
-  private async installOwnedRoute(adapter: GatewayProviderAdapter,
-    owned: NonNullable<GatewayAdapterStart["ownedRoute"]>): Promise<void> {
-    const prefix = gatewayRegistrationIngressPrefixes[adapter.identity.provider];
-    if (
-      !PUBLIC_ALIAS.test(owned.alias) ||
-      !owned.alias.endsWith(`@${adapter.identity.hostId}`) ||
-      (prefix !== undefined && !owned.alias.startsWith(prefix)) ||
-      !PRIVATE_HANDLE.test(owned.routeHandle)
-    ) {
-      throw new BridgeError("GATEWAY_OWNED_ROUTE_INVALID", "The configured route identity is invalid.");
-    }
-    const existing = await this.store.inspectPrivateRoute(owned.alias);
-    if (existing !== undefined) {
-      if (
-        existing.binding.provider !== adapter.identity.provider ||
-        existing.binding.hostId !== adapter.identity.hostId ||
-        existing.binding.routeHandle !== owned.routeHandle
-      ) {
-        throw new BridgeError("ROUTE_ALIAS_ALREADY_REGISTERED", "The configured route conflicts with durable state.");
-      }
-      return;
-    }
-    await this.store.registerRoute({
-      alias: owned.alias,
-      binding: { ...adapter.identity, routeHandle: owned.routeHandle, registrationId: registrationId() },
-      registrationMode: "explicit_opt_in",
-    });
   }
 
   private async observeLoadedRoutes(): Promise<void> {

@@ -974,23 +974,30 @@ class FakeStatelessCodexOperation implements StatelessCodexOperationTransport {
   }
 }
 
+type CodexProviderFixtureOptions = Partial<
+  Parameters<typeof createLocalCodexGatewayProvider>[0]
+> & {
+  createObservationFactory?: () => Promise<LocalCodexTransportFactory>;
+};
+
 function createCodexProviderFixture(
   operation = new FakeStatelessCodexOperation(),
-  options: Partial<Parameters<typeof createLocalCodexGatewayProvider>[0]> = {},
+  options: CodexProviderFixtureOptions = {},
 ) {
+  const { createObservationFactory, ...providerOptions } = options;
   if (
     operation instanceof FakeStatelessCodexOperation &&
-    options.createObservationFactory !== undefined
+    createObservationFactory !== undefined
   ) {
     const observer = createStatelessCodexOperationTransport({}, {
-      createFactory: async () => await options.createObservationFactory!(),
+      createFactory: async () => await createObservationFactory(),
     });
     operation.observationHandler = observer.observe;
   }
   const provider = createLocalCodexGatewayProvider({
-    ...options,
-    hostId: options.hostId ?? localIdentity.hostId,
-    nodeInventory: options.nodeInventory ?? localIdentity.nodeInventory,
+    ...providerOptions,
+    hostId: providerOptions.hostId ?? localIdentity.hostId,
+    nodeInventory: providerOptions.nodeInventory ?? localIdentity.nodeInventory,
     operation,
   });
   const observed = callbacks();

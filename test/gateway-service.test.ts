@@ -155,7 +155,6 @@ class FakeProvider implements GatewayProviderAdapter {
   constructor(
     readonly identity: Readonly<{ provider: GatewayProvider; hostId: string }>,
     readonly mode: DispatchMode = "deliver",
-    private readonly ownedRoute?: GatewayAdapterStart["ownedRoute"],
   ) {
     this.protocol = `${identity.provider}-fake`;
   }
@@ -164,7 +163,6 @@ class FakeProvider implements GatewayProviderAdapter {
     this.callbacks = callbacks;
     return {
       health: "healthy",
-      ...(this.ownedRoute === undefined ? {} : { ownedRoute: this.ownedRoute }),
     };
   }
 
@@ -1417,13 +1415,15 @@ test("peer lifecycle reconciles mirrors, exports local-only catalog, and commits
   assert.equal(closes, 2, "the failed client closes and the reconnected client closes at shutdown");
 });
 
-test("a fresh canonical-host broker exports its startup-owned routes to a configured peer", async () => {
+test("a fresh canonical-host broker exports explicitly registered routes to a configured peer", async () => {
   const providers = (["codex", "peer"] as const).map((provider) => new FakeProvider(
     { provider, hostId: "m5dev" }, "deliver",
-    { alias: `${provider}-main@m5dev`, routeHandle: provider === "peer" ? "peer:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" : "codex-owned", state: "idle" },
   ));
   const subject = await fixture(providers, { hostId: "m5dev", peerNodes: ["this-mac"] });
   try {
+    assert.deepEqual(await subject.handlers.registerCodex({ alias: "codex-main@m5dev", threadId: THREAD_A,
+      hostId: "m5dev", busyPolicy: "queue" }), { accepted: true, code: "ok" });
+    assert.ok((await subject.handlers.registerPeer({ alias: "peer-main@m5dev" })).accepted);
     assert.equal((await subject.service.snapshot()).routes.length, 2);
     const catalog = await subject.handlers.peerCatalog?.({ peerHost: "this-mac" });
     assert.deepEqual(catalog?.routes.map((route) => route.alias).sort(),

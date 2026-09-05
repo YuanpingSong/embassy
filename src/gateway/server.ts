@@ -2,9 +2,8 @@ import { userInfo } from "node:os";
 import path from "node:path";
 import { BridgeError } from "../errors.js";
 import { attestClaudePeerRuntime, type AttestedClaudePeerRuntime } from "./claude-runtime.js";
-import { createLocalCodexTransportFactory, resolveManagedLocalCodexInstallation,
+import { resolveManagedLocalCodexInstallation,
   LocalCodexTransportError, managedCodexControlSocketPath,
-  type LocalCodexTransportFactory, type LocalCodexTransportFactoryOptions,
   type ManagedLocalCodexInstallation } from "./codex-local-transport.js";
 import { createStatelessCodexOperationTransport, type StatelessCodexOperationTransport,
   type StatelessCodexOperationTransportOptions } from "./codex-stateless-transport.js";
@@ -30,7 +29,7 @@ export type GatewayServerDependencies = {
   ensureNodeInventoryFile?: (stateDir: string, host: string) => Promise<GatewayNodeInventory>;
   attestClaudeRuntime?: () => Promise<AttestedClaudePeerRuntime>; createClaudeProvider?: (options: LocalClaudeGatewayProviderOptions) => GatewayProviderAdapter;
   acquireInstanceLease?: (home: string) => Promise<GatewayInstanceLease>; createStore?: (config: GatewayConfig) => GatewayStore;
-  createCodexOperation?: (options: StatelessCodexOperationTransportOptions) => StatelessCodexOperationTransport; createCodexObservationFactory?: (options: LocalCodexTransportFactoryOptions) => Promise<LocalCodexTransportFactory>;
+  createCodexOperation?: (options: StatelessCodexOperationTransportOptions) => StatelessCodexOperationTransport;
   resolveCodexInstallation?: (home: string) => Promise<ManagedLocalCodexInstallation>; createCodexProvider?: (options: LocalCodexGatewayProviderOptions) => GatewayProviderAdapter;
   createCodexSocketHolderInspector?: () => CodexSocketHolderInspector;
   createPeerProvider?: (hostId: string) => GatewayProviderAdapter;
@@ -98,7 +97,6 @@ export async function runGatewayServer(
     acquireInstanceLease: dependencies.acquireInstanceLease ?? acquireGatewayInstanceLease,
     createStore: dependencies.createStore ?? ((config: GatewayConfig) => new GatewayStore(config)),
     createCodexOperation: dependencies.createCodexOperation ?? createStatelessCodexOperationTransport,
-    createCodexObservationFactory: dependencies.createCodexObservationFactory ?? createLocalCodexTransportFactory,
     resolveCodexInstallation: dependencies.resolveCodexInstallation ?? resolveManagedLocalCodexInstallation,
     createCodexSocketHolderInspector: dependencies.createCodexSocketHolderInspector ?? createSystemCodexSocketHolderInspector,
     createCodexProvider: dependencies.createCodexProvider ?? createLocalCodexGatewayProvider,
@@ -183,11 +181,9 @@ export async function runGatewayServer(
       ...(config.deliveryNotices === undefined ? {} : { deliveryNotices: config.deliveryNotices }),
     }));
     const localEnvironment = codexEnvironment(env);
-    const factoryOptions = { environment: localEnvironment, hostId: localHost };
     providers.push(d.createCodexProvider({
       hostId: localHost, nodeInventory: inventory,
       operation: d.createCodexOperation({ local: { environment: localEnvironment } }),
-      createObservationFactory: () => d.createCodexObservationFactory(factoryOptions),
     }));
     providers.push(d.createPeerProvider(localHost));
     service = d.createService({
