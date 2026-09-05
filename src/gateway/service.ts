@@ -27,6 +27,7 @@ import { peerRouteRef, type PeerCatalogResult, type PeerHandoffParams } from "./
 import { GatewayStore } from "./store.js";
 import {
   CONNECTOR_OBSERVATION_STALE_AFTER_MS,
+  gatewayHealthWord,
   directionId,
   GATEWAY_PUBLIC_SNAPSHOT_BYTE_BUDGET,
   gatewayPublicSnapshotLimits,
@@ -692,26 +693,8 @@ export class GatewayService {
         ...(persisted.safeErrorCode === undefined ? {} : { safeErrorCode: persisted.safeErrorCode }),
       };
     });
-    const connectors = [...this.connectors.values()].map((runtime): PublicConnectorSnapshot => {
-      const observedAt = runtime.observedAt;
-      const age = observedAt === undefined ? undefined : Math.max(0, now.getTime() - Date.parse(observedAt));
-      const stale = runtime.health === "healthy" &&
-        (age === undefined || age > CONNECTOR_OBSERVATION_STALE_AFTER_MS);
-      const socketHeld = runtime.adapter.identity.provider === "codex" && this.managedCodexSocketHeldOutside;
-      const connectorCode = stale ? "CONNECTOR_OBSERVATION_STALE" : runtime.safeErrorCode ??
-        (socketHeld ? "MANAGED_CODEX_UNAVAILABLE" : undefined);
-      return {
-        provider: runtime.adapter.identity.provider,
-        host: runtime.adapter.identity.hostId,
-        health: stale || socketHeld ? "degraded" : runtime.health,
-        protocol: runtime.adapter.protocol,
-        protocolVersion: runtime.adapter.protocolVersion,
-        ...(observedAt === undefined ? {} : { lastSeenAt: observedAt }),
-        ...(age === undefined ? {} : { observationAgeMs: age }),
-        ...(runtime.registry === undefined ? {} : { registry: runtime.registry }),
-        ...(connectorCode === undefined ? {} : { safeErrorCode: connectorCode }),
-      };
-    });
+    const connectors = this.publicConnectors(now);
+    const word = gatewayHealthWord(connectors);
     const availablePeers = [...this.candidates.values()]
       .filter((candidate) => !this.collidingClaudeAliases.has(candidate.alias))
       .slice(0, gatewayPublicSnapshotLimits.availablePeers)
@@ -730,11 +713,7 @@ export class GatewayService {
       {
         ...base,
         generatedAt: now.toISOString(),
-        health: connectors.some((connector) => connector.health === "degraded")
-          ? "degraded"
-          : connectors.length === 0
-            ? "offline"
-            : "healthy",
+        health: word === "ok" || word === "stale" ? "healthy" : word,
         connectors,
         availablePeers,
         routes,
@@ -758,8 +737,31 @@ export class GatewayService {
   }
 
   private health(): "ok" | "degraded" {
-    return this.connectors.size > 0 &&
-      [...this.connectors.values()].every((runtime) => runtime.health === "healthy") ? "ok" : "degraded";
+    const word = gatewayHealthWord(this.publicConnectors(this.now()));
+    return word === "ok" || word === "stale" ? "ok" : "degraded";
+  }
+
+  private publicConnectors(now: Date): PublicConnectorSnapshot[] {
+    return [...this.connectors.values()].map((runtime): PublicConnectorSnapshot => {
+      const observedAt = runtime.observedAt;
+      const age = observedAt === undefined ? undefined : Math.max(0, now.getTime() - Date.parse(observedAt));
+      const stale = runtime.health === "healthy" &&
+        (age === undefined || age > CONNECTOR_OBSERVATION_STALE_AFTER_MS);
+      const socketHeld = runtime.adapter.identity.provider === "codex" && this.managedCodexSocketHeldOutside;
+      const connectorCode = stale ? "CONNECTOR_OBSERVATION_STALE" : runtime.safeErrorCode ??
+        (socketHeld ? "MANAGED_CODEX_UNAVAILABLE" : undefined);
+      return {
+        provider: runtime.adapter.identity.provider,
+        host: runtime.adapter.identity.hostId,
+        health: stale || socketHeld ? "degraded" : runtime.health,
+        protocol: runtime.adapter.protocol,
+        protocolVersion: runtime.adapter.protocolVersion,
+        ...(observedAt === undefined ? {} : { lastSeenAt: observedAt }),
+        ...(age === undefined ? {} : { observationAgeMs: age }),
+        ...(runtime.registry === undefined ? {} : { registry: runtime.registry }),
+        ...(connectorCode === undefined ? {} : { safeErrorCode: connectorCode }),
+      };
+    });
   }
 
   private async observeLoadedRoutes(): Promise<void> {

@@ -15,7 +15,7 @@
  * many rows it hid, and the shell-peer list is ordered stale-first so a stuck
  * peer is never the row that falls off the end.
  */
-import { gatewayPublicSnapshotLimits } from "./types.js";
+import { connectorWord, gatewayHealthWord, gatewayPublicSnapshotLimits } from "./types.js";
 import type {
   GatewayPublicSnapshot,
   NormalizedMessageEvent,
@@ -174,20 +174,6 @@ const ageMs = (timestamp: string | undefined, now: number): number | undefined =
   return Number.isFinite(observed) ? Math.max(0, now - observed) : undefined;
 };
 
-/** The words a connector is allowed to say. Never a sentence, never a number. */
-export type StatusWord = "ok" | "stale" | "degraded" | "offline";
-/**
- * Connector words. A connector reporting `CONNECTOR_OBSERVATION_STALE` has
- * nothing wrong with it: no route of that provider was observed inside the
- * broker's window. That is `stale`, not `degraded`, and the difference is the
- * point — an idle Mac with no registered Codex task must not read as broken.
- */
-function connectorWord(connector: PublicConnectorSnapshot): StatusWord {
-  if (connector.health === "healthy" || connector.health === "connecting") return "ok";
-  if (connector.health === "offline") return "offline";
-  return connector.safeErrorCode === "CONNECTOR_OBSERVATION_STALE" ? "stale" : "degraded";
-}
-
 /**
  * What a route's row says, and why.
  *
@@ -237,23 +223,6 @@ function routeView(
       remedy: "that session has exited or renamed; run `embassy refresh`" };
   }
   return { word, lastSeen };
-}
-
-const severityRank = (word: StatusWord): number =>
-  word === "degraded" || word === "offline" ? 0 : word === "stale" ? 1 : 2;
-
-/**
- * The overall word is informational and derived from the two connectors a
- * message actually travels through. A shell peer never contributes: its
- * mailbox is pull-only, so "nobody is awaiting it" is a fact about the
- * operator's other terminal, not about the broker.
- */
-function overallWord(snapshot: GatewayPublicSnapshot): StatusWord {
-  const routed = snapshot.connectors.filter(
-    (connector) => connector.provider === "claude" || connector.provider === "codex");
-  if (routed.length === 0) return "offline";
-  return routed.map(connectorWord).reduce<StatusWord>(
-    (worst, word) => severityRank(word) < severityRank(worst) ? word : worst, "ok");
 }
 
 /** The remedy for one connector's condition; never empty when the word is not ok. */
@@ -386,7 +355,7 @@ export function renderStatus(
   const now = options.now;
   const paint = terminalPainter(options.color);
   const lines: string[] = [];
-  const overall = overallWord(snapshot);
+  const overall = gatewayHealthWord(snapshot.connectors);
   const discoveredByAlias = new Map(snapshot.availablePeers.map((peer) => [peer.alias, peer]));
 
   const brokerFacts = [

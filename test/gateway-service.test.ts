@@ -12,6 +12,7 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { decodePeerResult, peerRouteRef, type PeerCatalogResult, type PeerHandoffParams } from "../src/gateway/peer-protocol.js";
 import { LocalPeerMailboxProvider } from "../src/gateway/peer-mailbox.js";
+import { renderStatus } from "../src/gateway/status-view.js";
 import {
   GatewayService,
   type GatewayAdapterCallbacks,
@@ -1104,6 +1105,51 @@ test("a peer waiter kicks cleanly deferred mail and exact receipt settles it onc
       const status = await subject.handlers.deliveryStatus({ token: sent.deliveryToken });
       return status.found && status.state === "delivered";
     });
+  } finally { await subject.close(); }
+});
+
+test("idle connector age is informational while a real provider failure degrades the broker", async () => {
+  const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
+  const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
+  const mailbox = new LocalPeerMailboxProvider({ hostId: "this-mac", receiptTimeoutMs: 10_000,
+    now: () => Date.parse("2026-08-16T12:00:00.000Z") });
+  const subject = await fixture([claudeProvider, codexProvider, mailbox]);
+  const renderedWord = (snapshot: Awaited<ReturnType<GatewayService["snapshot"]>>): string => {
+    const rendered = renderStatus(snapshot, { stateDir: "/test/state", version: "test",
+      recent: 10, color: false, now: subject.clock.now().getTime() });
+    return /^embassy test  broker (\w+)/m.exec(rendered)?.[1] ?? "missing";
+  };
+  try {
+    const minted = await subject.handlers.registerPeer({ alias: "peer-idle@this-mac" });
+    assert.ok(minted.accepted && "token" in minted);
+    const waiting = subject.handlers.awaitPeer({ alias: "peer-idle@this-mac", token: minted.token });
+
+    subject.clock.advance(CONNECTOR_OBSERVATION_STALE_AFTER_MS + 1);
+    claudeProvider.callbacks?.onClaudeMessage?.({ endpoint: { provider: "claude",
+      hostId: "this-mac", routeHandle: claudeProvider.claudeDiscovery.routeHandle },
+    sourceAlias: claudeProvider.claudeDiscovery.alias, targetAlias: "peer-idle@this-mac",
+    text: "mailbox remains live across the observation threshold" });
+    const received = await waiting;
+    assert.equal(received.state, "message");
+    assert.deepEqual(await subject.handlers.peerReceipt({ alias: "peer-idle@this-mac",
+      token: minted.token, receipt: received.receipt }), { accepted: true, code: "ok" });
+
+    const quiet = await subject.service.snapshot();
+    assert.equal(quiet.routes.some((route) => route.provider === "codex"), false);
+    assert.equal(quiet.connectors.find((row) => row.provider === "peer")?.safeErrorCode,
+      "CONNECTOR_OBSERVATION_STALE");
+    assert.equal((await subject.handlers.health()).status, "ok");
+    assert.equal(quiet.health, "healthy");
+    assert.equal(renderedWord(quiet), "stale");
+
+    const claudeRoute = await subject.store.inspectPrivateRoute(claudeProvider.claudeDiscovery.alias);
+    assert.notEqual(claudeRoute, undefined);
+    claudeProvider.callbacks?.onRouteState({ route: claudeRoute!.binding, state: "unobserved",
+      observedAt: subject.clock.now().toISOString(), safeErrorCode: "CLAUDE_DISCOVERY_UNAVAILABLE" });
+    await eventually(async () => (await subject.handlers.health()).status === "degraded");
+    const failed = await subject.service.snapshot();
+    assert.equal(failed.health, "degraded");
+    assert.equal(renderedWord(failed), "degraded");
   } finally { await subject.close(); }
 });
 

@@ -149,6 +149,37 @@ export type PublicConnectorSnapshot = {
   provider: GatewayProvider; host: string; health: ConnectorHealth; protocol: string; protocolVersion: string; lastSeenAt?: string; observationAgeMs?: number; safeErrorCode?: string; registry?: PublicRegistryObservationSnapshot;
 };
 export const CONNECTOR_OBSERVATION_STALE_AFTER_MS = 35_000;
+/** The words a connector is allowed to say. Never a sentence, never a number. */
+export type StatusWord = "ok" | "stale" | "degraded" | "offline";
+/**
+ * Connector words. A connector reporting `CONNECTOR_OBSERVATION_STALE` has
+ * nothing wrong with it: no route of that provider was observed inside the
+ * broker's window. That is `stale`, not `degraded`, and the difference is the
+ * point — an idle Mac with no registered Codex task must not read as broken.
+ */
+export function connectorWord(connector: PublicConnectorSnapshot): StatusWord {
+  if (connector.health === "healthy" || connector.health === "connecting") return "ok";
+  if (connector.health === "offline") return "offline";
+  return connector.safeErrorCode === "CONNECTOR_OBSERVATION_STALE" ? "stale" : "degraded";
+}
+
+const severityRank = (word: StatusWord): number =>
+  word === "degraded" || word === "offline" ? 0 : word === "stale" ? 1 : 2;
+
+/**
+ * The overall word is informational and derived from the two connectors a
+ * message actually travels through. A shell peer never contributes: its
+ * mailbox is pull-only, so "nobody is awaiting it" is a fact about the
+ * operator's other terminal, not about the broker.
+ */
+export function gatewayHealthWord(connectors: readonly PublicConnectorSnapshot[]): StatusWord {
+  const routed = connectors.filter(
+    (connector) => connector.provider === "claude" || connector.provider === "codex");
+  if (routed.length === 0) return "offline";
+  return routed.map(connectorWord).reduce<StatusWord>(
+    (worst, word) => severityRank(word) < severityRank(worst) ? word : worst, "ok");
+}
+
 /**
  * Bounded, native-ID-free evidence attached to one Claude connector. Counts
  * describe only the latest pass; the monotonic flag distinguishes an ordinary
