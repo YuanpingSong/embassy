@@ -52,7 +52,7 @@ export function loadGatewayConfig(
   if (Buffer.byteLength(controlSocketPath) > 100) invalid("The gateway state path is too long for a portable private Unix-domain control socket.");
   const messageDeadlineMs = integer(env, "EMBASSY_MESSAGE_DEADLINE_MS", 14_400_000, 1_000, 86_400_000);
   const limits: GatewayStoreLimits = {
-    maxRoutes: integer(env, "EMBASSY_MAX_ROUTES", 128, 2, gatewayPublicSnapshotLimits.routes),
+    maxRoutes: integer(env, "EMBASSY_MAX_ROUTES", 128, 2, 128),
     eventCapacity: integer(env, "EMBASSY_EVENT_CAPACITY", 500, 10, gatewayPublicSnapshotLimits.messages),
     eventTtlMs: integer(env, "EMBASSY_EVENT_TTL_MS", 86_400_000, 60_000, 604_800_000),
     dedupeCapacity: integer(env, "EMBASSY_DEDUPE_CAPACITY", 2_000, 10, 100_000),

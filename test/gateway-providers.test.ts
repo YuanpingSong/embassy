@@ -537,7 +537,7 @@ function binding(
 }
 
 test("configured route bounds also construct the real Claude provider", async () => {
-  for (const maximum of [128, 129, 200, 256]) {
+  for (const maximum of [2, 128]) {
     const config = loadGatewayConfig({ EMBASSY_STATE_DIR: inventoryRoot,
       EMBASSY_MAX_ROUTES: String(maximum) }, nodeInventory);
     assert.equal(config.limits.maxRoutes, maximum);
@@ -546,8 +546,10 @@ test("configured route bounds also construct the real Claude provider", async ()
       nativeHelpers: { maxHelpers: config.limits.maxRoutes } });
     await construct().close();
   }
-  assert.throws(() => loadGatewayConfig({ EMBASSY_STATE_DIR: inventoryRoot,
-    EMBASSY_MAX_ROUTES: "257" }, nodeInventory), { code: "INVALID_GATEWAY_CONFIGURATION" });
+  for (const maximum of [129, 200, 256, 257]) {
+    assert.throws(() => loadGatewayConfig({ EMBASSY_STATE_DIR: inventoryRoot,
+      EMBASSY_MAX_ROUTES: String(maximum) }, nodeInventory), { code: "INVALID_GATEWAY_CONFIGURATION" });
+  }
 });
 
 test("local Claude provider forwards the exact delivery notice policy", () => {
