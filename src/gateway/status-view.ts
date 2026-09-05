@@ -46,6 +46,16 @@ export const STATUS_SCAN_STALE_AFTER_MS = 60_000;
 export const CODEX_ENDPOINT_GONE_CODES: readonly string[] = ["THREAD_NOT_OBSERVED"];
 export const STATUS_RECENT = Object.freeze({ default: 10, minimum: 1, maximum: 100 });
 export const STATUS_CAPS = Object.freeze({ sessions: 16, shellPeers: 8, alerts: 6 });
+// LocalClaudeGatewayProvider emits these from clean prewrite failures,
+// refreshClaudeDiscoveryOnce, and the discovery monitor's failure callback.
+const CLAUDE_BUSY_OBSERVATION_CODES = new Set([
+  "CLAUDE_PEER_TARGET_UNKNOWN",
+  "CLAUDE_PEER_TARGET_STALE",
+  "CLAUDE_PEER_TARGET_CHANGED",
+  "CLAUDE_PEER_WORKSPACE_UNATTESTED",
+  "CLAUDE_PEER_NOT_OBSERVED",
+  "CLAUDE_DISCOVERY_UNAVAILABLE",
+]);
 const PREVIEW_MAX_CHARS = 60;
 
 export type StatusViewOptions = Readonly<{
@@ -76,7 +86,15 @@ export const STATUS_REMEDY: Readonly<Record<string, string>> = {
   PEER_ALIAS_COLLISION:
     "the alias names more than one live session; rename one, or address the session by UUID with --to <session-uuid>.",
   CLAUDE_PEER_WORKSPACE_UNATTESTED:
-    "The session workspace has not been validated for this route; report CLAUDE_PEER_WORKSPACE_UNATTESTED with the session's current alias.",
+    "Let the queued delivery retry, then run `embassy status`; each routed preparation validates the workspace again. If this persists, report CLAUDE_PEER_WORKSPACE_UNATTESTED with the current alias.",
+  CLAUDE_PEER_TARGET_UNKNOWN:
+    "Run `embassy refresh`, then read `embassy status` for the session's current name; discovery did not find the delivery target.",
+  CLAUDE_PEER_TARGET_STALE:
+    "Run `embassy refresh`, then re-check `embassy status`; the queued retry resolves the session's current endpoint before writing.",
+  CLAUDE_PEER_TARGET_CHANGED:
+    "The target changed during preparation; run `embassy refresh` and read `embassy status` for its current name before addressing new mail.",
+  CLAUDE_DISCOVERY_UNAVAILABLE:
+    "Run `embassy refresh` to retry the registry scan, then read `embassy status` for the connector's safe code if discovery still fails.",
   PEER_PROTOCOL_MISMATCH:
     "That node runs a different federation peer protocol; upgrade the lagging node's Embassy and it re-catalogs on the next refresh.",
   PEER_TUNNEL_UNAVAILABLE:
@@ -429,9 +447,8 @@ export function renderStatus(
       lines.push(`  ${line}`);
     }
     for (const { route, view } of views) {
-      if (view.remedy === undefined && (view.word === "busy" || view.word === "awaiting") &&
-          (route.safeErrorCode === "CLAUDE_PEER_WORKSPACE_UNATTESTED" ||
-           route.safeErrorCode === "CLAUDE_PEER_NOT_OBSERVED")) {
+      if (view.remedy === undefined && view.word === "busy" &&
+          route.safeErrorCode !== undefined && CLAUDE_BUSY_OBSERVATION_CODES.has(route.safeErrorCode)) {
         lines.push(paint(`    ${route.alias}: ${STATUS_REMEDY[route.safeErrorCode]}`, "dim"));
         continue;
       }

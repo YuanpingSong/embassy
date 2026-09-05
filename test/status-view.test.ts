@@ -449,7 +449,11 @@ test("rendered busy Claude rows show observation remedies without overriding oth
     { overrides: { state: "awaiting_approval" }, word: "awaiting", fallback: "waiting on an approval prompt" },
     { overrides: { state: "busy", enabled: false }, word: "disabled" },
   ];
-  for (const safeErrorCode of ["CLAUDE_PEER_WORKSPACE_UNATTESTED", "CLAUDE_PEER_NOT_OBSERVED"]) {
+  for (const safeErrorCode of [
+    "CLAUDE_PEER_WORKSPACE_UNATTESTED", "CLAUDE_PEER_NOT_OBSERVED",
+    "CLAUDE_PEER_TARGET_UNKNOWN", "CLAUDE_PEER_TARGET_STALE",
+    "CLAUDE_PEER_TARGET_CHANGED", "CLAUDE_DISCOVERY_UNAVAILABLE",
+  ]) {
     for (const current of cases) {
       const rendered = renderStatus(snapshot({
         routes: [route(alias, "claude", { safeErrorCode, ...current.overrides })],

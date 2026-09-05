@@ -956,7 +956,7 @@ test("a deliberately broad Claude workspace is refused before any route is insta
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
   claudeProvider.workspaceGuard = async () => {
-    throw new BridgeError("CLAUDE_PEER_WORKSPACE_BROAD", "The Claude workspace contains the gateway state directory.");
+    throw new BridgeError("CLAUDE_PEER_WORKSPACE_BROAD", "The Claude workspace is a filesystem root or overlaps a temporary root.");
   };
   const subject = await fixture([claudeProvider, codexProvider]);
   try {

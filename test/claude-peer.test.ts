@@ -455,6 +455,10 @@ test("selection attestation is required before any peer socket write", async (t)
       error.code === "CLAUDE_PEER_WORKSPACE_UNATTESTED",
   );
   assert.equal(connections, 0);
+  await current.adapter.discover();
+  const deadline = { deadlineAt: Date.now() + 30_000 };
+  await assert.rejects(current.adapter.prepareSend(target.targetId, "still unattested", deadline),
+    (error: unknown) => error instanceof BridgeError && error.code === "CLAUDE_PEER_WORKSPACE_UNATTESTED");
   assert.equal(
     await current.adapter.assertTargetWorkspaceDisjoint(
       target.targetId,
@@ -462,6 +466,7 @@ test("selection attestation is required before any peer socket write", async (t)
     ),
     undefined,
   );
+  (await current.adapter.prepareSend(target.targetId, "attested without a restart", deadline)).cancel();
 });
 
 test("selection allows home when state is disjoint but rejects root and temporary workspaces", async (t) => {

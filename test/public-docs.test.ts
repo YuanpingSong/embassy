@@ -442,15 +442,18 @@ test("delivery-token documentation preserves restart continuity", async () => {
 });
 
 test("advertisement guidance includes shell peers, not a singleton Codex record", async () => {
+  const forbidden = (sentence: string): boolean => !/peer-\*/i.test(sentence) &&
+    /\b(?:records?|entries|entry|peers?)\b/i.test(sentence) &&
+    ((/\b(?:process|gateway)-owned\b/i.test(sentence) && /\bcodex\b/i.test(sentence)) ||
+     (/codex-\*/i.test(sentence) && /\b(?:one|single|sole)\b/i.test(sentence)));
+  for (const offender of [
+    "The gateway may publish one process-owned `codex-*` peer so Claude's native `ListAgents` and `SendMessage` tools can reach Codex.",
+    "Any exact compatible live same-UID Claude session may reach the one registered `codex-*` peer, and its own route is installed by that first native send.",
+  ]) assert.equal(forbidden(offender), true, offender);
   for (const file of ["README.md", "AGENTS.md", "SECURITY.md", "CONTRIBUTING.md", "docs/GATEWAY-ARCHITECTURE.md", "skills/embassy-peer/SKILL.md"]) {
     const document = await readPublicFile(file);
-    for (const sentence of document.split(/(?<=[.!?])\s+|\n\s*\n/)) {
-      if (/\b(?:process|gateway)-owned\b/i.test(sentence) && /\bcodex\b/i.test(sentence) && /\brecord\b/i.test(sentence)) {
-        assert.match(sentence, /\bpeer\b/i, file);
-      }
-      if (/`codex-\*`\s+(?:(?:registry|peer)\s+)?records?/.test(sentence)) {
-        assert.match(sentence, /`peer-\*`/, file);
-      }
+    for (const sentence of document.split(/(?<=[.!?])\s+|\n\s*\n|\n(?=\|)/)) {
+      assert.equal(forbidden(sentence.replace(/\s+/g, " ")), false, `${file}: ${sentence}`);
     }
   }
 });
