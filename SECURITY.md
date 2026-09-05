@@ -224,6 +224,10 @@ broker.
   The tracked-helper cap is `maxRoutes` (default and maximum 128).
   Federated mirrors are excluded from local helper advertisement.
   Pending creations reserve capacity before the factory runs; overlapping same-alias reconciliations share that creation, and shutdown joins pending creations before completing cleanup.
+  Default-helper initialization requests time out after 5 seconds; forced close
+  escalates to SIGKILL after 2 seconds, but completion still awaits the child's
+  exit. This is an escalation schedule, not a shutdown deadline; injected
+  factories may remain pending.
   The prefix is a visible alias convention, not the discriminator: an unmarked
   genuine Claude session named `codex-*` remains discoverable. Each helper creates
   one callback socket and removes only exact-owned artifacts whose generation
