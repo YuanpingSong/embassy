@@ -1879,8 +1879,6 @@ test("clean prewrite retry waits 500ms while terminal input failure never retrie
 
   const providerSpecificCodes = [
     "CLAUDE_PEER_TARGET_UNKNOWN",
-    "CLAUDE_PEER_TARGET_STALE",
-    "CLAUDE_PEER_TARGET_CHANGED",
     "CLAUDE_PEER_WORKSPACE_UNATTESTED",
     "UNRULED_DEFERRED_CODE",
   ];

@@ -48,10 +48,8 @@ export const STATUS_RECENT = Object.freeze({ default: 10, minimum: 1, maximum: 1
 export const STATUS_CAPS = Object.freeze({ sessions: 16, shellPeers: 8, alerts: 6 });
 // LocalClaudeGatewayProvider emits these from clean prewrite failures,
 // refreshClaudeDiscoveryOnce, and the discovery monitor's failure callback.
-const CLAUDE_BUSY_OBSERVATION_CODES = new Set([
+export const CLAUDE_BUSY_OBSERVATION_CODES = new Set([
   "CLAUDE_PEER_TARGET_UNKNOWN",
-  "CLAUDE_PEER_TARGET_STALE",
-  "CLAUDE_PEER_TARGET_CHANGED",
   "CLAUDE_PEER_WORKSPACE_UNATTESTED",
   "CLAUDE_PEER_NOT_OBSERVED",
   "CLAUDE_DISCOVERY_UNAVAILABLE",
@@ -89,12 +87,8 @@ export const STATUS_REMEDY: Readonly<Record<string, string>> = {
     "Let the queued delivery retry, then run `embassy status`; each routed preparation validates the workspace again. If this persists, report CLAUDE_PEER_WORKSPACE_UNATTESTED with the current alias.",
   CLAUDE_PEER_TARGET_UNKNOWN:
     "Run `embassy refresh`, then read `embassy status` for the session's current name; discovery did not find the delivery target.",
-  CLAUDE_PEER_TARGET_STALE:
-    "Run `embassy refresh`, then re-check `embassy status`; the queued retry resolves the session's current endpoint before writing.",
-  CLAUDE_PEER_TARGET_CHANGED:
-    "The target changed during preparation; run `embassy refresh` and read `embassy status` for its current name before addressing new mail.",
   CLAUDE_DISCOVERY_UNAVAILABLE:
-    "Run `embassy refresh` to retry the registry scan, then read `embassy status` for the connector's safe code if discovery still fails.",
+    "Run `embassy refresh` and read that command's result: a failed scan returns `accepted: false` and its refusal code.",
   PEER_PROTOCOL_MISMATCH:
     "That node runs a different federation peer protocol; upgrade the lagging node's Embassy and it re-catalogs on the next refresh.",
   PEER_TUNNEL_UNAVAILABLE:
@@ -106,7 +100,7 @@ export const STATUS_REMEDY: Readonly<Record<string, string>> = {
   PEER_ROUTE_STALE:
     "That mirrored route was missing from the node's latest catalog; it retires when the node stops publishing it.",
   CLAUDE_PEER_NOT_OBSERVED:
-    "That Claude session is no longer in the live registry; run `embassy refresh`, and its route retires on the next send if the session exited.",
+    "Discovery did not find that session; run `embassy refresh`, then inspect `embassy status` for current peers. Sending does not retire a missing session's stored route.",
   ROUTE_UNOBSERVED:
     "The provider stopped reporting this route; retire it if the session or task ended.",
   THREAD_NOT_OBSERVED:

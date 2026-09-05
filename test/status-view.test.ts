@@ -5,6 +5,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   diffWatch,
+  CLAUDE_BUSY_OBSERVATION_CODES,
   emptyWatchState,
   renderStatus,
   renderWatchEvent,
@@ -14,6 +15,7 @@ import {
   __test,
 } from "../src/gateway/status-view.js";
 import { EMBASSY_VERSION } from "../src/gateway/cli.js";
+import { CLAUDE_CLEAN_PREWRITE_RETRY_CODES } from "../src/gateway/providers.js";
 import type {
   GatewayPublicSnapshot,
   NormalizedMessageEvent,
@@ -449,11 +451,11 @@ test("rendered busy Claude rows show observation remedies without overriding oth
     { overrides: { state: "awaiting_approval" }, word: "awaiting", fallback: "waiting on an approval prompt" },
     { overrides: { state: "busy", enabled: false }, word: "disabled" },
   ];
-  for (const safeErrorCode of [
-    "CLAUDE_PEER_WORKSPACE_UNATTESTED", "CLAUDE_PEER_NOT_OBSERVED",
-    "CLAUDE_PEER_TARGET_UNKNOWN", "CLAUDE_PEER_TARGET_STALE",
-    "CLAUDE_PEER_TARGET_CHANGED", "CLAUDE_DISCOVERY_UNAVAILABLE",
-  ]) {
+  assert.deepEqual(CLAUDE_BUSY_OBSERVATION_CODES, new Set([
+    ...CLAUDE_CLEAN_PREWRITE_RETRY_CODES, "CLAUDE_PEER_NOT_OBSERVED", "CLAUDE_DISCOVERY_UNAVAILABLE",
+  ]));
+  for (const safeErrorCode of CLAUDE_BUSY_OBSERVATION_CODES) {
+    assert.equal(typeof STATUS_REMEDY[safeErrorCode], "string", safeErrorCode);
     for (const current of cases) {
       const rendered = renderStatus(snapshot({
         routes: [route(alias, "claude", { safeErrorCode, ...current.overrides })],

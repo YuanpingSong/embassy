@@ -913,8 +913,6 @@ test("Claude clean prewrite conditions retain exact diagnostics without authoriz
   let authorizationCalls = 0;
   for (const code of [
     "CLAUDE_PEER_TARGET_UNKNOWN",
-    "CLAUDE_PEER_TARGET_STALE",
-    "CLAUDE_PEER_TARGET_CHANGED",
     "CLAUDE_PEER_WORKSPACE_UNATTESTED",
   ]) {
     helper!.prepareError = new BridgeError(code, "synthetic clean prewrite", true);
