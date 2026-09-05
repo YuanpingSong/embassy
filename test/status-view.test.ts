@@ -12,7 +12,6 @@ import {
   STATUS_CAPS,
   STATUS_REMEDY,
   STATUS_ROUTE_STALE_AFTER_MS,
-  __test,
 } from "../src/gateway/status-view.js";
 import { EMBASSY_VERSION } from "../src/gateway/cli.js";
 import { CLAUDE_CLEAN_PREWRITE_RETRY_CODES } from "../src/gateway/providers.js";
@@ -24,8 +23,6 @@ import type {
   PublicRouteSnapshot,
   RouteCounters,
 } from "../src/gateway/types.js";
-
-const { connectorWord, overallWord, previewBody, relativeAge, routeView } = __test;
 
 // Every fixture is a literal snapshot: the renderer is pure, so no broker, no
 // state directory, and no clock is involved anywhere in this file. That makes
@@ -107,6 +104,25 @@ function snapshot(overrides: Overrides<GatewayPublicSnapshot> = {}): GatewayPubl
 const options = { stateDir: "/private/state/agent-embassy", version: EMBASSY_VERSION, recent: 10, color: false, now };
 /** The version as it appears in a header, escaped for the regexes below, so a release bump touches no literal here. */
 const VERSION = EMBASSY_VERSION.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+function renderedBrokerWord(rendered: string): string {
+  const word = /^embassy .*  broker (\w+)/m.exec(rendered)?.[1];
+  assert.notEqual(word, undefined, "rendered broker word");
+  return word!;
+}
+
+function renderedConnectorWord(rendered: string, provider: "claude" | "codex"): string {
+  const word = new RegExp(`^  ${provider} +([a-z]+)`, "m").exec(rendered)?.[1];
+  assert.notEqual(word, undefined, `rendered ${provider} connector word`);
+  return word!;
+}
+
+function renderedRouteCells(rendered: string, alias: string, provider: "claude" | "codex" | "peer") {
+  const cells = rendered.split("\n").map((line) => line.trim().split(/ {2,}/))
+    .find((row) => row[0] === alias && row[1] === provider);
+  assert.notEqual(cells, undefined, `rendered ${alias} route row`);
+  return { word: cells![2]!, lastSeen: cells![4]! };
+}
 
 const COUNTERS: RouteCounters = { ...ZERO_COUNTERS, accepted: 3, delivered: 3, bytesAccepted: 240 };
 const EXAMPLE_MESSAGES: NormalizedMessageEvent[] = [
@@ -222,7 +238,7 @@ test("a degraded Codex connector names its code, both causes, and sets the overa
   assert.match(rendered, /the managed App Server standalone layout is missing/);
   assert.match(rendered, /follow the Codex prerequisite in the README/);
   assert.doesNotMatch(rendered, /run `codex app-server daemon start`/);
-  assert.equal(overallWord(DEGRADED_FIXTURE), "degraded");
+  assert.equal(renderedBrokerWord(rendered), "degraded");
 });
 
 test("an unobserved connector is stale, not degraded, and says which stale it is", () => {
@@ -233,7 +249,7 @@ test("an unobserved connector is stale, not degraded, and says which stale it is
   const rendered = renderStatus(noCodexTask, options);
   assert.match(rendered, /^ {2}codex {3}stale {2}CONNECTOR_OBSERVATION_STALE$/m);
   assert.match(rendered, /No Codex task is registered\. Run `embassy register-codex/);
-  assert.equal(overallWord(noCodexTask), "stale");
+  assert.equal(renderedBrokerWord(rendered), "stale");
 
   const registered = snapshot({
     connectors: noCodexTask.connectors, routes: [route(`codex-reviewer@${HOST}`, "codex")],
@@ -248,7 +264,7 @@ test("a stale shell-peer mailbox is reported without degrading the overall word"
   const rendered = renderStatus(waiting, options);
   assert.match(rendered, /^ {2}peer-reviewer@this-mac stale \(token or await loop gone\)$/m);
   assert.match(rendered, /3 message\(s\) waiting: run `embassy await --alias peer-reviewer@this-mac --token-stdin`/);
-  assert.equal(overallWord(waiting), "ok");
+  assert.equal(renderedBrokerWord(rendered), "ok");
   assert.match(rendered, new RegExp(`^embassy ${VERSION} {2}broker ok`, "m"));
 
   const quiet = snapshot({ routes: [route(`peer-reviewer@${HOST}`, "peer", { lastSeenAt: undefined })] });
@@ -290,8 +306,9 @@ test("a Claude route the latest scan still lists is never stale", () => {
   const unseen = renderStatus(snapshot({ routes: [stale] }), options);
   assert.match(unseen, /^ {2}advisor@this-mac {2,}claude {2,}stale/m);
   assert.match(unseen, /^ {4}advisor@this-mac: that session has exited or renamed; run `embassy refresh`$/m);
-  assert.equal(routeView(stale, undefined, now).word, "stale");
-  assert.equal(routeView(stale, session(alias), now).word, "idle");
+  const seenIdle = renderStatus(snapshot({ availablePeers: [session(alias)], routes: [stale] }), options);
+  assert.equal(renderedRouteCells(unseen, alias, "claude").word, "stale");
+  assert.equal(renderedRouteCells(seenIdle, alias, "claude").word, "idle");
 });
 
 test("an awaiting route says where the approval prompt is", () => {
@@ -304,12 +321,14 @@ test("an awaiting route says where the approval prompt is", () => {
 test("a route unobservable for more than ten minutes is stale whatever the broker called it", () => {
   const fresh = route(`codex-reviewer@${HOST}`, "codex", { lastSeenAt: at(STATUS_ROUTE_STALE_AFTER_MS - 1_000) });
   const old = route(`codex-reviewer@${HOST}`, "codex", { lastSeenAt: at(STATUS_ROUTE_STALE_AFTER_MS + 1_000) });
-  assert.equal(routeView(fresh, undefined, now).word, "idle");
-  assert.equal(routeView(old, undefined, now).word, "stale");
+  assert.equal(renderedRouteCells(renderStatus(snapshot({ routes: [fresh] }), options), fresh.alias, "codex").word, "idle");
+  assert.equal(renderedRouteCells(renderStatus(snapshot({ routes: [old] }), options), old.alias, "codex").word, "stale");
   // A route never observed keeps the broker's word: absence of an observation
   // is not evidence of an age.
-  assert.equal(routeView(route(`peer-x@${HOST}`, "peer", { lastSeenAt: undefined }), undefined, now).word, "idle");
-  assert.equal(routeView(route(`peer-x@${HOST}`, "peer", { enabled: false }), undefined, now).word, "disabled");
+  const unobserved = route(`peer-x@${HOST}`, "peer", { lastSeenAt: undefined });
+  const disabled = route(`peer-x@${HOST}`, "peer", { enabled: false });
+  assert.equal(renderedRouteCells(renderStatus(snapshot({ routes: [unobserved] }), options), unobserved.alias, "peer").word, "idle");
+  assert.equal(renderedRouteCells(renderStatus(snapshot({ routes: [disabled] }), options), disabled.alias, "peer").word, "disabled");
 });
 
 test("a filtered alias collision is reported as a count with the CLI's own remedy", () => {
@@ -418,13 +437,14 @@ test("--recent selects the newest rows, newest first", () => {
 
 test("a body preview is one line, free of control and formatting characters, and bounded", () => {
   const hostile = `alert\u0007\u001b[31mred\u001b[0m\u202ereversed\u200b\u200d\nsecond line\t${"x".repeat(200)}`;
-  const preview = previewBody(hostile);
+  const rendered = renderStatus(snapshot({ messages: [message({ body: hostile })] }), options);
+  const preview = /^ {13}(.+)$/m.exec(rendered)?.[1] ?? "";
+  assert.notEqual(preview, "", "rendered message preview");
   assert.equal(preview.includes("\u001b"), false);
   assert.equal(/\p{Cf}/u.test(preview), false);
   assert.equal(preview.includes("\n"), false);
   assert.equal([...preview].length, 60);
   assert.ok(preview.endsWith("…"));
-  const rendered = renderStatus(snapshot({ messages: [message({ body: hostile })] }), options);
   assert.equal(rendered.includes("\u001b"), false);
   assert.equal(/\p{Cf}/u.test(rendered), false);
 });
@@ -490,19 +510,26 @@ test("every remedy the renderer can reach is reachable, and the shared one canno
 });
 
 test("connector and relative-age vocabulary stays closed", () => {
-  assert.equal(connectorWord(connector("claude")), "ok");
-  assert.equal(connectorWord(connector("claude", { health: "connecting" })), "ok");
-  assert.equal(connectorWord(connector("claude", { health: "offline" })), "offline");
-  assert.equal(connectorWord(connector("claude", { health: "degraded" })), "degraded");
-  assert.equal(relativeAge(undefined, now), "never");
-  assert.equal(relativeAge("not a date", now), "unknown");
-  assert.equal(relativeAge(at(0), now), "just now");
-  assert.equal(relativeAge(at(45_000), now), "45s ago");
-  assert.equal(relativeAge(at(120_000), now), "2m ago");
-  assert.equal(relativeAge(at(3 * 3_600_000), now), "3h ago");
-  assert.equal(relativeAge(at(5 * 86_400_000), now), "5d ago");
+  const word = (value: PublicConnectorSnapshot) => renderedConnectorWord(
+    renderStatus(snapshot({ connectors: [value] }), options), "claude");
+  assert.equal(word(connector("claude")), "ok");
+  assert.equal(word(connector("claude", { health: "connecting" })), "ok");
+  assert.equal(word(connector("claude", { health: "offline" })), "offline");
+  assert.equal(word(connector("claude", { health: "degraded" })), "degraded");
+  const age = (lastSeenAt: string | undefined) => {
+    const value = route(`peer-age@${HOST}`, "peer", { lastSeenAt });
+    return renderedRouteCells(
+      renderStatus(snapshot({ routes: [value] }), options), value.alias, "peer").lastSeen;
+  };
+  assert.equal(age(undefined), "never");
+  assert.equal(age("not a date"), "unknown");
+  assert.equal(age(at(0)), "just now");
+  assert.equal(age(at(45_000)), "45s ago");
+  assert.equal(age(at(120_000)), "2m ago");
+  assert.equal(age(at(3 * 3_600_000)), "3h ago");
+  assert.equal(age(at(5 * 86_400_000)), "5d ago");
   // A timestamp from the future is never a negative age.
-  assert.equal(relativeAge(at(-60_000), now), "just now");
+  assert.equal(age(at(-60_000)), "just now");
 });
 
 test("watch identifies a message by its id, not by a sequence the store re-stamps", () => {

@@ -582,7 +582,7 @@ async function defaultProcessInspector(
   pid: number,
 ): Promise<ClaudeProcessIdentity | undefined> {
   const executable = "/bin/ps";
-  return await new Promise((resolve, reject) => {
+  return await new Promise((resolve) => {
     execFile(
       executable,
       ["-o", "uid=,lstart=", "-p", String(pid)],

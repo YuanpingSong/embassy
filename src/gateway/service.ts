@@ -351,10 +351,6 @@ function conversationIdForSuffix(suffix: string | undefined): string {
   return suffix === undefined ? fresh : `${fresh.slice(0, -8)}${suffix}`;
 }
 
-function bodyHash(body: string): string {
-  return createHash("sha256").update(body, "utf8").digest("hex");
-}
-
 function peerCatalogAuthorityChanged(
   prior: PeerCatalogResult | undefined,
   current: PeerCatalogResult,
@@ -1300,10 +1296,6 @@ export class GatewayService {
       routed.alias === this.claimableAlias(candidate, await this.store.listLogicalRoutes())
     ) return routed;
     return await this.installClaudeRoute(candidate);
-  }
-
-  private async resolveClaudeRoute(selector: string, hostId?: string): Promise<GatewayPrivateRouteInspection> {
-    return await this.materializeClaudeRoute(await this.lookUpClaudeRoute(selector, hostId));
   }
 
   private async assertThread(alias: string, threadId: string): Promise<GatewayPrivateRouteInspection> {

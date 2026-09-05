@@ -25,7 +25,7 @@ import type { GatewayDeliveryNoticeMode } from "./config.js";
 import {
   ClaudeNativeHelperSupervisor,
 } from "./claude-helper-supervisor.js";
-import type { ClaudeNativeHelperFactory } from "./claude-helper-client.js";
+import type { ClaudeNativeHelperFactory } from "./claude-helper-supervisor.js";
 import { composeProvenanceEnvelope } from "./provenance-envelope.js";
 import type {
   GatewayAdapterCallbacks,

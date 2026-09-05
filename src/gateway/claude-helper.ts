@@ -5,7 +5,6 @@ import { fileURLToPath } from "node:url";
 import { BridgeError } from "../errors.js";
 import { ClaudePeerAdapter, type ClaudePeerListener, type ClaudePeerPreparedSend } from "./claude-peer.js";
 import { composeProvenanceEnvelope } from "./provenance-envelope.js";
-import type { GatewayAdapterDispatchResult } from "./service.js";
 import {
   assertClaudeNativeHelperIpcSize, CLAUDE_NATIVE_HELPER_MAX_REQUESTS,
   CLAUDE_NATIVE_HELPER_PREPARED_TTL_MS, CLAUDE_NATIVE_HELPER_PROTOCOL_VERSION,

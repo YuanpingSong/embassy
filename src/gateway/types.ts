@@ -14,9 +14,6 @@ export const isGatewayProvider = (value: unknown): value is GatewayProvider =>
 export function directionId(sourceProvider: GatewayProvider, targetProvider: GatewayProvider): MessageDirection {
   return `${sourceProvider}_to_${targetProvider}` as MessageDirection;
 }
-export const messageDirections = Object.freeze(gatewayProviders.flatMap(
-  (sourceProvider) => gatewayProviders.map((targetProvider) => directionId(sourceProvider, targetProvider)),
-)) as readonly MessageDirection[];
 export function parseDirection(value: unknown): ParsedMessageDirection | undefined {
   if (typeof value !== "string") return undefined;
   const separator = value.indexOf("_to_");
@@ -218,9 +215,6 @@ export type DeadlinePressureBucket = {
 export type DeadlinePressureSnapshot = {
   configuredDeadlineMs: number; retainedSince?: string; terminalEvents: number; expiredEvents: number; buckets: DeadlinePressureBucket[];
 };
-const PUBLIC_ALIAS_PATTERN =
-  /^[a-z][a-z0-9_-]{0,31}@[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
-const PUBLIC_HOST_PATTERN = /^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
 const PUBLIC_SAFE_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
 function publicRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -231,45 +225,8 @@ function exactPublicKeys(value: Record<string, unknown>, required: readonly stri
   return required.every((key) => Object.hasOwn(value, key)) &&
     keys.every((key) => required.includes(key) || optional.includes(key));
 }
-function publicTimestamp(value: unknown): value is string {
-  return typeof value === "string" && value.length >= 20 && value.length <= 35 && Number.isFinite(Date.parse(value));
-}
 function nonNegative(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) >= 0;
-}
-export function isPublicAvailablePeerSnapshot(value: unknown): value is PublicAvailablePeerSnapshot {
-  const candidate = publicRecord(value);
-  if (candidate === undefined ||
-    !exactPublicKeys(candidate, ["alias", "provider", "host", "state", "validated", "routed"],
-      ["lastSeenAt", "safeErrorCode"]) ||
-    typeof candidate.alias !== "string" ||
-    !PUBLIC_ALIAS_PATTERN.test(candidate.alias) ||
-    typeof candidate.host !== "string" ||
-    !PUBLIC_HOST_PATTERN.test(candidate.host) ||
-    !candidate.alias.endsWith(`@${candidate.host}`) ||
-    candidate.provider !== "claude" ||
-    typeof candidate.state !== "string" ||
-    !(publicAvailablePeerStates as readonly string[]).includes(candidate.state) ||
-    typeof candidate.validated !== "boolean" ||
-    typeof candidate.routed !== "boolean") return false;
-  return (candidate.lastSeenAt === undefined || publicTimestamp(candidate.lastSeenAt)) &&
-    (candidate.safeErrorCode === undefined ||
-      (typeof candidate.safeErrorCode === "string" && PUBLIC_SAFE_CODE_PATTERN.test(candidate.safeErrorCode)));
-}
-export function arePublicAvailablePeerSnapshots(
-  value: unknown, maximumRows: number = gatewayPublicSnapshotLimits.availablePeers,
-): value is PublicAvailablePeerSnapshot[] {
-  if (
-    !Array.isArray(value) ||
-    !Number.isSafeInteger(maximumRows) ||
-    maximumRows < 0 ||
-    value.length > maximumRows ||
-    !value.every(isPublicAvailablePeerSnapshot)
-  ) {
-    return false;
-  }
-  const aliases = value.map((peer) => `${peer.provider}\0${peer.alias}`);
-  return new Set(aliases).size === aliases.length;
 }
 export function isPublicRegistryObservationSnapshot(value: unknown): value is PublicRegistryObservationSnapshot {
   const candidate = publicRecord(value);

@@ -6,6 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+- The supported package surface is the CLI, skill, and documented JSON; deep imports of shipped `dist` declarations are unsupported, and unused internal exports have been removed.
 - Expired or unknown peer receipts now return `not_found`, not `route_mismatch`; invalid peer principals still refuse as before.
 
 ## [3.0.0] - 2026-09-03

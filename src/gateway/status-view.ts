@@ -604,8 +604,3 @@ export function renderWatchEvent(event: WatchEvent, color: boolean): string {
   const detail = event.event.safeErrorCode === undefined ? "" : `  ${event.event.safeErrorCode}`;
   return paint(`${clockOf(event.event.timestamp)}  ${event.event.action}  ${event.event.aliases.join(", ")}  ${event.event.outcome}${detail}`, "dim");
 }
-
-/** Pure helpers the renderer's own tests drive directly; not part of the CLI surface. */
-export const __test = Object.freeze({
-  connectorWord, overallWord, previewBody, relativeAge, routeView,
-});

@@ -10,7 +10,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { BridgeError } from "../src/errors.js";
 import { ClaudeNativeHelperClient, type ClaudeNativeHelperClientLike,
-  type ClaudeNativeHelperClientStartOptions } from "../src/gateway/claude-helper-client.js";
+  type ClaudeNativeHelperClientStartOptions } from "../src/gateway/claude-helper-supervisor.js";
 import { assertClaudeNativeHelperIpcSize, isClaudeNativeHelperParentMessage,
   CLAUDE_NATIVE_HELPER_PREPARED_TTL_MS,
   type ClaudeNativeHelperCommand, type ClaudeNativeHelperResult } from "../src/gateway/claude-helper-protocol.js";

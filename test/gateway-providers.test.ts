@@ -30,7 +30,7 @@ import type { AttestedClaudePeerRuntime } from "../src/gateway/claude-runtime.js
 import type {
   ClaudeNativeHelperClientLike,
   ClaudeNativeHelperClientStartOptions,
-} from "../src/gateway/claude-helper-client.js";
+} from "../src/gateway/claude-helper-supervisor.js";
 import type {
   ClaudeNativeHelperCommand,
   ClaudeNativeHelperResult,

@@ -40,8 +40,14 @@ import {
 import {
   CONNECTOR_OBSERVATION_STALE_AFTER_MS,
   projectGatewayPublicSnapshot,
-  messageDirections,
+  type MessageDirection,
 } from "../src/gateway/types.js";
+
+const messageDirections = [
+  "claude_to_claude", "claude_to_codex", "claude_to_peer",
+  "codex_to_claude", "codex_to_codex", "codex_to_peer",
+  "peer_to_claude", "peer_to_codex", "peer_to_peer",
+] as const satisfies readonly MessageDirection[];
 
 const THREAD_ID = "00000000-0000-7000-8000-000000000701";
 const CONVERSATION_ID = "conv_0123456789abcdef";
@@ -1269,6 +1275,27 @@ test("list_snapshot requires bounded projection and explicit omission counts", a
     unprojected,
   ];
   assert.ok(candidates.every((candidate) => !isGatewaySnapshot(candidate)));
+});
+
+test("the real snapshot decoder rejects malformed and duplicate available peers", async () => {
+  const { stateDir, socketPath } = await privateState();
+  const valid = snapshot();
+  const duplicate = structuredClone(valid);
+  duplicate.availablePeers.push(structuredClone(duplicate.availablePeers[0]!));
+  const malformed = structuredClone(valid);
+  malformed.availablePeers[0]!.host = "different-host";
+  const candidates = [valid, duplicate, malformed];
+  const server = await startGatewayControlServer({ stateDir, socketPath,
+    handlers: handlers({ listSnapshot: () => candidates.shift()! }) });
+  const request = { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, method: "list_snapshot", params: {} } as const;
+  try {
+    const response = await sendGatewayControlRequest({ socketPath, request });
+    assert.deepEqual(response, { protocolVersion: GATEWAY_CONTROL_PROTOCOL_VERSION, ok: true, result: valid });
+    for (let index = 0; index < 2; index += 1) {
+      await assert.rejects(sendGatewayControlRequest({ socketPath, request }),
+        (error: unknown) => error instanceof GatewayControlTransportError && error.code === "CONTROL_INVALID_RESPONSE");
+    }
+  } finally { await server.close(); }
 });
 
 test("list_snapshot accepts all derived directions and rejects legacy authority schema", async () => {

@@ -33,7 +33,6 @@ const PUBLIC_PACKAGE_PATHS = [
 const GATEWAY_RUNTIME_MODULES = [
   "claude-peer",
   "claude-helper",
-  "claude-helper-client",
   "claude-helper-protocol",
   "claude-helper-supervisor",
   "claude-runtime",
@@ -80,7 +79,6 @@ export const EXPECTED_NPM_PACKAGE_PATHS = Object.freeze(
 const REQUIRED_ESM_IMPORTS = [
   "dist/src/gateway/cli.js",
   "dist/src/gateway/claude-helper.js",
-  "dist/src/gateway/claude-helper-client.js",
   "dist/src/gateway/codex-stateless-transport.js",
   "dist/src/gateway/server.js",
 ];
