@@ -273,3 +273,6 @@ no support-matrix ceremony, no site work beyond the stub.
   after the cleanup: a lightweight macOS GUI / menu-bar app for UX —
   not scoped; the terminal `status`/`watch` and the launchd service
   are the substrate it would sit on.
+- 2026-09-03 Founder clarification: the post-v3 pass is a QUALITY
+  pass, not only focus — use the stronger engineer model to clean up
+  awkward code, behavior-preserving, priced like deletions.
