@@ -574,10 +574,11 @@ export class GatewayService {
   }
 
   handlers(): GatewayControlHandlers {
-    const decide = async (operation: () => Promise<void>, peerPrincipal = false): Promise<GatewayDecision> => {
+    const decide = async (operation: () => Promise<void | GatewayDecision>, peerPrincipal = false): Promise<GatewayDecision> => {
       try {
         this.assertWritable();
-        await operation();
+        const decision = await operation();
+        if (decision !== undefined) return decision;
         this.revision += 1;
         return { accepted: true, code: "ok" };
       } catch (error) {
@@ -1085,11 +1086,11 @@ export class GatewayService {
     return await pending;
   }
 
-  private async peerReceipt(params: PeerReceiptParams): Promise<void> {
+  private async peerReceipt(params: PeerReceiptParams): Promise<void | GatewayDecision> {
     const route = await this.assertPeer(params);
     const adapter = this.adapterFor(route.binding) as LocalPeerMailboxProvider | undefined;
     if (adapter?.acknowledgeReceipt({ alias: route.alias, ...route.binding, receipt: params.receipt }) === "rejected") {
-      throw new BridgeError("ROUTE_UNREGISTERED", "The route binding does not match.");
+      return { accepted: false, code: "not_found" };
     }
   }
 

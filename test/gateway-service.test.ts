@@ -1049,8 +1049,35 @@ test("Claude alias collision overflow drops unfenced candidates and keeps diagno
   } finally { await subject.close(); }
 });
 
+test("receipt expiry during acceptance does not imply a changed route", async () => {
+  const mailbox = new LocalPeerMailboxProvider({ hostId: "this-mac", receiptTimeoutMs: 0 });
+  const expired = deferred<void>();
+  const release = deferred<void>();
+  const dispatch = mailbox.dispatch.bind(mailbox);
+  mailbox.dispatch = (input) => dispatch({ ...input, onAccepted: async (event) => {
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expired.resolve();
+    await release.promise;
+    await input.onAccepted(event);
+  } });
+  const subject = await fixture([mailbox, new FakeProvider({ provider: "codex", hostId: "this-mac" })]);
+  try {
+    const minted = await subject.handlers.registerPeer({ alias: "peer-expiry@this-mac" });
+    assert.ok(minted.accepted && "token" in minted);
+    await subject.handlers.registerCodex({ alias: codex.alias, threadId: THREAD_A,
+      hostId: "this-mac", busyPolicy: "queue" });
+    await subject.handlers.send({ fromAlias: codex.alias, threadId: THREAD_A,
+      toAlias: "peer-expiry@this-mac", text: "expire during acceptance", expectsReply: false });
+    const received = await subject.handlers.awaitPeer({ alias: "peer-expiry@this-mac", token: minted.token });
+    assert.equal(received.state, "message");
+    await expired.promise;
+    assert.deepEqual(await subject.handlers.peerReceipt({ alias: "peer-expiry@this-mac",
+      token: minted.token, receipt: received.receipt }), { accepted: false, code: "not_found" });
+  } finally { release.resolve(); await subject.close(); }
+});
+
 test("a peer waiter kicks cleanly deferred mail and exact receipt settles it once", async () => {
-  const mailbox = new LocalPeerMailboxProvider({ hostId: "this-mac", receiptTimeoutMs: 100,
+  const mailbox = new LocalPeerMailboxProvider({ hostId: "this-mac", receiptTimeoutMs: 10_000,
     now: () => Date.parse("2026-08-16T12:00:00.000Z") });
   const codexProvider = new FakeProvider({ provider: "codex", hostId: "this-mac" });
   const subject = await fixture([mailbox, codexProvider]);
@@ -1078,7 +1105,7 @@ test("a peer waiter kicks cleanly deferred mail and exact receipt settles it onc
 
 test("native Claude STEER text reaches a peer mailbox only through the ordinary lane", async () => {
   const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
-  const mailbox = new LocalPeerMailboxProvider({ hostId: "this-mac", receiptTimeoutMs: 100,
+  const mailbox = new LocalPeerMailboxProvider({ hostId: "this-mac", receiptTimeoutMs: 10_000,
     now: () => Date.parse("2026-08-16T12:00:00.000Z") });
   let observedSteer: true | undefined;
   const dispatch = mailbox.dispatch.bind(mailbox);
@@ -1122,7 +1149,7 @@ test("queued peer mail resumes once after restart under the same hash-only princ
 
     const store = new GatewayStore(subject.config, { now: subject.clock.now,
       randomId: subject.clock.randomId });
-    const mailbox = new LocalPeerMailboxProvider({ hostId: "this-mac", receiptTimeoutMs: 100,
+    const mailbox = new LocalPeerMailboxProvider({ hostId: "this-mac", receiptTimeoutMs: 10_000,
       now: () => subject.clock.now().getTime() });
     const replacementClaude = new FakeProvider({ provider: "claude", hostId: "this-mac" });
     replacement = new GatewayService({ config: subject.config, store,
