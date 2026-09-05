@@ -2046,6 +2046,7 @@ test("retire route covers every local provider and refuses a federated route wit
     claude,
     codex,
     route("peer", "peer-local@this-mac", `peer:${"a".repeat(64)}`, "reg_peer_local"),
+    { ...route("peer", "peer-ephemeral@this-mac", `peer:${"b".repeat(64)}`, "reg_peer_ephemeral"), ephemeral: true as const },
   ]) {
     const claudeProvider = new FakeProvider({ provider: "claude", hostId: "this-mac" });
     const provider = local.binding.provider === "claude"

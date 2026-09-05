@@ -207,7 +207,9 @@ export class ClaudeNativeHelperSupervisor {
         onExit: () => helper ? this.#exit(helper) : earlyExit = true } });
     if (this.#closed || earlyExit) { await client.forceClose().catch(() => undefined); throw fault("CLAUDE_NATIVE_HELPER_UNAVAILABLE", true); }
     helper = { client, alias: input.alias, sourceProvider: input.sourceProvider, closing: false };
-    this.#helpers.set(input.alias, helper); for (const event of buffered) this.#event(helper, event);
+    this.#helpers.set(input.alias, helper);
+    this.#creating.delete(input.alias);
+    for (const event of buffered) this.#event(helper, event);
   }
   async updateStatus(alias: string, status: "idle" | "busy" | "waiting"): Promise<void> {
     const helper = this.#helpers.get(alias); if (helper && !helper.closing) requireOk(await helper.client.request({ method: "update_status", alias, status }));

@@ -79,6 +79,33 @@ test("helper admission releases failed reservations and shutdown joins pending c
   assert.equal(supervisor.size, 0);
 });
 
+test("buffered helper events do not double-count completed creation capacity", async () => {
+  let created = 0, closed = 0;
+  let next: Promise<boolean> | undefined;
+  const registration = { alias: "peer-first@this-mac", sourceProvider: "peer" as const, cwd: "/fixture" };
+  const supervisor: ClaudeNativeHelperSupervisor = new ClaudeNativeHelperSupervisor({
+    identity: { provider: "claude", hostId: "this-mac" }, runtime: { sessionsDir: "/fixture", socketDir: "/fixture" },
+    deliveryNotices: "merged", maxPendingMessages: 4, maxHelpers: 2,
+    callbacks: () => ({ onRouteState: () => undefined, onClaudeReply: () => undefined,
+      onProtocolNotice: () => {
+        next = supervisor.advertise({ ...registration, alias: "peer-second@this-mac" }).then(() => true, () => false);
+      } }),
+    factory: async (options) => {
+      created++;
+      if (options.registration.alias === registration.alias)
+        options.callbacks.onEvent({ event: "protocol_notice", value: { code: "FIXTURE_NOTICE" } });
+      return { pid: 1000 + created, generation: "fixture", registration: options.registration,
+        request: async () => ({ ok: true }), close: async () => { closed++; }, forceClose: async () => { closed++; } };
+    },
+  });
+  try {
+    await supervisor.advertise(registration);
+    assert.equal(await next, true);
+    assert.equal(created, 2);
+  } finally { await supervisor.close(); }
+  assert.equal(closed, created);
+});
+
 test("client lifecycle preserves the exact fake-child transcript", () => {
   assert.equal(execFileSync(process.execPath, [path.join(repoRoot, "test/fixtures/helper-client-transcript.mjs")],
     { encoding: "utf8", timeout: 10_000 }), "emb-121 client transcript: ok\n");

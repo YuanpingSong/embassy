@@ -106,7 +106,7 @@ Commands:
   check [--to <alias>] [--timeout <s>]
                          Round-trip self-test against a registered peer
   refresh                Rescan for Claude sessions
-  retire --alias <alias>  Remove a local route and report settled work
+  retire --alias <alias> Remove a local route and report settled work
   register-codex --alias <codex-alias> [--succeeds <old-alias>]
                          Register or succeed a Codex task
   unregister-codex --alias <codex-alias>

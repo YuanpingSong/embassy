@@ -3123,7 +3123,7 @@ test("service status reports unknown and exits non-zero when launchctl cannot an
   assert.match(stderr.chunks.join(""), /launchctl: spawn \/bin\/launchctl ENOENT\n$/);
 });
 
-test("the installed binary implements exactly the seventeen documented commands", () => {
+test("the installed binary implements exactly the eighteen documented commands", () => {
   // docs/GATEWAY-ARCHITECTURE.md names this list and its count; README's
   // command table covers the same set.
   assert.deepEqual([...gatewayCliCommands], [
