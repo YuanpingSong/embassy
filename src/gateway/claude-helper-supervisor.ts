@@ -182,6 +182,7 @@ export type ClaudeNativeHelperSupervisorOptions = Readonly<{
 
 export class ClaudeNativeHelperSupervisor {
   readonly #helpers = new Map<string, Helper>(); readonly #receipts = new Map<string, Receipt>();
+  readonly #creating = new Map<string, Promise<void>>();
   readonly #preparations = new Set<Preparation>(); readonly #factory: ClaudeNativeHelperFactory; #closed = false;
   constructor(readonly options: ClaudeNativeHelperSupervisorOptions) { this.#factory = options.factory ?? createClaudeNativeHelper; }
   get size(): number { return this.#helpers.size; }
@@ -190,7 +191,15 @@ export class ClaudeNativeHelperSupervisor {
     if (!isGatewayProvider(input.sourceProvider) || !gatewayRegistrationIngressPrefixes[input.sourceProvider] ||
       !input.alias.startsWith(gatewayRegistrationIngressPrefixes[input.sourceProvider]!)) throw fault("PROVENANCE_ENVELOPE_INVALID");
     const old = this.#helpers.get(input.alias); if (old) { if (old.sourceProvider !== input.sourceProvider) throw fault("PROVENANCE_ENVELOPE_INVALID"); return; }
-    if (this.#helpers.size >= this.options.maxHelpers) throw fault("CLAUDE_NATIVE_HELPER_CAPACITY", true);
+    const pending = this.#creating.get(input.alias);
+    if (pending) return await pending;
+    if (this.#helpers.size + this.#creating.size >= this.options.maxHelpers) throw fault("CLAUDE_NATIVE_HELPER_CAPACITY", true);
+    const creation = Promise.resolve().then(() => this.#create(input));
+    this.#creating.set(input.alias, creation);
+    try { await creation; } finally { this.#creating.delete(input.alias); }
+  }
+  async #create(input: ClaudeNativeHelperRegistration): Promise<void> {
+    if (this.#closed) throw fault("CLAUDE_NATIVE_HELPER_SUPERVISOR_CLOSED");
     let helper: Helper | undefined, earlyExit = false; const buffered: ClaudeNativeHelperEvent[] = [];
     const client = await this.#factory({ runtime: this.options.runtime, hostId: this.options.identity.hostId,
       deliveryNotices: this.options.deliveryNotices, maxPendingMessages: this.options.maxPendingMessages, registration: input,
@@ -256,7 +265,10 @@ export class ClaudeNativeHelperSupervisor {
     return "released" in result && result.released;
   }
   async close(): Promise<void> {
-    if (this.#closed) return; this.#closed = true; await Promise.allSettled([...this.#preparations].map((item) => item.cancel()));
+    if (this.#closed) return;
+    this.#closed = true;
+    await Promise.allSettled([...this.#creating.values()]);
+    await Promise.allSettled([...this.#preparations].map((item) => item.cancel()));
     const helpers = [...this.#helpers.values()]; for (const helper of helpers) helper.closing = true;
     const results = await Promise.allSettled(helpers.map((helper) => helper.client.close())); for (const helper of helpers) this.#remove(helper);
     const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected"); if (failed) throw failed.reason;

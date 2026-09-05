@@ -222,7 +222,7 @@ broker.
   The tracked-helper cap is `maxRoutes` (default and maximum 128).
   Federated mirrors are not advertised: their foreign-host aliases are refused
   by the helper, although reconciliation currently still attempts to create it.
-  Known limitation: pending creations are not reserved; overlapping same-alias reconciliations can leave an extra helper outside both the tracked cap and supervisor shutdown cleanup.
+  Pending creations reserve capacity before the factory runs; overlapping same-alias reconciliations share that creation, and shutdown joins pending creations before completing cleanup.
   The prefix is a visible alias convention, not the discriminator: an unmarked
   genuine Claude session named `codex-*` remains discoverable. Each helper creates
   one callback socket and removes only exact-owned artifacts whose generation
@@ -284,7 +284,7 @@ Embassy's provider-facing access is intentionally enumerable:
 - fork advertisement helper processes for local non-Claude routes, each owning one
   callback socket and one registry record (`codex-*` or `peer-*`); the tracked-count
   admission cap is `maxRoutes` (default and maximum 128),
-  subject to the pending-creation and shutdown-cleanup limitation above;
+  including pending creations in that cap;
 - attempt helper creation for federated mirrors, whose foreign-host aliases are
   refused before publishing a record; these mirrors are not advertised;
 - resolve the managed Codex installation and open one attested local App Server

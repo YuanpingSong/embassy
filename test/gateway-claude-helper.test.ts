@@ -22,6 +22,63 @@ async function missing(file: string): Promise<boolean> {
   try { await access(file); return false; } catch (error) { return (error as NodeJS.ErrnoException).code === "ENOENT"; }
 }
 
+test("overlapping helper admission retains and closes every created client", async () => {
+  const clients: Array<ClaudeNativeHelperClientLike & { closes: number }> = [];
+  const supervisor = new ClaudeNativeHelperSupervisor({
+    identity: { provider: "claude", hostId: "this-mac" }, runtime: { sessionsDir: "/fixture", socketDir: "/fixture" },
+    deliveryNotices: "merged", maxPendingMessages: 4, maxHelpers: 1, callbacks: () => undefined,
+    factory: async (options) => {
+      const client = { pid: 1000 + clients.length, generation: "fixture", registration: options.registration, closes: 0,
+        request: async () => ({ ok: true as const }), close: async () => { client.closes++; },
+        forceClose: async () => { client.closes++; } };
+      clients.push(client);
+      return client;
+    },
+  });
+  const registration = { alias: "peer-fixture@this-mac", sourceProvider: "peer" as const, cwd: "/fixture" };
+  await Promise.all([supervisor.advertise(registration), supervisor.advertise(registration)]);
+  assert.equal(clients.length, 1);
+  assert.equal(supervisor.size, 1);
+  await supervisor.close();
+  assert.deepEqual(clients.map((client) => client.closes), [1]);
+});
+
+test("helper admission releases failed reservations and shutdown joins pending creation", async () => {
+  let attempts = 0, closes = 0;
+  let fail = true;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const registration = { alias: "peer-fixture@this-mac", sourceProvider: "peer" as const, cwd: "/fixture" };
+  const supervisor = new ClaudeNativeHelperSupervisor({
+    identity: { provider: "claude", hostId: "this-mac" }, runtime: { sessionsDir: "/fixture", socketDir: "/fixture" },
+    deliveryNotices: "merged", maxPendingMessages: 4, maxHelpers: 1, callbacks: () => undefined,
+    factory: async (options) => {
+      attempts++;
+      if (fail) throw new Error("fixture creation failed");
+      await gate;
+      return { pid: 1000, generation: "fixture", registration: options.registration,
+        request: async () => ({ ok: true }), close: async () => { closes++; }, forceClose: async () => { closes++; } };
+    },
+  });
+  const failed = await Promise.allSettled([supervisor.advertise(registration), supervisor.advertise(registration)]);
+  assert.deepEqual(failed.map((result) => result.status), ["rejected", "rejected"]);
+  assert.equal(attempts, 1);
+  fail = false;
+  const creating = supervisor.advertise(registration);
+  await Promise.resolve();
+  await assert.rejects(supervisor.advertise({ ...registration, alias: "peer-other@this-mac" }),
+    { code: "CLAUDE_NATIVE_HELPER_CAPACITY" });
+  let closed = false;
+  const closing = supervisor.close().then(() => { closed = true; });
+  await Promise.resolve();
+  assert.equal(closed, false);
+  release();
+  await assert.rejects(creating, { code: "CLAUDE_NATIVE_HELPER_UNAVAILABLE" });
+  await closing;
+  assert.equal(closes, 1);
+  assert.equal(supervisor.size, 0);
+});
+
 test("client lifecycle preserves the exact fake-child transcript", () => {
   assert.equal(execFileSync(process.execPath, [path.join(repoRoot, "test/fixtures/helper-client-transcript.mjs")],
     { encoding: "utf8", timeout: 10_000 }), "emb-121 client transcript: ok\n");
