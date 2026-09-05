@@ -336,6 +336,50 @@ function actionableAlerts(alerts: readonly SafeGatewayAlert[]): {
 const messageArrow = (event: Readonly<{ sourceAlias: string; targetAlias: string }>): string =>
   `${event.sourceAlias} → ${event.targetAlias}`;
 
+function renderSessions(snapshot: GatewayPublicSnapshot, now: number, paint: Paint): string[] {
+  const lines: string[] = [];
+  lines.push("", paint("sessions", "bold"));
+  if (snapshot.availablePeers.length === 0) {
+    lines.push("  none discovered — start a Claude Code session, then run `embassy refresh`");
+  } else {
+    const rows = snapshot.availablePeers.slice(0, STATUS_CAPS.sessions).map((peer): Cell[] => {
+      const word = peer.state === "awaiting_approval" ? "awaiting" : peer.state;
+      return [{ value: peer.alias }, { value: word, tone: wordColor(word === "offline" ? "offline" : "ok") },
+        { value: peer.routed ? "routed" : "no route yet" },
+        { value: relativeAge(peer.lastSeenAt, now) }];
+    });
+    for (const line of table(["session", "state", "route", "last seen"], rows, paint)) {
+      lines.push(`  ${line}`);
+    }
+    if (snapshot.availablePeers.length > STATUS_CAPS.sessions) {
+      lines.push(paint(`    ${String(snapshot.availablePeers.length - STATUS_CAPS.sessions)} more discovered session(s) — read \`embassy status --json\``, "dim"));
+    }
+  }
+  const collisions = collisionCount(snapshot);
+  if (collisions > 0) {
+    lines.push(paint(`    ${String(collisions)} discovered Claude name(s) are shared by more than one live session and are hidden from this list; ${STATUS_REMEDY.PEER_ALIAS_COLLISION ?? ""}`, "yellow"));
+  }
+  return lines;
+}
+
+function renderAlerts(alerts: GatewayPublicSnapshot["alerts"], now: number, paint: Paint): string[] {
+  const lines: string[] = [];
+  const { shown, hidden, unexplained } = actionableAlerts(alerts);
+  if (shown.length > 0) {
+    lines.push("", paint("alerts", "bold"));
+    for (const alert of shown) {
+      const subject = alert.alias ?? alert.host ?? alert.provider ?? "";
+      lines.push(`  ${alert.code}${subject === "" ? "" : `  ${subject}`}  ${relativeAge(alert.timestamp, now)}`);
+      lines.push(paint(`    ${STATUS_REMEDY[alert.code] ?? ""}`, "dim"));
+    }
+    if (hidden > 0) lines.push(paint(`  ${String(hidden)} more alert(s) not shown`, "dim"));
+    if (unexplained > 0) {
+      lines.push(paint(`  ${String(unexplained)} alert(s) with no known remedy — read \`embassy status --json\``, "dim"));
+    }
+  }
+  return lines;
+}
+
 export function renderStatus(
   snapshot: GatewayPublicSnapshot, options: StatusViewOptions,
 ): string {
@@ -402,27 +446,7 @@ export function renderStatus(
     lines.push(paint(`  ${String(shellPeers.length - STATUS_CAPS.shellPeers)} more shell peer(s) with empty mailboxes`, "dim"));
   }
 
-  lines.push("", paint("sessions", "bold"));
-  if (snapshot.availablePeers.length === 0) {
-    lines.push("  none discovered — start a Claude Code session, then run `embassy refresh`");
-  } else {
-    const rows = snapshot.availablePeers.slice(0, STATUS_CAPS.sessions).map((peer): Cell[] => {
-      const word = peer.state === "awaiting_approval" ? "awaiting" : peer.state;
-      return [{ value: peer.alias }, { value: word, tone: wordColor(word === "offline" ? "offline" : "ok") },
-        { value: peer.routed ? "routed" : "no route yet" },
-        { value: relativeAge(peer.lastSeenAt, now) }];
-    });
-    for (const line of table(["session", "state", "route", "last seen"], rows, paint)) {
-      lines.push(`  ${line}`);
-    }
-    if (snapshot.availablePeers.length > STATUS_CAPS.sessions) {
-      lines.push(paint(`    ${String(snapshot.availablePeers.length - STATUS_CAPS.sessions)} more discovered session(s) — read \`embassy status --json\``, "dim"));
-    }
-  }
-  const collisions = collisionCount(snapshot);
-  if (collisions > 0) {
-    lines.push(paint(`    ${String(collisions)} discovered Claude name(s) are shared by more than one live session and are hidden from this list; ${STATUS_REMEDY.PEER_ALIAS_COLLISION ?? ""}`, "yellow"));
-  }
+  lines.push(...renderSessions(snapshot, now, paint));
 
   lines.push("", paint("routes", "bold"));
   if (snapshot.routes.length === 0) {
@@ -461,19 +485,7 @@ export function renderStatus(
     if (event.body !== undefined) lines.push(paint(`             ${previewBody(event.body)}`, "dim"));
   }
 
-  const { shown, hidden, unexplained } = actionableAlerts(snapshot.alerts);
-  if (shown.length > 0) {
-    lines.push("", paint("alerts", "bold"));
-    for (const alert of shown) {
-      const subject = alert.alias ?? alert.host ?? alert.provider ?? "";
-      lines.push(`  ${alert.code}${subject === "" ? "" : `  ${subject}`}  ${relativeAge(alert.timestamp, now)}`);
-      lines.push(paint(`    ${STATUS_REMEDY[alert.code] ?? ""}`, "dim"));
-    }
-    if (hidden > 0) lines.push(paint(`  ${String(hidden)} more alert(s) not shown`, "dim"));
-    if (unexplained > 0) {
-      lines.push(paint(`  ${String(unexplained)} alert(s) with no known remedy — read \`embassy status --json\``, "dim"));
-    }
-  }
+  lines.push(...renderAlerts(snapshot.alerts, now, paint));
 
   const omitted = Object.entries(snapshot.truncation)
     .filter((entry): entry is [string, number] => typeof entry[1] === "number" && entry[1] > 0)

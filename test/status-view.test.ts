@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
@@ -457,6 +458,59 @@ test("colour is opt-in, carries no meaning alone, and keeps the table aligned", 
   // Stripping every escape from the coloured render reproduces the plain one:
   // colour adds emphasis, never information — and never width.
   assert.equal(painted.replaceAll(/\u001b\[\d+m/g, ""), plain);
+});
+
+test("mixed status output is a byte-exact plain and colour golden", () => {
+  const fixture = snapshot({
+    ...DEGRADED_FIXTURE,
+    connectors: [connector("claude", { registry: {
+      entriesScanned: 4, parseableRecords: 2, parseableRecordSeenSinceBoot: true,
+      rejected: [{ safeErrorCode: "PEER_ALIAS_COLLISION", count: 2 }], rejectedCodesOmitted: 0,
+    } }), DEGRADED_FIXTURE.connectors[1]!],
+    truncation: { connectors: 0, availablePeers: 3, routes: 0,
+      activityEvents: 0, messages: 120, alerts: 0 },
+  });
+  const goldenOptions = { ...options, version: "9.8.7-golden", recent: 2 };
+  const plain = renderStatus(fixture, goldenOptions);
+  const coloured = renderStatus(fixture, { ...goldenOptions, color: true });
+  const expected = `embassy 9.8.7-golden  broker degraded · snapshot just now
+state dir /private/state/agent-embassy
+sessions scanned 3s ago
+
+connectors
+  claude  ok
+  codex   degraded  MANAGED_CODEX_UNAVAILABLE
+          Either a process outside Embassy holds the managed Codex control socket — quit it — or the managed App Server standalone layout is missing, which starting the daemon alone does not create: follow the Codex prerequisite in the README (the official installer, then the daemon).
+  peer-release@this-mac stale (token or await loop gone)
+          2 message(s) waiting: run \`embassy await --alias peer-release@this-mac --token-stdin\` in the shell holding its token, or \`embassy unregister-peer --alias peer-release@this-mac --token-stdin\`.
+
+sessions
+  session           state  route   last seen
+  advisor@this-mac  busy   routed  3s ago
+    2 discovered Claude name(s) are shared by more than one live session and are hidden from this list; the alias names more than one live session; rename one, or address the session by UUID with --to <session-uuid>.
+
+routes
+  alias                    provider  state  queue  last seen
+  advisor@this-mac         claude    busy   2      discovered 3s
+  codex-reviewer@this-mac  codex     stale  1      30m ago
+  peer-release@this-mac    peer      idle   2      never
+    codex-reviewer@this-mac: That Codex task is gone. Run \`embassy register-codex --alias <new-alias> --succeeds <this alias>\` from the new task, or \`embassy unregister-codex --alias <this alias>\` from the old one.
+
+recent (2 of 3)
+  12s ago    advisor@this-mac → codex-reviewer@this-mac  queued
+  2m ago     codex-reviewer@this-mac → advisor@this-mac  delivered  210 ms
+             The risk is the double-write window; I would gate it behind…
+
+alerts
+  PEER_TUNNEL_UNAVAILABLE  studio  45s ago
+    The SSH tunnel to that node is down; check the node is reachable and its broker is running.
+
+omitted from this snapshot: 3 availablePeers, 120 messages
+`;
+  assert.equal(plain, expected);
+  assert.equal(createHash("sha256").update(coloured).digest("hex"),
+    "1934f78d0b3ab99576609c45def5ee04a27b1fc3351c0bde1fc3752e70f58adb");
+  assert.equal(coloured.replaceAll(/\u001b\[\d+m/g, ""), expected);
 });
 
 test("rendered busy Claude rows show observation remedies without overriding other states", () => {
