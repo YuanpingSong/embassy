@@ -14,7 +14,11 @@ identity, so a rename or replacement never silently retargets queued work.
 ## Requirements
 
 - macOS and Node.js 20 or newer.
-- Claude Code and/or Codex CLI installed for the agents you use.
+- Claude Code installed for the Claude sessions you use.
+- To receive in Codex, use its managed standalone installation with its App
+  Server daemon already running under the same macOS login; merely having a
+  `codex` executable on PATH is insufficient, and Embassy does not install or
+  start that daemon.
 - A private `nodes.json` when choosing an explicit host name or federating;
   first single-machine boot creates one from the short hostname.
 - Key-based, non-interactive SSH between configured machines when federating.
@@ -31,10 +35,16 @@ The launchd service records the absolute installation path used by
 `embassy service install`. After replacing or removing that installation, run
 the install command again.
 
-The agent starts at login and uses launchd's crash-only keepalive policy. A
+`embassy service install` starts the per-user launchd agent immediately and
+arranges login startup; use the same command to reload broker configuration or
+start a stopped installation, and use `embassy service uninstall` to stop and
+unload it.
+
+The agent uses launchd's crash-only keepalive policy. A
 verified `SIGABRT` crash relaunches it. A clean exit, boot refusal, `SIGTERM`,
 or deliberate `kill -9` leaves it stopped; inspect `embassy service status`
-and install/start it deliberately rather than assuming every signal restarts it.
+and run `embassy service install` deliberately rather than assuming every
+signal restarts it.
 
 ## Quickstart
 
@@ -46,11 +56,15 @@ Embassy hosts.
 {"version":1,"host":"studio","nodes":[]}
 ```
 
-The file lives at
-`$XDG_STATE_HOME/agent-embassy/nodes.json`, or
-`~/.local/state/agent-embassy/nodes.json` when `XDG_STATE_HOME` is unset. It
-must be owned by the current user, mode 0600, inside the private mode-0700 state
-directory. If it is absent on first single-machine boot, Embassy derives a
+`nodes.json` lives inside `EMBASSY_STATE_DIR` when set; otherwise it lives in
+`$XDG_STATE_HOME/agent-embassy`, or `~/.local/state/agent-embassy` when
+`XDG_STATE_HOME` is unset; every client shell must use the same state-directory
+configuration captured by the installed service. Create the private state
+directory before saving the example, and set directory mode 0700 and
+`nodes.json` mode 0600 before installing the service.
+
+The file must be owned by the current user, mode 0600, inside the private
+mode-0700 state directory. If it is absent on first single-machine boot, Embassy derives a
 lower-case name from the short hostname and atomically writes the equivalent
 empty-node file. It never rewrites a present inventory.
 
@@ -61,7 +75,17 @@ embassy service install
 embassy health
 ```
 
-A Codex task registers itself from that task's inherited identity. Embassy
+Global npm installation includes `skills/embassy-peer` under the
+`agent-embassy` package in `npm root -g`; the operator can copy that entire
+folder into `~/.codex/skills/` and `~/.claude/skills/`, then ask each agent to
+use it, or provide the shown commands directly to the agent's shell tool.
+
+Read `host` from the `nodes.json` that first boot created and use it as every
+local `@host` suffix; the examples use `@studio` only when you explicitly chose
+`host: studio`, not as a universal alias suffix.
+
+Ask the live Codex CLI task to execute the following registration through its
+shell tool; an ordinary terminal lacks that task's inherited identity. Embassy
 never accepts or prints the task ID:
 
 ```sh
@@ -72,21 +96,34 @@ Claude sessions are discovered and recorded by exact native identity when a
 Claude caller sends or when a named Claude target is resolved. No helper or
 native advertisement process is installed.
 
-From either a Claude session or a registered Codex task, send the body on
-stdin. The sender is inferred from the calling session:
+After Codex registers `codex-reviewer@studio`, ask the live Claude Code session
+to run `embassy send --to codex-reviewer@studio` with 'Please review the change
+and reply using the supplied Embassy hint' on stdin; execute this through the
+agent's shell tool, not an unrelated terminal. The sender is inferred from the calling session:
 
 ```sh
-printf '%s\n' 'Please review the change.' |
-  embassy send --to claude-reviewer@studio
+printf '%s\n' 'Please review the change and reply using the supplied Embassy hint' |
+  embassy send --to codex-reviewer@studio
 ```
 
-The recipient gets a provenance envelope and a conversation-bound reply
-command:
+The receiving Codex task sees a broker hint such as:
+
+```text
+<embassy-reply-hint conversation="conv_EXACT_REFERENCE" ...>Reply by running `embassy send --conversation conv_EXACT_REFERENCE` with the reply body on stdin.</embassy-reply-hint>
+```
+
+It must execute the exact received command to send the reply, because ordinary
+Codex final output is not forwarded automatically and `conv_example` is not a
+usable reference:
 
 ```sh
 printf '%s\n' 'Review complete.' |
   embassy send --conversation conv_example
 ```
+
+For a Claude target, find the current Claude target name with an authorized
+`embassy refresh` followed by `embassy status --json`, or use the exact current
+name supplied by that session.
 
 Conversation references are identity-bound, are not aliases, and may survive a
 broker restart while their retained ledger row and both exact endpoints remain
@@ -114,7 +151,23 @@ See [Delivery semantics](docs/DELIVERY.md) for the phase and receipt contract.
 
 ## Multiple machines
 
-List direct peers in each machine's `nodes.json`. The local broker launches:
+Install Embassy and run `embassy service install` on both Macs; for `studio`
+and `laptop`, use `{"version":1,"host":"studio","nodes":["laptop"]}` on
+studio and `{"version":1,"host":"laptop","nodes":["studio"]}` on laptop,
+with each peer name matching both the remote inventory's `host` and a working
+SSH destination or `~/.ssh/config` Host alias.
+
+After changing a running broker's inventory, reload it with
+`embassy service install`; register `codex-reviewer@laptop` from the live
+Codex task on laptop, then ask the Claude session on studio to run
+`embassy send --to codex-reviewer@laptop` with the message on stdin.
+
+From studio, verify the remote command environment with
+`/usr/bin/ssh laptop 'which -a embassy; node --version; embassy --version'`,
+then verify the corresponding direction from laptop; both remote Node and
+Embassy must resolve without an interactive shell or password prompt.
+
+The local broker launches:
 
 ```text
 /usr/bin/ssh <node> embassy peer-stdio
@@ -138,6 +191,16 @@ ask the owner directly.
 
 ## Operations
 
+Retain `result.deliveryToken` from the successful send response in your current
+session and substitute that exact value for the example; status shows aggregate
+route queues and recent delivery metadata but cannot recover a lost delivery
+token or distinguish identical sends by token.
+
+The ellipses (`...` or `…`), `conv_example`, `dlv_example`, and `<public-id>`
+are substitutions, not runnable literal values: supply the indicated command
+arguments, exact received conversation reference, exact returned delivery
+token, or public endpoint ID respectively.
+
 ```sh
 embassy status
 embassy status --json
@@ -154,6 +217,11 @@ embassy serve                              # foreground alternative
 `status` reports the broker ledger, queue depth, recent message outcomes,
 retirements, each local route's last native operation, and the last bounded SSH
 catalog observation. It does not claim that an idle provider is ready.
+
+Use `delivery-status` to inspect that delivery's phase, pending age or terminal
+code; use `status --json` to identify a stranded local route, and retire it with
+`retire --alias` using its alias or `retire --endpoint` using its public id from `result.routes`,
+understanding that this settles all outstanding work for that endpoint.
 
 `embassy tui` live-updates that metadata in a plain terminal (including over
 SSH). On-screen keys select endpoints, confirm exact-ID local retirement,
@@ -176,7 +244,9 @@ person, while `--json` keeps the envelope.
 
 `check` is a broker-only loopback through the real ledger and coordinator. It
 proves local control, persistence, routing, and receipt handling without
-contacting a live Claude or Codex agent. It is not a provider-readiness test.
+contacting a live Claude or Codex agent. Healthy means the Embassy control
+socket and ledger respond; a passing check exercises only broker loopback, so
+neither proves that a Claude session or Codex task can receive or answer a message.
 
 `retire` removes one local endpoint identity. Queued and reserved work is
 cancelled, armed work becomes ambiguous, and accepted work becomes unconfirmed.
@@ -192,9 +262,12 @@ If departed sessions share a name, retire one exactly with
   provider frames never appear in public output.
 - Every native write is authorized against the exact current endpoint after
   preparation. Names are never silently resolved again during an attempt.
-- SSH uses the fixed system binary, batch mode, no forwarding, and no shell.
-- `health` and `check` describe broker infrastructure, not model readiness or
-  comprehension.
+- Embassy launches `/usr/bin/ssh` directly without a local shell, in batch mode
+  with forwarding disabled; the remote account must resolve the fixed
+  `embassy peer-stdio` command in its non-interactive SSH environment.
+- Healthy means the Embassy control socket and ledger respond; a passing check
+  exercises only broker loopback, so neither proves that a Claude session or
+  Codex task can receive or answer a message.
 
 See [Security](SECURITY.md), [Configuration](docs/CONFIGURATION.md), and
 [Architecture](docs/GATEWAY-ARCHITECTURE.md).
@@ -202,9 +275,19 @@ See [Security](SECURITY.md), [Configuration](docs/CONFIGURATION.md), and
 ## Upgrading to 4.x
 
 Version 4 accepts only fresh private state schema 6 and private control
-protocol 5. It does not migrate or read v3 state. Before upgrading, use the old
-binary to inspect and settle work, stop the broker, preserve a backup of the
-old state, then reset `gateway-state.json`. Keep `nodes.json`.
+protocol 5. It does not migrate or read 3.x state.
+
+Before replacing a 3.x installation, use its matching CLI to inspect and
+settle or explicitly abandon pending work; stop a launchd broker with
+`embassy service uninstall` (or stop the foreground serve process) and confirm
+it is stopped with `embassy service status`, back up and move aside only
+`gateway-state.json` in that broker's state directory while retaining
+`nodes.json`, then install 4.0.0, run `embassy service install`, and re-register
+the Codex tasks.
+
+All state produced by Embassy 3.x is unsupported by 4.x; preserve the matching
+old binary as well as its old state if rollback may be needed, and never run
+the old and new brokers together. See the [reset procedure](docs/CONFIGURATION.md#private-state-reset).
 
 The rollback boundary is the preserved old state plus its matching old binary.
 Do not point an old binary at schema-6 state or a v4 binary at old state.

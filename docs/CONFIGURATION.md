@@ -9,6 +9,8 @@ or version metadata never grants routing authority.
 `EMBASSY_STATE_DIR` may set an absolute state directory. Otherwise Embassy
 uses `$XDG_STATE_HOME/agent-embassy`, or
 `$HOME/.local/state/agent-embassy` when `XDG_STATE_HOME` is unset.
+Every client shell must use the same state-directory configuration captured
+by the installed service.
 
 The directory must be owned by the current user, mode 0700, and must not be a
 symbolic link. `gateway-state.json`, `nodes.json`, and other broker-owned files
@@ -18,8 +20,11 @@ contact the broker. If access was expected, also verify the configured state
 directory belongs to this user; do not start a second broker to work around an
 access denial.
 
-`nodes.json` is the static host and federation inventory. A machine without
-peers uses an empty list:
+`nodes.json` is the static host and federation inventory.
+Create the private state directory before saving the example, and set directory
+mode 0700 and `nodes.json` mode 0600 before installing the service.
+
+A machine without peers uses an empty list:
 
 ```json
 {"version":1,"host":"studio","nodes":[]}
@@ -40,6 +45,9 @@ fallback, dynamic discovery, or multi-hop routing.
 Local route aliases end in the inventory's exact host. `register-codex` and
 `retire` refuse a different host. Remote routes are resolved through the owner
 listed in `nodes`; they can be retired only on that owner.
+Read `host` from the `nodes.json` that first boot created and use it as every
+local `@host` suffix; the examples use `@studio` only when you explicitly chose
+`host: studio`, not as a universal alias suffix.
 
 ## Delivery settings
 
@@ -86,17 +94,34 @@ native agent list.
 
 ### Codex CLI
 
+To receive in Codex, use its managed standalone installation with its App Server
+daemon already running under the same macOS login; merely having a `codex`
+executable on PATH is insufficient, and Embassy does not install or start that daemon.
+
 A Codex task registers itself with `embassy register-codex --alias ...` using
 its inherited `CODEX_THREAD_ID`. The ID is not a command argument or public
 output. Registration is a logical state change and performs no App Server I/O.
 Each delivery independently attests the current App Server interface and exact
 task before authorization, resumes that task without retaining history, and
 writes through a fresh operation.
+The ellipsis in `--alias ...` is a substitution: use the task's chosen
+`codex-` name with this machine's exact `@host` suffix.
 
 `register-codex --succeeds <old-alias>` atomically retires a predecessor and
 installs the caller. It never reanchors pending work to a new identity.
 
 ## SSH federation
+
+Install Embassy and run `embassy service install` on both Macs; for `studio`
+and `laptop`, use `{"version":1,"host":"studio","nodes":["laptop"]}` on
+studio and `{"version":1,"host":"laptop","nodes":["studio"]}` on laptop,
+with each peer name matching both the remote inventory's `host` and a working
+SSH destination or `~/.ssh/config` Host alias.
+
+After changing a running broker's inventory, reload it with
+`embassy service install`; register `codex-reviewer@laptop` from the live
+Codex task on laptop, then ask the Claude session on studio to run
+`embassy send --to codex-reviewer@laptop` with the message on stdin.
 
 For each configured remote node Embassy runs the fixed system SSH client in
 batch mode with forwarding and local commands disabled. Authentication is the
@@ -110,10 +135,12 @@ requires that host to be in its `nodes.json` peer list. The SSH login is
 trusted, so the claim is trusted too. Keep the local `host` correct when
 copying configuration: a wrong allowed host label can misattribute origin.
 
-The non-interactive SSH environment must resolve the intended `embassy`
-installation. Verify that environment with `which -a embassy`. Federation
-does not accept a password, private key, host override, or arbitrary SSH
-argument from Embassy configuration.
+From studio, verify the remote command environment with
+`/usr/bin/ssh laptop 'which -a embassy; node --version; embassy --version'`,
+then verify the corresponding direction from laptop; both remote Node and
+Embassy must resolve without an interactive shell or password prompt.
+Federation does not accept a password, private key, host override, or arbitrary
+SSH argument from Embassy configuration.
 
 Remote endpoint catalogs are bounded memory-only caches. The owner is queried
 again for exact identity resolution. A handoff is one correlated write, the
@@ -135,6 +162,11 @@ embassy service status
 embassy service uninstall
 ```
 
+`embassy service install` starts the per-user launchd agent immediately and
+arranges login startup; use the same command to reload broker configuration or
+start a stopped installation, and use `embassy service uninstall` to stop and
+unload it.
+
 The service is a per-user launchd agent. Installation captures the absolute
 Node executable and Embassy CLI file, plus every nonempty `EMBASSY_*` value and
 `XDG_STATE_HOME` from the installing shell. It captures no other environment
@@ -146,7 +178,7 @@ The plist uses `RunAtLoad` and `KeepAlive` with only `Crashed: true`. A verified
 `SIGABRT` crash relaunches it. A clean exit, nonzero boot refusal, ordinary
 `SIGTERM`, or a deliberate
 `kill -9` leaves the service not running. Use `embassy service status` to
-observe that state and start or reinstall it deliberately.
+observe that state and run `embassy service install` deliberately.
 
 The foreground alternative is `embassy serve`. It does not daemonize or open
 a network listener. Both forms acquire the same fixed host-wide advisory lease
@@ -155,19 +187,25 @@ before provider setup, so only one broker can run.
 ## Private state reset
 
 Version 4 accepts only schema-6 `gateway-state.json`. It deliberately contains
-no v3 converter or compatibility reader. An older or unknown schema refuses
+no 3.x converter or compatibility reader. An older or unknown schema refuses
 with `GATEWAY_STATE_SCHEMA_UNSUPPORTED`; invalid schema-6 bytes refuse with
 `CORRUPT_GATEWAY_STATE`. Refusal does not mutate the installed file.
 
 Reset procedure:
 
-1. With the old matching binary, inspect delivery state and settle or abandon
-   work deliberately.
-2. Stop the broker and confirm the service is not running.
-3. Copy the old `gateway-state.json` to an operator-owned backup.
-4. Move the installed state file aside. Keep the valid `nodes.json`.
-5. Start the v4 broker; it creates fresh schema-6 state.
+1. Before replacing a 3.x installation, use its matching CLI to inspect and
+   settle or explicitly abandon pending work.
+2. Stop a launchd broker with `embassy service uninstall` (or stop the foreground
+   serve process) and confirm it is stopped with `embassy service status`.
+3. Back up and move aside only `gateway-state.json` in that broker's state
+   directory. Keep the valid `nodes.json`.
+4. Install 4.0.0, then run `embassy service install`.
+5. The v4 broker creates fresh schema-6 state.
 6. Re-register Codex tasks. Claude endpoints are recorded on discovery/use.
+
+All state produced by Embassy 3.x is unsupported by 4.x; preserve the matching
+old binary as well as its old state if rollback may be needed, and never run
+the old and new brokers together.
 
 A reset abandons unsettled work and invalidates delivery tokens and
 conversation references. Rollback means stopping v4 and restoring both the old
