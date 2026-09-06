@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [4.2.0] - 2026-09-06
 
 ### Added
 - Multi-host TUI: independent client-side SSH status panes and existing operator actions on configured hosts, with host-bound retirement confirmation and stale/unsupported-response handling. No broker protocol or state change.
