@@ -905,7 +905,6 @@ function cleanCodexResult(
 
 function terminalCodexResult(
   result: Extract<StatelessCodexOperationResult, { phase: "terminal" }>,
-  expectsReply: boolean,
 ): GatewayAdapterDispatchResult {
   if (result.outcome === "failed") {
     return { state: "failed", safeErrorCode: "CODEX_TURN_FAILED" };
@@ -913,20 +912,11 @@ function terminalCodexResult(
   if (result.outcome === "interrupted") {
     return { state: "cancelled", safeErrorCode: "CODEX_TURN_INTERRUPTED" };
   }
-  return {
-    state: "delivered",
-    ...(result.replyCode === "REPLY_TOO_LARGE"
-      ? { safeErrorCode: "CODEX_REPLY_TOO_LARGE" }
-      : {}),
-    ...(expectsReply && result.replyText !== null
-      ? { replyText: result.replyText }
-      : {}),
-  };
+  return { state: "delivered" };
 }
 
 function mapCodexStartResult(
   result: StatelessCodexOperationResult,
-  expectsReply: boolean,
 ): GatewayAdapterDispatchResult {
   if (result.phase === "clean") return cleanCodexResult(result);
   if (result.phase === "armed") {
@@ -935,7 +925,7 @@ function mapCodexStartResult(
   if (result.phase === "accepted") {
     return { state: "unconfirmed", safeErrorCode: result.safeErrorCode };
   }
-  return terminalCodexResult(result, expectsReply);
+  return terminalCodexResult(result);
 }
 
 function mapCodexSteerResult(
@@ -1219,7 +1209,7 @@ export class LocalCodexGatewayProvider implements GatewayProviderAdapter {
     try {
       const result = await operation;
       this.publishOperationObservation(input, result);
-      return mapCodexStartResult(result, input.expectsReply);
+      return mapCodexStartResult(result);
     } finally {
       this.inFlightOperations.delete(operation);
       this.operationControllers.delete(controller);

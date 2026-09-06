@@ -971,8 +971,6 @@ class FakeStatelessCodexOperation implements StatelessCodexOperationTransport {
     cleanupConfirmed: true,
     outcome: "delivered",
     phase: "terminal",
-    replyCode: null,
-    replyText: null,
     state: "terminal",
   });
 
@@ -1130,8 +1128,6 @@ test("stateless Codex dispatch authorizes exact raw and framed evidence", async 
         attemptId: "unused",
         outcome: "delivered",
         phase: "terminal",
-        replyCode: "REPLY_UNAVAILABLE",
-        replyText: null,
         state: "terminal",
       }),
       turnId: "turn_ephemeral_never_projected",
@@ -1141,8 +1137,6 @@ test("stateless Codex dispatch authorizes exact raw and framed evidence", async 
       cleanupConfirmed: false,
       outcome: "delivered",
       phase: "terminal",
-      replyCode: null,
-      replyText: "synthetic reply",
       state: "terminal",
     };
   };
@@ -1158,7 +1152,7 @@ test("stateless Codex dispatch authorizes exact raw and framed evidence", async 
         acceptedAttempt = attemptId;
       },
     }),
-    { state: "delivered", replyText: "synthetic reply" },
+    { state: "delivered" },
   );
   assert.deepEqual(authorized, {
     attemptId: input.attemptId,
@@ -1250,8 +1244,6 @@ test("rejected Codex acceptance cleanup preserves a competing accepted turn", as
             attemptId: steer.attemptId,
             outcome: "delivered",
             phase: "terminal",
-            replyCode: "REPLY_UNAVAILABLE",
-            replyText: null,
             state: "terminal",
           };
         },
@@ -1396,8 +1388,6 @@ test("Codex STEER uses only the exact accepted registration and raw body evidenc
           attemptId: steerInput.attemptId,
           outcome: "delivered",
           phase: "terminal",
-          replyCode: "REPLY_UNAVAILABLE",
-          replyText: null,
           state: "terminal",
         };
       },
@@ -1410,8 +1400,6 @@ test("Codex STEER uses only the exact accepted registration and raw body evidenc
       cleanupConfirmed: true,
       outcome: "delivered",
       phase: "terminal",
-      replyCode: null,
-      replyText: null,
       state: "terminal",
     };
   };
@@ -1465,7 +1453,7 @@ test("Codex provider preserves the closed clean retry and phase mapping table", 
     { attemptId: "c", cleanupConfirmed: true, phase: "clean", safeErrorCode: "HOME_INVALID", state: "failed" },
     { attemptId: "d", cleanupConfirmed: true, phase: "armed", safeErrorCode: "TRANSPORT_WRITE_FAILED", state: "ambiguous" },
     { attemptId: "e", cleanupConfirmed: true, phase: "accepted", safeErrorCode: "ACCEPTANCE_UNCONFIRMED", state: "unconfirmed" },
-    { attemptId: "f", cleanupConfirmed: false, outcome: "interrupted", phase: "terminal", replyCode: null, replyText: null, state: "terminal" },
+    { attemptId: "f", cleanupConfirmed: false, outcome: "interrupted", phase: "terminal", state: "terminal" },
   ];
   operation.handler = async () => results.shift()!;
 

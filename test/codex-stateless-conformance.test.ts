@@ -76,7 +76,7 @@ type Mode =
   | "success" | "busy" | "approval" | "fast" | "sync-loss" | "async-loss"
   | "close" | "timeout" | "malformed" | "wrong" | "large-reply"
   | "failed" | "interrupted" | "duplicate" | "init-loss" | "resume-loss"
-  | "nonempty" | "resume-drift" | "steer-loss" | "wrong-reply"
+  | "nonempty" | "resume-drift" | "steer-loss" | "wrong-reply" | "malformed-output"
   | "accepted-timeout" | "accepted-close" | "steer-reject";
 
 function statelessFixture(
@@ -134,7 +134,8 @@ function statelessFixture(
           if (mode === "wrong") return peer.emit({ id: 999_999, result: start });
           const complete = () => {
             peer.emit({ method: "item/completed", params: {
-              item: { phase: "final_answer", text: mode === "large-reply" ? "oversized" : "ok", type: "agentMessage" },
+              item: mode === "malformed-output" ? { text: null } :
+                { phase: "final_answer", text: mode === "large-reply" ? "oversized" : "ok", type: "agentMessage" },
               threadId: THREAD, turnId: mode === "wrong-reply" ? "turn-other" : TURN,
             }});
             peer.emit({ method: "turn/completed", params: {
@@ -194,7 +195,6 @@ function statelessFixture(
     frames,
     transports,
     operation: createStatelessCodexOperationTransport({
-      maxReplyBytes: 4,
       now: () => new Date(NOW),
       requestTimeoutMs: 10,
       turnTimeoutMs: 10,
@@ -255,7 +255,7 @@ const manifest = JSON.parse(
   contract: Array<{ classification: Classification; id: string; reason: string; scope?: "broker" }>;
   golden: Array<{
     classification: Classification; covers: string[]; id: string;
-    expect: { cleanupConfirmed?: boolean; outcome: string; replyCode?: string; semanticWrites: number };
+    expect: { cleanupConfirmed?: boolean; outcome: string; semanticWrites: number };
   }>;
   wireGolden: { initialize: Frame[]; resume: Frame; start: Frame; steer: Frame };
 };
@@ -274,8 +274,6 @@ function assertGolden(id: string, result: StatelessCodexOperationResult, semanti
   const outcome = result.phase === "terminal" ? `terminal-${result.outcome}` : `${result.phase}-${result.state}`;
   assert.equal(outcome, expected.outcome.replace("-at-plus-one", ""), id);
   assert.equal(semanticWrites, expected.semanticWrites, id);
-  if (expected.replyCode !== undefined)
-    assert.equal("replyCode" in result ? result.replyCode : undefined, expected.replyCode, id);
   if (expected.cleanupConfirmed !== undefined)
     assert.equal(result.cleanupConfirmed, expected.cleanupConfirmed, id);
 }
@@ -285,11 +283,11 @@ test("v1.8 Codex contract has one complete preclassified normalization ledger", 
     HOLD: ["initialize", "resume-empty-history", "busy-approval", "start", "steer", "bounds",
       "consent-identity", "provenance", "queue-deadline-dedupe", "exact-correlation",
       "fast-terminal", "first-terminal-wins", "no-replay-after-uncertainty",
-      "reply-bound-redaction", "cleanup-terminal-truth"],
+      "cleanup-terminal-truth"],
     INTENTIONAL_CHANGE: ["record-only-registration", "connection-per-operation",
       "registration-no-reachability", "desktop-independent-authority",
       "provider-unavailable-retains-route", "connector-health-observation-only"],
-    DELETE: ["loaded-list-admission", "endpoint-generation-authority", "refresh-reanchor-activation",
+    DELETE: ["reply-bound-redaction", "loaded-list-admission", "endpoint-generation-authority", "refresh-reanchor-activation",
       "connector-queue-recovery", "unsubscribe-interrupt-cleanup", "stale-route-lifecycle",
       "setup-observation-rejection", "succession-journals", "reconnect-required-choreography",
       "remove-stale-registration"],
@@ -782,6 +780,8 @@ test("a reserved authorization is fenced by later busy approval or protocol evid
   const evidence = [
     { method: "thread/status/changed", params: { threadId: THREAD, status: { type: "active" } } },
     { id: "approval-race", method: "item/commandExecution/requestApproval", params: { threadId: THREAD, turnId: TURN } },
+    { method: "item/completed", params: { threadId: THREAD, turnId: TURN,
+      item: { type: "agentMessage", text: "pre-write output" } } },
     { id: 999_999, result: {} },
   ];
   for (const event of evidence) {
@@ -817,30 +817,33 @@ test("every post-arm start loss is ambiguous exactly once", async () => {
   }
 });
 
-test("exact start terminals, steer, reply bound, and cleanup preserve first truth", async () => {
+test("exact start terminals ignore output while steer and cleanup preserve first truth", async () => {
   for (const mode of ["success", "failed", "interrupted"] as const) {
     const current = statelessFixture([mode]);
     const result = await current.operation.execute(input(async () => true));
     assertState(result, "terminal", "terminal");
     assert.equal("outcome" in result ? result.outcome : undefined,
       mode === "success" ? "completed" : mode);
-    if (mode === "success") {
-      assert.equal("replyText" in result ? result.replyText : undefined, "ok");
-      assert.equal("replyCode" in result ? result.replyCode : undefined, null);
-    }
+    assert.equal("replyText" in result, false);
+    assert.equal("replyCode" in result, false);
   }
   const bounded = statelessFixture(["large-reply"]);
   const oversized = await bounded.operation.execute(input(async () => true));
   assertState(oversized, "terminal", "terminal");
-  assert.equal("replyText" in oversized ? oversized.replyText : undefined, null);
-  assert.equal("replyCode" in oversized ? oversized.replyCode : undefined, "REPLY_TOO_LARGE");
-  assertGolden("reply-bound", oversized, 1);
+  assert.equal("replyText" in oversized, false);
+  assert.equal("replyCode" in oversized, false);
 
   const correlated = statelessFixture(["wrong-reply"]);
   const ignored = await correlated.operation.execute(input(async () => true));
   assertState(ignored, "terminal", "terminal");
-  assert.equal("replyText" in ignored ? ignored.replyText : undefined, null);
-  assert.equal("replyCode" in ignored ? ignored.replyCode : undefined, "REPLY_UNAVAILABLE");
+  assert.equal("replyText" in ignored, false);
+  assert.equal("replyCode" in ignored, false);
+
+  const malformed = statelessFixture(["malformed-output"]);
+  const malformedIgnored = await malformed.operation.execute(input(async () => true));
+  assertState(malformedIgnored, "terminal", "terminal");
+  assert.equal("replyText" in malformedIgnored, false);
+  assert.equal("replyCode" in malformedIgnored, false);
 
   const cleanup = statelessFixture(["duplicate"], true);
   const terminal = await cleanup.operation.execute(input(async () => true));

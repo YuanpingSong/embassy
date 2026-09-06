@@ -15,7 +15,6 @@ import {
 const DEFAULT_MAX_DEADLINE_MS = 24 * 60 * 60 * 1_000;
 const DEFAULT_MAX_FRAME_BYTES = 1024 * 1024;
 const DEFAULT_MAX_INPUT_BYTES = 64 * 1024;
-const DEFAULT_MAX_REPLY_BYTES = 64 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 const DEFAULT_TURN_TIMEOUT_MS = 2 * 60_000;
 const MAX_FAST_TERMINAL_CANDIDATES = 4;
@@ -35,7 +34,6 @@ const APPROVAL_REQUEST_METHODS = new Set([
 type JsonObject = Record<string, unknown>;
 type OperationPhase = "clean" | "armed" | "accepted" | "terminal";
 type TurnOutcome = "completed" | "failed" | "interrupted";
-type ReplyCode = "REPLY_TOO_LARGE" | "REPLY_UNAVAILABLE" | null;
 export type StatelessCodexRoute = Readonly<{
   alias: string; hostId: string; registrationId: string; threadId: string;
 }>;
@@ -70,7 +68,6 @@ export type StatelessCodexActiveSteerResult =
     }>)
   | (ActiveSteerResultCommon & Readonly<{
       phase: "terminal"; state: "terminal"; outcome: "delivered";
-      replyCode: "REPLY_UNAVAILABLE"; replyText: null;
     }>);
 
 export type StatelessCodexAcceptedOperation = Readonly<{
@@ -126,8 +123,7 @@ export type StatelessCodexOperationResult =
   | (ResultCommon &
       Readonly<{
         phase: "terminal"; state: "terminal";
-        outcome: "delivered" | TurnOutcome; replyCode: ReplyCode;
-        replyText: string | null;
+        outcome: "delivered" | TurnOutcome;
       }>);
 
 export type StatelessCodexObservation = Readonly<{
@@ -146,7 +142,6 @@ export type StatelessCodexOperationTransportOptions = Readonly<{
   maxDeadlineMs?: number;
   maxFrameBytes?: number;
   maxInputBytes?: number;
-  maxReplyBytes?: number;
   now?: () => Date;
   requestTimeoutMs?: number;
   turnTimeoutMs?: number;
@@ -162,7 +157,6 @@ type NormalizedOptions = Readonly<{
   maxDeadlineMs: number;
   maxFrameBytes: number;
   maxInputBytes: number;
-  maxReplyBytes: number;
   now: () => Date;
   requestTimeoutMs: number;
   turnTimeoutMs: number;
@@ -182,17 +176,9 @@ type PreparedRequest = Readonly<{
   id: number;
 }>;
 
-type FastCandidate = {
-  replyCode: ReplyCode;
-  replyText: string | null;
-  terminal: TurnOutcome | null;
-};
+type FastCandidate = { terminal: TurnOutcome | null };
 
-type TerminalResult = Readonly<{
-  outcome: TurnOutcome;
-  replyCode: ReplyCode;
-  replyText: string | null;
-}>;
+type TerminalResult = Readonly<{ outcome: TurnOutcome }>;
 
 type AcceptedOperationKey = Readonly<{
   attemptId: string; registrationId: string; threadId: string; turnId: string;
@@ -331,10 +317,6 @@ function normalizeOptions(
     maxInputBytes: positiveInteger(
       options.maxInputBytes,
       DEFAULT_MAX_INPUT_BYTES,
-    ),
-    maxReplyBytes: positiveInteger(
-      options.maxReplyBytes,
-      DEFAULT_MAX_REPLY_BYTES,
     ),
     now: options.now ?? (() => new Date()),
     requestTimeoutMs: positiveInteger(
@@ -696,8 +678,6 @@ class OperationSession {
                 result = {
                   outcome: "delivered",
                   phase: "terminal",
-                  replyCode: "REPLY_UNAVAILABLE",
-                  replyText: null,
                   state: "terminal",
                 };
               } catch (error) {
@@ -932,10 +912,6 @@ class OperationSession {
       this.candidate(turn.id, true);
       return;
     }
-    if (method === "item/completed") {
-      this.handleCompletedItem(params);
-      return;
-    }
     if (method === "turn/completed") {
       if (!this.targetParams(params)) return;
       const turn = parseTurn(params.turn);
@@ -1002,39 +978,6 @@ class OperationSession {
       this.prewriteProofValid = false;
   }
 
-  private handleCompletedItem(params: unknown): void {
-    if (!this.targetParams(params)) return;
-    if (
-      typeof params.turnId !== "string" ||
-      !validOpaqueId(params.turnId) ||
-      !isRecord(params.item) ||
-      typeof params.item.type !== "string"
-    ) {
-      this.protocolFault();
-      return;
-    }
-    const candidate = this.candidate(params.turnId, false);
-    if (candidate === undefined || candidate.terminal !== null) return;
-    if (params.item.type !== "agentMessage") return;
-    if (params.item.phase !== undefined && params.item.phase !== "final_answer") {
-      return;
-    }
-    if (
-      typeof params.item.text !== "string" ||
-      params.item.text.length === 0 ||
-      params.item.text.includes("\0")
-    ) {
-      return;
-    }
-    if (Buffer.byteLength(params.item.text, "utf8") > this.options.maxReplyBytes) {
-      candidate.replyCode = "REPLY_TOO_LARGE";
-      candidate.replyText = null;
-      return;
-    }
-    candidate.replyCode = null;
-    candidate.replyText = params.item.text;
-  }
-
   private targetParams(params: unknown): params is JsonObject {
     if (!isRecord(params) || typeof params.threadId !== "string") {
       this.protocolFault();
@@ -1059,11 +1002,7 @@ class OperationSession {
       this.protocolFault();
       return undefined;
     }
-    const candidate: FastCandidate = {
-      replyCode: "REPLY_UNAVAILABLE",
-      replyText: null,
-      terminal: null,
-    };
+    const candidate: FastCandidate = { terminal: null };
     this.candidates.set(turnId, candidate);
     return candidate;
   }
@@ -1071,15 +1010,7 @@ class OperationSession {
   private terminalFor(turnId: string): TerminalResult | undefined {
     const candidate = this.candidates.get(turnId);
     if (candidate?.terminal === null || candidate === undefined) return undefined;
-    return {
-      outcome: candidate.terminal,
-      replyCode:
-        candidate.terminal === "completed"
-          ? candidate.replyCode
-          : "REPLY_UNAVAILABLE",
-      replyText:
-        candidate.terminal === "completed" ? candidate.replyText : null,
-    };
+    return { outcome: candidate.terminal };
   }
 
   private waitForTerminal(turnId: string): Promise<TerminalResult> {
