@@ -323,6 +323,14 @@ test("internal threads are drained and unsubscribed without entering the directo
   await discovery.close();
 });
 
+test("sub-agent rows are excluded even when a daemon page disregards its requested source filter", async () => {
+  const wire = new FakeTransport((frame) => frame.method === "initialize" ? {} : {
+    data: [thread(A), thread(B, { source: { subagent: "review" } }), thread(C, { parentThreadId: A })], nextCursor: null,
+  });
+  const discovery = observer(wire, []); await discovery.refresh();
+  assert.deepEqual(discovery.snapshot().threads.map((row) => row.id), [A]); await discovery.close();
+});
+
 test("empty pages with ever-new cursors cannot make the scan unbounded", async () => {
   let pages = 0;
   const wire = new FakeTransport((frame) => {

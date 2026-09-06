@@ -72,6 +72,10 @@ class DiscoveryError extends Error {
 
 const record = (value: unknown): value is JsonObject =>
   typeof value === "object" && value !== null && !Array.isArray(value);
+function rootThread(value: unknown): boolean {
+  if (!record(value) || value.source === undefined) throw new DiscoveryError("PROTOCOL_ERROR");
+  return value.parentThreadId == null && ["cli", "vscode", "exec", "mcp"].includes(String(value.source));
+}
 
 function status(value: unknown): CodexThread["status"] {
   if (!record(value) || typeof value.type !== "string") return "unknown";
@@ -343,7 +347,7 @@ class Observer implements CodexDiscoveryObserver {
       });
       if (!record(page) || !Array.isArray(page.data)) throw new DiscoveryError("PROTOCOL_ERROR");
       for (const value of page.data) {
-        if (record(value) && value.parentThreadId != null) continue;
+        if (!rootThread(value)) continue;
         const thread = parseThread(value);
         if (!scanned.has(thread.id)) scanned.set(thread.id, thread);
         if (scanned.size >= this.#max) { truncated = this.#max < 20; break; }
@@ -415,9 +419,7 @@ class Observer implements CodexDiscoveryObserver {
     if (method === "thread/started") {
       if (!record(params)) throw new DiscoveryError("PROTOCOL_ERROR");
       const thread = parseThread(params.thread);
-      const source = (params.thread as JsonObject).source;
-      if (!["cli", "vscode", "exec", "mcp"].includes(String(source)) ||
-        (params.thread as JsonObject).parentThreadId != null) return undefined;
+      if (!rootThread(params.thread)) return undefined;
       return Object.freeze({
         kind: "upsert", sequence: ++this.#sequence,
         thread: Object.freeze({ ...thread, loaded: true }),

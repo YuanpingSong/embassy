@@ -23,8 +23,8 @@ test("real observer, directory and control discover roots, deduplicate fallback 
   const listeners = new Set<(payload: string) => void>();
   let factoryCloses = 0, transportCloses = 0;
   const threads = [
-    { id: parent, name: "planner", status: { type: "idle" } },
-    { id: child, name: "worker", status: { type: "notLoaded" } },
+    { id: parent, source: "cli", name: "planner", status: { type: "idle" } },
+    { id: child, source: "cli", name: "worker", status: { type: "notLoaded" } },
   ];
   const transport = { cleanupConfirmed: true,
     onMessage: (fn: (payload: string) => void) => { listeners.add(fn); return () => { listeners.delete(fn); }; },
