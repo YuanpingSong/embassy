@@ -38,7 +38,7 @@ test("TUI renders only metadata and distinguishes remote catalog observation fro
   assert.match(text, /broker healthy/);
   assert.match(text, /not a provider readiness proof/);
   assert.match(text, /codex-one@local/);
-  assert.match(text, /queue\s+2/);
+  assert.match(text, /codex-one@local\s+codex\s+2\s+delivered/);
   assert.doesNotMatch(text, /\bDELIVERED\b/);
   assert.match(text, /pm@remote/);
   assert.match(text, /not reported/);

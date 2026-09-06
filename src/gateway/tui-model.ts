@@ -77,10 +77,10 @@ export function tokenFeedback(token: string): string {
   return "format invalid";
 }
 
-export const groups = ["Working", "Waiting", "Ready", "Dormant", "Unobserved", "Faulted", "Cached"] as const;
+export const groups = ["Working", "Waiting", "Faulted", "Ready", "Dormant", "Not reporting", "Cached"] as const;
 export function endpointGroup(row: EndpointRow): number {
   if (!row.local) return 6;
-  return ({ busy: 0, waiting: 1, idle: 2, dormant: 3, systemError: 5 } as Record<string, number>)[String(row.codex?.state)] ?? 4;
+  return ({ busy: 0, waiting: 1, systemError: 2, idle: 3, dormant: 4 } as Record<string, number>)[String(row.codex?.state)] ?? 5;
 }
 
 export function endpointRows(snapshot?: Obj): EndpointRow[] {
@@ -144,10 +144,6 @@ export function summaryLine(row: DeliverySummary): string {
     counts.set(label, (counts.get(label) ?? 0) + 1);
   }
   return `${row.rows.length} unattributed deliveries · ${[...counts].map(([label, count]) => `${label} ${count}`).join(" · ")}`;
-}
-export function retirementLine(item: Obj, now: number): string {
-  const alias = text(item.alias), parsed = typeof item.at === "string" ? Date.parse(item.at) : Number.NaN;
-  return `${Number.isFinite(parsed) ? `${age(now - parsed)} ago` : text(item.at)}  ${alias}${loopback(alias) ? " (loopback check)" : ""}`;
 }
 export const isLoopback = loopback;
 

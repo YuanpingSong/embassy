@@ -14,6 +14,7 @@
       "dependencies": {
         "ink": "7.1.1",
         "react": "19.2.8",
+        "string-width": "8.2.2",
         "wrap-ansi": "10.0.1",
         "ws": "8.21.3"
       },
@@ -24,7 +25,6 @@
         "@types/node": "24.10.1",
         "@types/react": "19.2.18",
         "@types/ws": "8.18.1",
-        "string-width": "8.2.2",
         "tsx": "4.20.6",
         "typescript": "5.9.3"
       },
