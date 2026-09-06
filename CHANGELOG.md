@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `embassy tui`: a metadata-only terminal client for status and existing operator actions, with no new broker protocol or state. Non-TTY output is one status-text snapshot.
 
 ### Fixed
+- TUI operator polish: newest-first delivery rows, fault summaries, unreachable-broker guidance, responsive action feedback, stable endpoint selection, explicit retirement consequences, and keyboard/result navigation.
 - The synchronous-send conformance test uses controlled timeout timers rather than requiring a fake terminal callback to run within 10 ms. A delayed-completion characterization preserves the accepted/unconfirmed timeout outcome and the exactly-once write assertion.
 - Codex client metadata and CLI output derive their version from one `CORE_VERSION` constant.
 

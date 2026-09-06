@@ -163,6 +163,11 @@ broker health, queue depth or last operation: those are not reported by the
 catalog. Run the TUI on the owning machine to inspect its local ledger.
 Disconnected views are marked stale; actions are never automatically retried.
 Without an interactive terminal, `tui` prints the status text once and exits.
+Deliveries are newest-admitted first, with faults distinguished from successful
+delivery. Use 1–4 or Tab to change sections, g/G for first/last row, and Esc to
+return from an action result. Token lookup echoes only the token you type;
+tokens are not added to the general delivery list. Retirement confirmation
+shows the full endpoint identity and the consequences for unsettled work.
 
 Machine output is one closed JSON line shaped as
 `{"ok":true,"command":"status","result":{...}}`; route rows are therefore at

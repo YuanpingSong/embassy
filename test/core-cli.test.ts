@@ -102,12 +102,42 @@ test("CLI register, named send, retained reply and broker check traverse the rea
   };
   try {
     await screenHas(/codex-a@local/);
+    await screenHas(/Embassy local.*ledger rev/);
     keys.write("x"); await screenHas(/Endpoint ID: reg_/);
-    keys.write("y"); await screenHas(/cancelled.*ambiguous.*unconfirmed/);
+    keys.write("y"); await screenHas(/result ready/); keys.write("4");
+    await screenHas(/cancelled.*ambiguous.*unconfirmed/);
     assert.deepEqual((await cli(["status", "--json"])).result.routes, []);
     assert.equal(writes.length, 2, "operator TUI retirement performs no native provider write");
     keys.write("q"); assert.equal(await tui, 0);
   } finally { tuiStop.abort(); await tui; }
+});
+
+test("interactive action errors use the real CLI uncertainty hint through closed control decoding", async (t) => {
+  const root = await mkdtemp(path.join(await realpath(os.tmpdir()), "emb-tui-hint-"));
+  await chmod(root, 0o700);
+  await writeFile(path.join(root, "nodes.json"), JSON.stringify({ version: 1, host: "local", nodes: [] }), { mode: 0o600 });
+  const control = await serveLocalControl({ stateDir: root, socketPath: path.join(root, "control.sock"),
+    handle: async (request) => (request as { method: string }).method === "list_snapshot"
+      ? { ok: true, result: { health: "healthy", revision: 1, routes: [], messages: [], retirements: [] } }
+      : { ok: false, code: "HANDLER_FAILURE" } });
+  const stop = new AbortController();
+  const keys = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {} });
+  const screen = sink(); Object.assign(screen.stream, { isTTY: true, columns: 140, rows: 24 });
+  const running = runCoreCli(["tui"], { env: { EMBASSY_STATE_DIR: root }, stdin: keys,
+    stdout: screen.stream, signal: stop.signal });
+  t.after(async () => { stop.abort(); await running; await control.close(); await rm(root, { recursive: true, force: true }); });
+  const waitFor = async (pattern: RegExp) => {
+    const deadline = Date.now() + 5_000;
+    while (!pattern.test(screen.read()) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.match(screen.read(), pattern);
+  };
+  await waitFor(/broker healthy/);
+  keys.write("c");
+  await waitFor(/result ready/); keys.write("4");
+  await waitFor(/CONTROL_WRITE_OUTCOME_AMBIGUOUS/);
+  await waitFor(/The operation may have applied/);
+  await waitFor(/do not resend an uncertain write/);
+  keys.write("q"); assert.equal(await running, 0);
 });
 
 test("help/version avoid state access", async () => {

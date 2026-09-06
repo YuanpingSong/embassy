@@ -174,7 +174,8 @@ export async function runCoreCli(args: readonly string[], dependencies: CoreCliD
     };
     if (command === "tui") {
       if (args.length !== 1) return invalid();
-      await runTui({ input: stdin, output: stdout, call, renderStatus,
+      await runTui({ input: stdin, output: stdout, call, renderStatus, host: inventory.host,
+        hint: (code) => hint("tui", code, stateDir),
         ...(dependencies.signal ? { signal: dependencies.signal } : {}) });
       return 0;
     }
