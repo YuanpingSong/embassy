@@ -44,8 +44,8 @@ async function fixture(t: TestContext) {
     prepareSend: async () => { providerCalls++; throw new Error("provider called"); },
     close: async () => { peerCloses++; },
   } as unknown as ClaudePeerAdapter;
-  const operation = { execute: async () => { providerCalls++; throw new Error("provider called"); },
-    observe: async () => { providerCalls++; throw new Error("provider called"); } } as StatelessCodexOperationTransport;
+  const operation = { execute: async () => { providerCalls++; throw new Error("provider called"); } } as
+    StatelessCodexOperationTransport;
   const dependencies: CoreRuntimeDependencies = { loginHome: () => root, acquireLease: async () => lease,
     attestClaudeRuntime: async () => ({ sessionsDir: path.join(root, "sessions"), socketDir: path.join(root, "sockets") }),
     createClaudePeer: () => peer, createCodexOperation: () => operation };

@@ -138,7 +138,6 @@ async function fixture(t: TestContext) {
       close: async () => {},
     } as unknown as ClaudePeerAdapter;
     const operation: StatelessCodexOperationTransport = {
-      observe: async () => ({ state: "idle" }),
       execute: async (input) => {
         const frame = JSON.stringify({ route: input.route, text: input.text });
         assert.equal(await input.authorizeWrite({ attemptId: input.attemptId, kind: "codex_turn_start",

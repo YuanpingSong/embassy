@@ -30,7 +30,7 @@ test("CLI register, named send, retained reply and broker check traverse the rea
     createClaudePeer: () => ({ discover: async () => ({ peers: [], rejected: {}, truncated: false, entriesScanned: 0, parseableRecords: 0 }),
       resolveReplyAddress: async () => { throw new Error("no Claude session"); }, assertTargetWorkspaceDisjoint: async () => {},
       prepareSend: async () => { throw new Error("no Claude session"); }, close: async () => {} }),
-    createCodexOperation: () => ({ observe: async () => ({ state: "idle" }), execute: async (input) => {
+    createCodexOperation: () => ({ execute: async (input) => {
       assert.equal(await input.authorizeWrite({ attemptId: input.attemptId, kind: "codex_turn_start",
         bodyBytes: Buffer.byteLength(input.text), frameBytes: Buffer.byteLength(input.text) + 100,
         sha256: createHash("sha256").update(input.text).digest("hex") }), true);

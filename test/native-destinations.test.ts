@@ -305,7 +305,7 @@ test("Claude destination authorizes only after asynchronous final re-attestation
 function transport(
   execute: (input: StatelessCodexOperationInput) => Promise<StatelessCodexOperationResult>,
 ): StatelessCodexOperationTransport {
-  return { execute, observe: async () => ({ state: "idle" }) };
+  return { execute };
 }
 
 test("Codex destination maps every operation phase without forwarding output", async () => {
