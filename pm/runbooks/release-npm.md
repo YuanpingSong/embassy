@@ -17,13 +17,17 @@ Steps, in order — each gates the next:
    do not substitute for the pipeline's own legs.
 1. Landing tree clean, on main, matching origin/main. If a patch is
    supplied: apply it; it must apply without fuzz.
-2. Version pins, all four: `npm version VERSION --no-git-tag-version`
-   (package.json + npm-shrinkwrap.json); `EMBASSY_VERSION` constant in
-   `src/gateway/cli.ts`; the pinned version assertion in
-   `test/gateway-cli.test.ts` ("package metadata" test). Then grep the
-   tree for the previous version string — zero hits outside
-   CHANGELOG.md, historical release notes, and lockfile-internal
-   dependency entries, or stop and list each hit.
+2. Version pins (v4 tree, from 4.0.0): `npm version VERSION
+   --no-git-tag-version` (package.json + npm-shrinkwrap.json);
+   `CORE_VERSION` in `src/gateway/core-cli.ts`; `clientInfo.version` in
+   `src/gateway/codex-stateless-transport.ts` (advertised to the Codex App
+   Server — must equal VERSION); the literal `assert.equal(CORE_VERSION,
+   "VERSION")` in `test/core-cli.test.ts`. Then grep the tree for the
+   previous version string AND any `-dev` suffix of VERSION — zero hits
+   outside CHANGELOG.md, historical release notes, and lockfile-internal
+   dependency entries, or stop and list each hit. (v3 trees used
+   `EMBASSY_VERSION` in `src/gateway/cli.ts` and the "package metadata"
+   test in `test/gateway-cli.test.ts`.)
 3. Insert the PM's CHANGELOG entry (top of list, existing format) and
    write `.github/release-notes/vVERSION.md` verbatim from the brief.
 4. `TMPDIR=/tmp npm run check` IN THE LANDING TREE. Verify counts both
