@@ -78,8 +78,6 @@ function validateInput(input: ComposeProvenanceEnvelopeInput): void {
     input === null ||
     !isGatewayProvider(input.sourceProvider) ||
     !isGatewayProvider(input.recipientProvider) ||
-    (input.sourceProvider === input.recipientProvider &&
-      input.sourceProvider !== "peer") ||
     typeof input.sourceAlias !== "string" ||
     !ALIAS_PATTERN.test(input.sourceAlias) ||
     typeof input.targetAlias !== "string" ||

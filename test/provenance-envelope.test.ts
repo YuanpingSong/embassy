@@ -65,13 +65,12 @@ PONG
   );
 });
 
-test("covers every distinct provider pair through its recipient profile", () => {
+test("covers every provider pair through its recipient profile", () => {
   const providers = ["codex", "claude", "peer"] as const satisfies
     readonly GatewayProvider[];
 
   for (const sourceProvider of providers) {
     for (const recipientProvider of providers) {
-      if (sourceProvider === recipientProvider) continue;
       const sourceAlias = `${sourceProvider}-source@this-mac`;
       const targetAlias = `${recipientProvider}-target@this-mac`;
       const envelope = compose({
@@ -342,10 +341,6 @@ test("rejects invalid providers, aliases, conversation tokens, and body types", 
       "PROVENANCE_ENVELOPE_INVALID",
     );
   }
-  assertBridgeError(
-    () => compose({ sourceProvider: "codex", recipientProvider: "codex" }),
-    "PROVENANCE_ENVELOPE_INVALID",
-  );
 
   assertBridgeError(
     () =>
