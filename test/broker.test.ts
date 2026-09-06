@@ -37,6 +37,8 @@ test("broker resolves inherited callers, sends/replies in one step, and retires 
   await broker.start();
   const registered = await broker.register(codex, "codex-builder@local");
   assert.equal(JSON.stringify(registered).includes(codex.handle), false);
+  await directory.reconcileCodex([{ id: codex.handle, loaded: false, status: "dormant" }]);
+  assert.equal((await directory.named("codex-builder@local"))?.id, registered.id);
   const outbound = await broker.send(caller, { to: "codex-builder@local" }, "hello");
   await coordinator.wake((await store.snapshot()).endpoints.find((e) => e.provider === "codex")!);
   const sent = await broker.delivery(outbound.deliveryToken);

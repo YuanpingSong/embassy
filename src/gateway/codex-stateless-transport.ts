@@ -95,6 +95,7 @@ export type StatelessCodexSafeErrorCode =
   | "APPROVAL_REQUIRED"
   | "INPUT_INVALID"
   | "MESSAGE_EXPIRED"
+  | "OBSERVER_BACKPRESSURE"
   | "PROTOCOL_ERROR"
   | "REQUEST_TIMEOUT"
   | "RESULT_SCHEMA_MISMATCH"
@@ -1069,9 +1070,9 @@ class OperationSession {
     resolve(terminal);
   }
 
-  private protocolFault(): void {
+  private protocolFault(code: "PROTOCOL_ERROR" | "OBSERVER_BACKPRESSURE" = "PROTOCOL_ERROR"): void {
     if (this.protocolFailure !== undefined) return;
-    this.protocolFailure = new OperationError("PROTOCOL_ERROR");
+    this.protocolFailure = new OperationError(code);
     this.sideChannelEvidenceValid = false;
     this.rejectPending(this.protocolFailure);
     const reject = this.terminalReject;
@@ -1116,7 +1117,7 @@ class OperationSession {
     }
     if (threadId === this.input.route.threadId) return;
     if (this.hygiene.size >= MAX_HYGIENE_REQUESTS) {
-      this.protocolFault();
+      this.protocolFault("OBSERVER_BACKPRESSURE");
       return;
     }
     let prepared: PreparedRequest;

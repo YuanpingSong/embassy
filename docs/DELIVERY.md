@@ -120,6 +120,9 @@ broker restart while its bounded retained row and both endpoint identities are
 still valid. Retirement, replacement, retention expiry, eviction, or state
 reset makes it unavailable. Conversation references are intentionally not
 stable across a reset.
+If an unused automatic endpoint is pruned from the discovery window, references
+bound to that identity refuse for the rest of their retention window, even if
+the native thread returns as a new endpoint. Re-address it by its current alias.
 
 ## Receipts and retirement
 

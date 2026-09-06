@@ -845,6 +845,25 @@ test("operation connections unsubscribe unrelated auto-attached threads without 
   assertState(await execution, "terminal", "terminal");
 });
 
+test("unsubscribe backpressure after acceptance stays unconfirmed without replay", async () => {
+  const current = statelessFixture(["accepted-timeout"], false, { turnTimeoutMs: 10_000 });
+  let accepted!: () => void;
+  const ready = new Promise<void>((resolve) => { accepted = resolve; });
+  const execution = current.operation.execute(input(async () => true, "synthetic body", async () => { accepted(); }));
+  await ready;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const wire = current.transports[0]!, send = wire.send.bind(wire);
+  wire.send = async (payload) => {
+    if (JSON.parse(payload).method !== "thread/unsubscribe") await send(payload);
+  };
+  for (let i = 0; i < 17; i++) wire.emit({ method: "thread/started", params: { thread: { id: `unrelated-${i}` } } });
+  const result = await execution;
+  assertState(result, "accepted", "unconfirmed");
+  assertCode(result, "OBSERVER_BACKPRESSURE");
+  assert.equal(current.counts().semanticWrites, 1);
+  assert.equal(wire.closed, true);
+});
+
 test("history setup loss and expiry remain clean with zero authorization or body send", async () => {
   for (const mode of ["init-loss", "resume-loss", "nonempty"] as const) {
     const current = statelessFixture([mode]);

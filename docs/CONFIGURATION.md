@@ -126,10 +126,12 @@ listed after restart even outside the discovery window. Window aging preserves
 automatic rows referenced by pending work, but drops unused automatic rows to
 release capacity. No retirement, suppression or settlement occurs. A returning
 root keeps its ID while retained/pending; after pruning it receives a fresh ID,
-and old receipts never retarget. The existing 128-endpoint bound remains.
+and old receipts never retarget. An unnamed root gets a new generated alias
+after pruning. The existing 128-endpoint bound remains.
 No discovered/registered badge is exposed.
-A later native observation may replace a fallback alias with the current
-native-derived alias without moving the endpoint identity or its admitted work.
+Explicitly registered rows keep their registered aliases through native scans;
+native names drive automatic rows only. A later explicit registration can rename
+the retained row without moving its identity or admitted work.
 The ellipsis in `--alias ...` is a substitution: use the task's chosen
 `codex-` name with this machine's exact `@host` suffix.
 

@@ -92,6 +92,20 @@ function observer(
   );
 }
 
+test("unsubscribe overflow reports observer backpressure, not a malformed protocol", async () => {
+  const wire = new FakeTransport((frame) => frame.method === "thread/list" ? { data: [], nextCursor: null } : {});
+  const discovery = observer(wire, [], { maxEndpoints: 1 });
+  try {
+    await discovery.refresh();
+    wire.emit({ method: "thread/started", params: { thread: thread(A) } });
+    wire.emit({ method: "thread/started", params: { thread: thread(B) } });
+    wire.emit({ method: "thread/started", params: { thread: thread(C) } });
+    await tick();
+    assert.equal(discovery.snapshot().observation.safeErrorCode, "OBSERVER_BACKPRESSURE");
+    assert.equal(discovery.snapshot().observation.complete, false);
+  } finally { await discovery.close(); }
+});
+
 test("discovery initializes before a bounded paged scan and projects only consumed metadata", async () => {
   const snapshots: CodexDiscoverySnapshot[] = [];
   const wire = new FakeTransport((frame) => {

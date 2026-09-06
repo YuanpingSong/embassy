@@ -392,7 +392,7 @@ class Observer implements CodexDiscoveryObserver {
       typeof params.thread.id === "string" && UUID.test(params.thread.id)) {
       const id = params.thread.id.toLowerCase();
       if (!this.#unsubscribe.has(id) && this.#unsubscribe.size >= this.#max) {
-        this.#connectionLost(this.#session, new DiscoveryError("PROTOCOL_ERROR")); return;
+        this.#connectionLost(this.#session, new DiscoveryError("OBSERVER_BACKPRESSURE")); return;
       }
       this.#unsubscribe.add(id); this.#drainUnsubscribe();
     }

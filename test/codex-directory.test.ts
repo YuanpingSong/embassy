@@ -48,7 +48,7 @@ async function fixture(t: { after: (cleanup: () => Promise<void>) => void }, lim
   return { claude, directory, store };
 }
 
-test("native discovery reuses manual identity, renames one row, and defensively deduplicates UUIDs", async (t) => {
+test("native discovery preserves registered aliases while automatic aliases follow native names", async (t) => {
   const f = await fixture(t);
   const manual = await f.directory.registerCodex(IDS[0], "codex-manual@local");
   const result = await f.directory.reconcileCodex([
@@ -56,10 +56,17 @@ test("native discovery reuses manual identity, renames one row, and defensively 
     thread(IDS[0].toUpperCase(), "Review Agent"),
   ]);
   assert.equal(result.truncated, false);
-  assert.deepEqual(result.endpoints, [{ ...manual, alias: "codex-review-agent@local" }]);
+  assert.deepEqual(result.endpoints, [manual]);
   assert.deepEqual((await f.store.snapshot()).endpoints, result.endpoints);
   await f.directory.reconcileCodex([thread(IDS[0], "Renamed")]);
-  assert.deepEqual((await f.store.snapshot()).endpoints, [{ ...manual, alias: "codex-renamed@local" }]);
+  assert.deepEqual((await f.store.snapshot()).endpoints, [manual]);
+  await f.directory.reconcileCodex([thread(IDS[0])]);
+  assert.deepEqual(await f.directory.named(manual.alias), manual);
+  const renamed = await f.directory.registerCodex(IDS[0], "codex-explicit@local", manual.alias);
+  await f.directory.reconcileCodex([thread(IDS[0], "Native name"), thread(IDS[1], "Automatic")]);
+  assert.deepEqual(await f.directory.named(renamed.alias), renamed);
+  await f.directory.reconcileCodex([thread(IDS[1], "Renamed")]);
+  assert.equal((await f.directory.named("codex-renamed@local"))?.handle, IDS[1]);
 });
 
 test("unnamed and native-ID-shaped names derive stable aliases only from the public endpoint ID", async (t) => {

@@ -54,7 +54,8 @@ registration gets a new ID; old replies and remote references cannot revive.
 
 Codex endpoints are discovered as bounded metadata from the same-user App
 Server daemon. The immutable native thread UUID is their private identity;
-native names are mutable lookup aliases. Only the 20 most recent roots are
+native names are mutable lookup aliases for automatic rows; explicitly registered
+rows keep the operator's alias. Only the 20 most recent roots are
 automatically listed, without publishing native IDs. Explicit registration by a
 task that inherits the exact UUID remains a fallback and reconciles with the
 same endpoint row. Claude endpoints are discovered by exact session UUID and recorded

@@ -57,7 +57,7 @@
     "probe:codex-remote": "tsx scripts/probe-codex-remote.ts",
     "pretest": "npm run build",
     "start": "node dist/src/gateway/core-cli.js serve",
-    "test": "tsx --test test/*.test.ts",
+    "test": "tsx --test --test-timeout=120000 test/*.test.ts",
     "typecheck": "tsc -p tsconfig.json",
     "soak": "tsx --test test/soak/core-soak.test.ts"
   },

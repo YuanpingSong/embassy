@@ -112,7 +112,7 @@ export class EndpointDirectory {
         }
         const endpoint: Endpoint = { id: existing?.id ?? this.#id("codex", handle), host: this.options.host,
           provider: "codex", alias: "", handle, ...(existing?.retained ? { retained: true as const } : {}) };
-        endpoint.alias = this.#codexAlias(thread, endpoint.id);
+        endpoint.alias = existing?.retained ? existing.alias : this.#codexAlias(thread, endpoint.id);
         ledger.register(endpoint);
         metadata.push([endpoint.id, thread]);
       }
