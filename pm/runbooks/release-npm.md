@@ -19,10 +19,10 @@ Steps, in order — each gates the next:
    supplied: apply it; it must apply without fuzz.
 2. Version pins (v4 tree, from 4.0.0): `npm version VERSION
    --no-git-tag-version` (package.json + npm-shrinkwrap.json);
-   `CORE_VERSION` in `src/gateway/core-cli.ts`; `clientInfo.version` in
-   `src/gateway/codex-stateless-transport.ts` (advertised to the Codex App
-   Server — must equal VERSION); the literal `assert.equal(CORE_VERSION,
-   "VERSION")` in `test/core-cli.test.ts`. Then grep the tree for the
+   `CORE_VERSION` in `src/gateway/core-version.ts` (the single source of
+   truth since 4.0.0 — core-cli.ts and codex-stateless-transport.ts import
+   it, so the version advertised to the Codex App Server follows); the
+   literal `assert.equal(CORE_VERSION, "VERSION")` in `test/core-cli.test.ts`. Then grep the tree for the
    previous version string AND any `-dev` suffix of VERSION — zero hits
    outside CHANGELOG.md, historical release notes, and lockfile-internal
    dependency entries, or stop and list each hit. (v3 trees used
