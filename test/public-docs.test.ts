@@ -60,7 +60,7 @@ test("quickstart teaches inferred sending, native receiving, and identity-bound 
     read("README.md"), read("site/index.html"), helpText(),
   ]);
   assert.match(readme, /sender is inferred from the calling session/i);
-  assert.match(readme, /embassy send --to claude-reviewer@studio/);
+  assert.match(readme, /embassy send --to codex-reviewer@studio/);
   assert.match(readme, /embassy send --conversation conv_example/);
   assert.match(readme, /\.result\.routes/);
   assert.match(readme, /\{"ok":true,"command":"status","result":\{\.\.\.\}\}/);
@@ -193,7 +193,7 @@ test("status and check are not advertised as provider readiness", async () => {
   ]);
   for (const document of [readme, security, architecture, agent]) {
     assert.match(document, /check/i);
-    assert.match(squash(document), /not (?:a )?provider[- ]readiness|do not prove provider readiness|Neither is a provider readiness/i);
+    assert.match(squash(document), /not (?:a )?provider[- ]readiness|do not prove provider readiness|Neither is a provider readiness|neither proves that a Claude session or Codex task can receive or answer a message/i);
   }
   assert.match(readme, /each local route's last native operation/i);
 });
