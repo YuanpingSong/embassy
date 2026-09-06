@@ -158,7 +158,8 @@ export function createTuiSshClient(options: Readonly<{
     if (!exact(envelope, ["ok", "command", "result"]) || !isBrokerResult(command.method, envelope.result)) return await unsupported();
     if ((command.method === "list_snapshot" || command.method === "refresh_discovery") &&
       (envelope.result as { routes: Array<{ host: string }> }).routes.some((row) => row.host !== host))
-      throw new TuiSshError("CONTROL_INVALID_RESPONSE", "host mismatch");
+      throw new TuiSshError(request.mutating ? "CONTROL_WRITE_OUTCOME_AMBIGUOUS" : "CONTROL_INVALID_RESPONSE",
+        request.mutating ? undefined : "host mismatch");
     return envelope.result;
   };
 

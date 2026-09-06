@@ -127,6 +127,11 @@ test("unknown version, extra output, fatal UTF-8, and host mismatch never become
     error instanceof TuiSshError && error.code === "CONTROL_INVALID_RESPONSE" && error.detail?.detail === "host mismatch");
   assert.equal(h.calls.length, 1, "a host mismatch is not mislabeled as version skew");
   client.close();
+  const refresh = scripted([envelope("refresh", { routes: [{ id: "reg_worker", alias: "worker@another", provider: "codex", host: "another" }] })]);
+  const mutating = createTuiSshClient({ nodes: ["remote"], spawn: refresh.spawn });
+  await expectCode(mutating.call("remote", { method: "refresh_discovery", params: {} }), "CONTROL_WRITE_OUTCOME_AMBIGUOUS");
+  assert.equal(refresh.calls.length, 1, "an invalid mutation result neither replays nor probes version");
+  mutating.close();
 });
 
 test("recognized refusals survive while uncertain action output and transport loss stay ambiguous", async () => {

@@ -330,7 +330,8 @@ export async function runTui(dependencies: TuiDependencies): Promise<void> {
   const scheduleDraw = () => {
     if (closed) return;
     drawTimer = setTimeout(() => {
-      if (panes.length > 1 || panes.some((p) => p.pollInFlight || p.actionDepth > 0) || model.error || !model.snapshot) draw();
+      // Successful local polls already repaint every host's age once per second.
+      if (panes[0]!.pollInFlight || panes[0]!.actionDepth > 0 || !panes[0]!.model.snapshot) draw();
       scheduleDraw();
     }, 1_000);
     drawTimer.unref?.();
