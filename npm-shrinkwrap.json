@@ -1,12 +1,12 @@
 {
   "name": "agent-embassy",
-  "version": "4.0.0-dev",
+  "version": "4.0.0",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "agent-embassy",
-      "version": "4.0.0-dev",
+      "version": "4.0.0",
       "license": "MIT",
       "os": [
         "darwin"

@@ -16,7 +16,7 @@ import { runCoreRuntime } from "./runtime.js";
 import { defaultRunLaunchctl } from "./service-agent.js";
 import { runCoreServiceCommand } from "./core-service-command.js";
 
-export const CORE_VERSION = "4.0.0-dev";
+export const CORE_VERSION = "4.0.0";
 const HELP = `Embassy — named Claude/Codex messaging over local gateways and SSH
 
   embassy register-codex --alias <codex-name@host> [--succeeds <old-alias>]

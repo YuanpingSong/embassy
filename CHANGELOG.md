@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased] — v4
+## [4.0.0] - 2026-09-06
 
 ### Changed
 - Replaced the accumulated route/service machinery with endpoint identities, one bounded delivery ledger, one batch coordinator, and explicit Claude, Codex, and SSH destinations. All four Claude/Codex directions work locally and across configured SSH nodes.
