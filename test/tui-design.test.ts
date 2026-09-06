@@ -153,11 +153,13 @@ test("endpoint layout protects outcome codes from long aliases at standard width
   }
 });
 
-test("selection caret starts delivery and retirement rows at terminal column zero", () => {
+test("selection caret starts delivery, retirement and result rows at terminal column zero", () => {
   const delivery = renderTui(tuiDesignFixture("deliveries"), 100, 30, FIXED_TUI_NOW, false);
   assert.match(delivery, /^> .*delivered/m);
   const retirement = renderTui(tuiDesignFixture("retirements"), 100, 30, FIXED_TUI_NOW, false);
   assert.match(retirement, /^> .*codex-old-release@m5dev/m);
+  const result = renderTui(tuiDesignFixture("result"), 100, 30, FIXED_TUI_NOW, false);
+  assert.match(result, /^> delivery /m);
 });
 
 test("unknown provider state is dim beneath the Not reporting group", () => {

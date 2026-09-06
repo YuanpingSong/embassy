@@ -183,7 +183,9 @@ function content(model: Readonly<TuiModel>, color: boolean, now: number, width: 
     rows.forEach((row, index) => {
       const state = /"(?:state|status|health|outcome)":\s*"([a-zA-Z]+)"/.exec(String(row))?.[1];
       entries.push({ key: `result-${index}`, index, height: 1,
-        node: <ToneText color={color} {...(state ? { value: state } : {})} bold={index === 0}>{clean(row)}</ToneText> });
+        node: <DataLine selected={index === selected} color={color} width={width} cells={[
+          { value: clean(row), width: width - 2, ...(state ? { tone: state } : {}), bold: index === 0 },
+        ]} /> });
     });
   }
   return entries;
