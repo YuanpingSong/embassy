@@ -80,7 +80,7 @@ export class EndpointDirectory {
   }
 
   async reconcileCodex(threads: readonly CodexThread[], positiveRemovedIds: readonly string[] = [],
-    incomplete = false): Promise<CodexReconciliation> {
+    incomplete = false, confirmedWindow = !incomplete): Promise<CodexReconciliation> {
     this.#automaticCodex = true;
     const current = new Map<string, CodexThread>();
     for (const thread of threads) {
@@ -97,6 +97,10 @@ export class EndpointDirectory {
         const endpoint = state.endpoints.find((row) => row.provider === "codex" && row.handle === handle);
         if (endpoint !== undefined) ledger.retire(reference(endpoint));
       }
+      if (confirmedWindow && !incomplete) state.endpoints = state.endpoints.filter((row) =>
+        row.provider !== "codex" || row.retained || current.has(row.handle) ||
+        state.deliveries.some((delivery) => delivery.state.phase !== "terminal" &&
+          (sameEndpoint(delivery.source, row) || sameEndpoint(delivery.target, row))));
       let overflow = false;
       const metadata: [string, CodexThread][] = [];
       for (const [handle, thread] of current) {
@@ -116,13 +120,13 @@ export class EndpointDirectory {
     });
     const retainedIds = new Set(reconciled.endpoints.map((endpoint) => endpoint.id));
     for (const id of this.#codexMetadata.keys()) if (!retainedIds.has(id)) this.#codexMetadata.delete(id);
-    if (!incomplete && !reconciled.overflow) this.#codexMetadata.clear();
+    if (confirmedWindow && !incomplete && !reconciled.overflow) this.#codexMetadata.clear();
     for (const [id, thread] of reconciled.metadata) this.#codexMetadata.set(id, thread);
-    this.#codexProofIncomplete = incomplete || reconciled.overflow;
+    this.#codexProofIncomplete = incomplete || reconciled.overflow || (!confirmedWindow && this.#codexProofIncomplete);
     return { endpoints: reconciled.endpoints, truncated: this.#codexProofIncomplete };
   }
 
-  codexMetadata(endpoint: Endpoint, allEndpoints: readonly Endpoint[]): CodexEndpointMetadata | undefined {
+  codexMetadata(endpoint: Endpoint): CodexEndpointMetadata | undefined {
     if (endpoint.provider !== "codex") return undefined;
     const thread = this.#codexMetadata.get(endpoint.id);
     return { state: thread?.status ?? "unknown" };

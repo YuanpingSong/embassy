@@ -122,11 +122,12 @@ the same endpoint kind as discovery, and a matching native identity cannot
 create a duplicate. Each delivery independently attests the current App Server
 interface and exact task before authorization.
 Explicit registration sets a private retention marker, so older roots remain
-listed after restart even outside the discovery window. Window aging only hides
-an automatic row: no retirement, suppression or settlement occurs. Its identity
-remains for admitted work and is reused if it returns to the top 20. Identity
-records still share the existing 128-endpoint bound; retire unused endpoints
-to release capacity. No discovered/registered badge is exposed.
+listed after restart even outside the discovery window. Window aging preserves
+automatic rows referenced by pending work, but drops unused automatic rows to
+release capacity. No retirement, suppression or settlement occurs. A returning
+root keeps its ID while retained/pending; after pruning it receives a fresh ID,
+and old receipts never retarget. The existing 128-endpoint bound remains.
+No discovered/registered badge is exposed.
 A later native observation may replace a fallback alias with the current
 native-derived alias without moving the endpoint identity or its admitted work.
 The ellipsis in `--alias ...` is a substitution: use the task's chosen

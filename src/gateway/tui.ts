@@ -171,7 +171,7 @@ function lineFor(row: Obj | EndpointRow | DeliverySummary | string, section: Sec
   const item = row as Obj;
   if (section === "deliveries") { const state = text(item.state);
     const code = unsuccessful.has(state) && item.safeErrorCode ? ` !${text(item.safeErrorCode)}` : "";
-    const source = text(item.source, "retired sender"), target = text(item.target, "remote/retired recipient");
+    const source = text(item.source, "unavailable sender"), target = text(item.target, "unavailable recipient");
     return `${age(item.ageMs)} ago  ${state}${code}  ${source} -> ${target}${loopback(source) || loopback(target) ? " (loopback check)" : ""}`;
   }
   const alias = text(item.alias), parsed = typeof item.at === "string" ? Date.parse(item.at) : Number.NaN;
@@ -214,7 +214,7 @@ export function renderTui(model: Readonly<TuiModel>, columns = 80, rows = 24, no
     lines.push(`Updated ${model.snapshotAt ? `${age(now - model.snapshotAt)} ago` : "never"} · not a provider readiness proof`);
   }
   if (model.restarted) lines.push("Ledger revision decreased; broker restarted/reset.");
-  if (object(snapshot?.codex)) lines.push(`Codex discovery ${snapshot.codex.complete ? "complete" : "partial"}${snapshot.codex.truncated ? " · truncated" : ""} · ${observedAge(snapshot.codex.observedAt, now)}${snapshot.codex.safeErrorCode ? ` !${text(snapshot.codex.safeErrorCode)}` : ""}`);
+  if (object(snapshot?.codex)) lines.push(`Codex discovery ${snapshot.codex.complete ? "up to 20 most recent" : "partial"}${snapshot.codex.truncated ? " · truncated" : ""} · ${observedAge(snapshot.codex.observedAt, now)}${snapshot.codex.safeErrorCode ? ` !${text(snapshot.codex.safeErrorCode)}` : ""}`);
   const failed = list(snapshot?.messages).filter((row) => row.state === "failed").length;
   const tabs: Section[] = ["endpoints", "deliveries", "retirements", "result"];
   const tabName = (tab: Section) => tab === "deliveries" && failed ? `deliveries (${failed} failed)` : tab;

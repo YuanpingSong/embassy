@@ -182,8 +182,8 @@ One bounded App Server observer enumerates the recency top 20 unarchived root th
 combines loaded-state and lifecycle/name events, and retains only the metadata
 used by the endpoint directory. It drains unwanted notifications and
 unsubscribes from threads it is not actively brokering so observation does not
-pin them in memory. Window aging hides automatic rows without deleting identities,
-settling admitted work or recording retirement. Explicit registrations remain
+pin them in memory. Window aging preserves pending identities and drops unused
+automatic rows without settlement or retirement. Explicit registrations remain
 retained across restart. `thread/closed` marks a root dormant, not retired.
 Archive/delete evidence and explicit retirement use existing settlement; operator
 retirement evidence suppresses rediscovery. Identity storage stays bounded.

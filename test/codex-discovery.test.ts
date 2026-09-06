@@ -3,6 +3,10 @@ import { test } from "node:test";
 
 import type { CodexAppServerTransport } from "../src/gateway/codex-app-server.js";
 import { CORE_VERSION } from "../src/gateway/core-version.js";
+import type { ThreadSortKey } from "./fixtures/codex-ad931a4/ThreadSortKey.js";
+const nativeSortKeys: Record<ThreadSortKey, true> = {
+  created_at: true, updated_at: true, recency_at: true, section_position: true,
+};
 import {
   createCodexDiscoveryObserver,
   type CodexDiscoverySnapshot,
@@ -40,6 +44,8 @@ class FakeTransport implements CodexAppServerTransport {
   }
   async send(payload: string): Promise<void> {
     const frame = JSON.parse(payload) as Frame;
+    if (frame.method === "thread/list") assert.equal(Object.hasOwn(nativeSortKeys, String((frame.params as Frame).sortKey)), true,
+      "thread/list sortKey must match the pinned generated Codex binding");
     this.frames.push(frame);
     if (typeof frame.id !== "number") return;
     const result = this.respond(frame, this);
@@ -126,7 +132,7 @@ test("discovery initializes before a bounded paged scan and projects only consum
     },
   });
   assert.deepEqual(wire.frames[2]!.params, {
-    archived: false, limit: 20, sortKey: "recencyAt",
+    archived: false, limit: 20, sortKey: "recency_at" satisfies ThreadSortKey,
     sourceKinds: ["cli", "vscode", "exec", "appServer"],
     useStateDbOnly: true,
   });

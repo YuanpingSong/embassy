@@ -146,7 +146,8 @@ export async function runCoreRuntime(options: CoreRuntimeOptions, dependencies: 
     discovery = d.createCodexDiscovery({ hostId: config.hostId, local: { environment: codexEnvironment(env) },
       maxEndpoints: ledgerLimits.endpoints, onSnapshot: async (snapshot) => {
         assertWrite();
-        const result = await directory.reconcileCodex(snapshot.threads, snapshot.removedIds, snapshot.observation.truncated);
+        const result = await directory.reconcileCodex(snapshot.threads, snapshot.removedIds,
+          snapshot.observation.truncated, snapshot.observation.complete);
         codexObservation = { ...snapshot.observation, truncated: snapshot.observation.truncated || result.truncated };
       } });
     const coordinator = new Coordinator({ host: config.hostId, limits: ledgerLimits, store, claude,

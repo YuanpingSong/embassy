@@ -14,8 +14,38 @@ import { OwnedStateFile } from "../src/gateway/owned-state.js";
 import { runCoreRuntime, type CoreRuntimeDependencies } from "../src/gateway/runtime.js";
 import { createCodexDiscoveryObserver } from "../src/gateway/codex-discovery.js";
 import { isBrokerResult } from "../src/gateway/broker-control.js";
+import { LocalCodexTransportError } from "../src/gateway/codex-local-transport.js";
 
 const deferred = <T = void>() => { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done; }); return { promise, resolve }; };
+
+test("refresh preserves Claude and SSH success when the real Codex observer cannot find a daemon", async (t) => {
+  const f = await fixture(t), stop = new AbortController(); let catalogs = 0;
+  await runCoreRuntime({ env: { EMBASSY_STATE_DIR: f.stateDir }, signal: stop.signal, onReady: async () => {
+    try {
+      const call = async (method: string) => await requestLocalControl({ stateDir: f.stateDir, socketPath: f.socketPath,
+        request: { method, params: {} }, mutating: method === "refresh_discovery" }) as { ok: boolean; result: {
+          routes: Array<{ alias: string }>; codex: { safeErrorCode: string; complete: boolean }; health: string;
+        } };
+      const refreshed = await call("refresh_discovery"); assert.equal(refreshed.ok, true);
+      assert.equal(refreshed.result.routes[0]?.alias, "advisor@local"); assert.equal(catalogs, 1);
+      const snapshot = await call("list_snapshot"); assert.equal(snapshot.ok, true);
+      assert.equal(snapshot.result.codex.safeErrorCode, "MANAGED_CODEX_UNAVAILABLE");
+      assert.equal(snapshot.result.codex.complete, false); assert.equal(snapshot.result.health, "healthy");
+    } finally { stop.abort(); }
+  } }, { ...f.dependencies,
+    createClaudePeer: (native, config) => ({ ...f.dependencies.createClaudePeer!(native, config), discover: async () => ({
+      peers: [{ targetId: "00000000-0000-4000-8000-000000000050", alias: "advisor", kind: "bg", status: "idle", compatibility: "compatible" }],
+      rejected: {}, truncated: false, entriesScanned: 1, parseableRecords: 1,
+    }) }),
+    createCodexDiscovery: (options) => createCodexDiscoveryObserver(options, { createFactory: async () => {
+      throw new LocalCodexTransportError("MANAGED_CODEX_UNAVAILABLE");
+    } }),
+    createFederation: () => ({ named: async () => [], exact: async () => undefined,
+      deliver: async () => { throw new Error("no native sends"); }, close: async () => {},
+      catalog: async () => { catalogs++; return []; }, snapshot: () => ({ nodes: [], truncated: false }),
+    }),
+  });
+});
 
 test("real observer, directory and control discover roots, deduplicate fallback and honor retirement", { timeout: 10_000 }, async (t) => {
   const f = await fixture(t), stop = new AbortController(), observed = deferred();

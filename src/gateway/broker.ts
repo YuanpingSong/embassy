@@ -118,7 +118,8 @@ export class MessagingBroker {
 
   async refresh() {
     const [endpoints] = await Promise.all([
-      this.options.directory.refresh(), this.options.federation?.catalog(), this.options.codexDiscovery?.refresh(),
+      this.options.directory.refresh(), this.options.federation?.catalog(),
+      this.options.codexDiscovery?.refresh().catch(() => undefined),
     ]);
     this.kick();
     const codex = (await this.options.store.snapshot()).endpoints.filter((row) => row.provider === "codex");
@@ -135,7 +136,7 @@ export class MessagingBroker {
       ...(this.options.codexDiscovery ? { codex: this.options.codexDiscovery.observation() } : {}),
       ...(this.options.federation ? { federation: this.options.federation.snapshot() } : {}),
       routes: this.options.directory.listed(state.endpoints).map((e) => ({ ...publicEndpoint(e),
-        ...(e.provider === "codex" && this.options.codexDiscovery ? { codex: this.options.directory.codexMetadata(e, state.endpoints) } : {}),
+        ...(e.provider === "codex" && this.options.codexDiscovery ? { codex: this.options.directory.codexMetadata(e) } : {}),
         ...(this.options.coordinator.observation(e) === undefined ? {} : { lastOperation: this.options.coordinator.observation(e) }),
         queueDepth: state.deliveries.filter((d) => d.target.id === e.id && d.target.host === e.host && d.state.phase !== "terminal").length })),
       messages: state.deliveries.map((d) => ({ source: alias(d.source) ?? d.sourceAlias, target: alias(d.target),

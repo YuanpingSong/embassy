@@ -42,4 +42,7 @@ test("TUI shows root states without changing endpoint selection", () => {
   assert.match(rendered, /> waiting@local.*waiting/);
   assert.match(rendered, /unknown@local.*unknown/);
   assert.doesNotMatch(rendered, /native|thread[_-]?id|reg_absent/iu);
+  const complete = renderTui({ ...model, snapshot: { ...snapshot,
+    codex: { ...snapshot.codex, complete: true, truncated: false } } }, 160, 28);
+  assert.match(complete, /Codex discovery up to 20 most recent/);
 });

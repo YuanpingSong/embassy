@@ -342,7 +342,7 @@ class Observer implements CodexDiscoveryObserver {
     const cursors = new Set<string>();
     do {
       const page = await this.#serialRequest(session, "thread/list", {
-        archived: false, limit: 20, sortKey: "recencyAt", sourceKinds: SOURCE_KINDS, useStateDbOnly: true,
+        archived: false, limit: 20, sortKey: "recency_at", sourceKinds: SOURCE_KINDS, useStateDbOnly: true,
         ...(cursor === undefined ? {} : { cursor }),
       });
       if (!record(page) || !Array.isArray(page.data)) throw new DiscoveryError("PROTOCOL_ERROR");

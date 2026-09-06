@@ -898,7 +898,9 @@ class OperationSession {
         ? "overloaded"
         : typeof message === "string" && message.includes(" is closing; retry thread/resume ")
           ? "closing"
-          : typeof message === "string" && message.startsWith("thread not found: ")
+          : typeof message === "string" && (message.startsWith("thread not found: ") ||
+            message.startsWith("no rollout found for thread id ") ||
+            message === `session ${this.input.route.threadId} is archived. Run \`codex unarchive ${this.input.route.threadId}\` to unarchive it first.`)
             ? "not_found"
             : "other";
       pending.reject(new RpcRejectedError(reason));

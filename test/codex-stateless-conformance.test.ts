@@ -87,7 +87,7 @@ type Mode =
   | "failed" | "interrupted" | "duplicate" | "init-loss" | "resume-loss"
   | "nonempty" | "resume-drift" | "steer-loss" | "wrong-reply" | "malformed-output"
   | "accepted-timeout" | "accepted-close" | "steer-reject"
-  | "resume-overloaded" | "resume-closing";
+  | "resume-overloaded" | "resume-closing" | "resume-missing" | "resume-archived" | "resume-thread-missing";
 
 function statelessFixture(
   modes: Mode[],
@@ -114,6 +114,10 @@ function statelessFixture(
           peer.result(frame, {});
         }
         else if (frame.method === "thread/resume") {
+          if (mode === "resume-missing") return peer.reject(frame, `no rollout found for thread id ${THREAD}`);
+          if (mode === "resume-thread-missing") return peer.reject(frame, `thread not found: ${THREAD}`);
+          if (mode === "resume-archived") return peer.reject(frame,
+            `session ${THREAD} is archived. Run \`codex unarchive ${THREAD}\` to unarchive it first.`);
           if (mode === "resume-overloaded") return peer.reject(frame, "Server overloaded; retry later.", -32001);
           if (mode === "resume-closing") {
             return peer.reject(
@@ -805,6 +809,15 @@ test("pre-write overload and closing remain clean queueing evidence", async () =
     assertCode(result, "ROUTE_BUSY");
     assert.equal(authorizationCalls, 0);
     assert.equal(current.counts().semanticWrites, 0);
+  }
+});
+
+test("pinned missing-rollout and archived resume refusals are unobserved with zero writes", async () => {
+  for (const mode of ["resume-missing", "resume-thread-missing", "resume-archived"] as const) {
+    const current = statelessFixture([mode]); let authorization = 0;
+    const result = await current.operation.execute(input(async () => { authorization++; return true; }));
+    assertState(result, "clean", "failed"); assertCode(result, "THREAD_NOT_OBSERVED");
+    assert.equal(authorization, 0); assert.equal(current.counts().semanticWrites, 0);
   }
 });
 

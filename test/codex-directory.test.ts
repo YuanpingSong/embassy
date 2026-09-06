@@ -8,7 +8,7 @@ import type { ClaudePeerDiscovery } from "../src/gateway/claude-peer.js";
 import type { CodexThread } from "../src/gateway/codex-discovery.js";
 import { EndpointDirectory, type ClaudeDirectoryAdapter } from "../src/gateway/endpoint-directory.js";
 import { createLedgerCodec } from "../src/gateway/ledger-codec.js";
-import { Ledger, ledgerDefaults, type LedgerLimits } from "../src/gateway/ledger.js";
+import { Ledger, bodyHash, ledgerDefaults, type LedgerLimits } from "../src/gateway/ledger.js";
 import { OwnedStateFile } from "../src/gateway/owned-state.js";
 
 const HOST = "local";
@@ -101,7 +101,8 @@ test("incomplete and capacity-truncated scans fence names, preserve unseen rows,
 
   const complete = await f.directory.reconcileCodex([thread(IDS[0], "one")]);
   assert.equal(complete.truncated, false);
-  assert.equal(complete.endpoints.length, 2, "absence without archive/delete evidence never removes an endpoint");
+  assert.equal(complete.endpoints.length, 1, "a confirmed window releases unused automatic rows");
+  assert.equal((await f.store.snapshot()).retirements.length, 0);
   assert.equal((await f.directory.named("codex-one@local"))?.id, partial.endpoints[0]?.id);
 
   const interrupted = await f.directory.reconcileCodex([thread(IDS[0], "one")], [], true);
@@ -117,7 +118,7 @@ test("positive archive/delete evidence retires exact identity and suppresses red
   const state = await f.store.snapshot();
   assert.equal(state.retirements[0]?.endpoint.id, installed.id);
   assert.equal(state.retirements[0]?.nativeKey.length, 64);
-  assert.deepEqual(f.directory.codexMetadata(installed, []), {
+  assert.deepEqual(f.directory.codexMetadata(installed), {
     state: "unknown",
   });
   assert.deepEqual((await f.directory.reconcileCodex([thread(IDS[0], "gone")])).endpoints, []);
@@ -131,10 +132,10 @@ test("Codex root status is memory-only", async (t) => {
   ]);
   const parent = result.endpoints.find((row) => row.handle === IDS[0])!;
   const child = result.endpoints.find((row) => row.handle === IDS[1])!;
-  assert.deepEqual(f.directory.codexMetadata(parent, result.endpoints), {
+  assert.deepEqual(f.directory.codexMetadata(parent), {
     state: "busy",
   });
-  assert.deepEqual(f.directory.codexMetadata(child, result.endpoints), {
+  assert.deepEqual(f.directory.codexMetadata(child), {
     state: "waiting",
   });
   assert.doesNotMatch(JSON.stringify(await f.store.snapshot()), /waitingOnApproval|canAcceptDirectInput|parentThreadId/u);
@@ -163,4 +164,68 @@ test("window aging hides without retiring, preserves admitted identities, and fa
   await restarted.reconcileCodex([thread(IDS[0], "returned")]);
   assert.equal(restarted.listed((await f.store.snapshot()).endpoints)[0]!.id, old.id);
   assert.equal((await f.store.snapshot()).retirements.length, 0);
+});
+
+test("rolling past 128 roots releases unused rows but keeps retained and pending identities", async (t) => {
+  const f = await fixture(t);
+  const initial = await f.directory.reconcileCodex([thread(IDS[0], "retained"), thread(IDS[1], "pending")]);
+  const retained = initial.endpoints[0]!, pending = initial.endpoints[1]!;
+  await f.directory.registerCodex(retained.handle, retained.alias);
+  await f.store.transact((state) => new Ledger(state, HOST, ledgerDefaults, 1_000).admit({
+    id: "msg_00000000-0000-4000-8000-000000000012", token: "dlv_abcdefghijklmnopqrstuvwx",
+    reply: "conv_abcdefghijklmnop", source: retained, target: pending, body: "keep this identity",
+    deadline: 10_000, steer: false,
+  }));
+  const before = (await f.store.snapshot()).deliveries;
+  let window: CodexThread[] = [];
+  for (let page = 0; page < 10; page++) {
+    window = Array.from({ length: 20 }, (_, n) => thread(
+      `00000000-0000-7000-8000-${(100 + page * 20 + n).toString(16).padStart(12, "0")}`, `root-${page}-${n}`));
+    assert.equal((await f.directory.reconcileCodex(window)).truncated, false);
+    const state = await f.store.snapshot();
+    assert.equal(state.endpoints.length, 22);
+    assert.deepEqual(state.deliveries, before); assert.equal(state.retirements.length, 0);
+    assert.equal(f.directory.listed(state.endpoints).length, 21);
+  }
+  await f.store.transact((state) => new Ledger(state, HOST, ledgerDefaults, 20_000).expire());
+  await f.directory.reconcileCodex(window);
+  assert.equal((await f.store.snapshot()).endpoints.some((row) => row.id === pending.id), false);
+  assert.equal((await f.store.snapshot()).endpoints.some((row) => row.id === retained.id), true);
+  await f.directory.reconcileCodex([thread(pending.handle, "returns")]);
+  const returned = (await f.store.snapshot()).endpoints.find((row) => row.handle === pending.handle)!;
+  assert.notEqual(returned.id, pending.id, "a pruned identity is not rebound to old receipts");
+  assert.equal((await f.store.snapshot()).deliveries[0]!.target.id, pending.id);
+});
+
+test("an unconfirmed observation cannot prune the prior window", async (t) => {
+  const f = await fixture(t); await f.directory.reconcileCodex([thread(IDS[0], "last-known")]);
+  const before = (await f.store.snapshot()).endpoints;
+  await f.directory.reconcileCodex([], [], false, false);
+  assert.deepEqual((await f.store.snapshot()).endpoints, before);
+  assert.deepEqual(f.directory.listed(before), before);
+});
+
+test("window pruning preserves both endpoints and exact delivery bytes in every pending phase", async (t) => {
+  for (const phase of ["queued", "reserved", "armed", "accepted"] as const) await t.test(phase, async (t) => {
+    const f = await fixture(t);
+    const rows = (await f.directory.reconcileCodex([thread(IDS[0], "source"), thread(IDS[1], "target")])).endpoints;
+    await f.store.transact((state) => {
+      const ledger = new Ledger(state, HOST, ledgerDefaults, 1_000);
+      ledger.admit({ id: "msg_00000000-0000-4000-8000-000000000020", token: "dlv_abcdefghijklmnopqrstuvwx",
+        reply: "conv_abcdefghijklmnop", source: rows[0]!, target: rows[1]!, body: "preserve every phase",
+        deadline: 10_000, steer: false });
+      if (phase !== "queued") {
+        const batch = ledger.reserve(rows[1]!, "attempt_window"), ids = batch.map((row) => row.id);
+        if (phase !== "reserved") assert.equal(ledger.authorize(ids, "attempt_window", {
+          bytes: 100, sha256: "a".repeat(64), bodies: batch.map((row) => bodyHash(row.body)),
+        }), true);
+        if (phase === "accepted") assert.equal(ledger.accept(ids, "attempt_window", "unconfirmed"), true);
+      }
+    });
+    const before = (await f.store.snapshot()).deliveries;
+    await f.directory.reconcileCodex([thread(IDS[2], "new-window")]);
+    const state = await f.store.snapshot();
+    assert.deepEqual(state.deliveries, before); assert.equal(state.retirements.length, 0);
+    for (const row of rows) assert.deepEqual(state.endpoints.find((e) => e.id === row.id), row);
+  });
 });

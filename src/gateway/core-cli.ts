@@ -111,7 +111,7 @@ function renderStatus(value: unknown): string {
   if (!object(value) || !Array.isArray(value.routes)) return invalid("CONTROL_INVALID_RESPONSE");
   const lines = [`Broker: ${String(value.health)}${value.safeErrorCode ? ` / ${value.safeErrorCode}` : ""} (control/ledger; not a provider readiness proof)`];
   if (object(value.codex)) { const observed = typeof value.codex.observedAt === "string" ? Date.parse(value.codex.observedAt) : Number.NaN;
-    lines.push(`Codex discovery: ${value.codex.complete ? "complete" : "partial"}${value.codex.truncated ? " / truncated" : ""}${value.codex.safeErrorCode ? ` / ${value.codex.safeErrorCode}` : ""} (${Number.isFinite(observed) ? `${Math.max(0, Date.now() - observed)} ms ago` : "not yet observed"})`); }
+    lines.push(`Codex discovery: ${value.codex.complete ? "up to 20 most recent" : "partial"}${value.codex.truncated ? " / truncated" : ""}${value.codex.safeErrorCode ? ` / ${value.codex.safeErrorCode}` : ""} (${Number.isFinite(observed) ? `${Math.max(0, Date.now() - observed)} ms ago` : "not yet observed"})`); }
   for (const row of value.routes.filter(object)) {
     const last = object(row.lastOperation) ? `  last ${String(row.lastOperation.outcome)} / ${String(row.lastOperation.code)}` : "  not yet observed";
     const collision = value.routes.filter((candidate) => object(candidate) && candidate.alias === row.alias).length > 1;
@@ -128,7 +128,7 @@ function renderStatus(value: unknown): string {
   }
   const messages = value.messages as Record<string, unknown>[];
   if (messages.length) lines.push("Recent deliveries:", ...messages.slice(-10).map((row) =>
-    `  ${row.source ?? "retired sender"} -> ${row.target ?? "remote/retired recipient"}: ${row.state}${row.safeErrorCode ? ` / ${row.safeErrorCode}` : ""} (${row.ageMs} ms)`));
+    `  ${row.source ?? "unavailable sender"} -> ${row.target ?? "unavailable recipient"}: ${row.state}${row.safeErrorCode ? ` / ${row.safeErrorCode}` : ""} (${row.ageMs} ms)`));
   const retirements = value.retirements as Record<string, unknown>[];
   if (retirements.length) lines.push("Recent retirements:", ...retirements.slice(-10).map((row) => `  ${row.alias}  ${row.at}`));
   return `${lines.join("\n")}\n`;
