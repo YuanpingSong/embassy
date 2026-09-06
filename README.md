@@ -187,7 +187,7 @@ alerts
 
 See [SECURITY.md](SECURITY.md) for the boundary in depth and how to report a vulnerability.
 
-**Tested with** (cutover drill, 2026-09-03): Claude Code 2.1.259 and Codex CLI 0.152.0 on macOS, Node 22.23, on two machines — a Claude Code session ↔ Codex CLI task round trip in both directions, `embassy check` (register → send → delivered → reply → cleanup), and a cross-machine shell-peer handoff over ssh.
+**Tested with** (cutover drill, 2026-09-06): Claude Code 2.1.261 / 2.1.260 and Codex CLI 0.153.4 / 0.152.0 on macOS, Node 22.23, on two machines — a Claude Code session ↔ Codex CLI task round trip in both directions on the 3.1.0 broker, a cross-machine shell-peer handoff over ssh in both directions (162 ms on the return leg), and `embassy retire` clearing six shell-peer routes with `route_retired` journaled for each.
 
 ## Upgrading from 2.x
 
