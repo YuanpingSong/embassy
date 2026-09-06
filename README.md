@@ -113,7 +113,7 @@ Any local harness that can run the CLI can join as a `peer-*` route — no plugi
 `embassy status` is the one command for "what is going on". It is read-only — it never rescans; `embassy refresh` does — and prints prose in a terminal. Piped or with `--json`, it emits `{ok,command,result}` with the snapshot under `result`: use `embassy status --json | jq .result.routes`. `--recent <n>` (1–100, default 10) sizes the message list.
 
 ```text
-embassy 3.0.0  broker ok · pid 41213 · snapshot just now
+embassy 3.1.0  broker ok · pid 41213 · snapshot just now
 state dir /Users/you/.local/state/agent-embassy
 sessions scanned 3s ago
 
@@ -141,7 +141,7 @@ recent (3 of 3)
 When something is wrong it says the safe code **and** what to do about it, and one quiet corner never makes the whole broker look broken:
 
 ```text
-embassy 3.0.0  broker degraded · pid 41213 · snapshot just now
+embassy 3.1.0  broker degraded · pid 41213 · snapshot just now
 state dir /Users/you/.local/state/agent-embassy
 sessions scanned 3s ago
 

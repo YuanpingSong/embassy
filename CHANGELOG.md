@@ -4,12 +4,26 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [3.1.0] - 2026-09-05
 
-- Proven destination enqueue refusals now retain their safe code across federation; transport loss and failures after admission remain unknown and are never replayed.
-- `embassy retire --alias <local-alias>` adds credential-free, same-UID operator cleanup for any local provider route through the existing atomic removal; it accepts no token, force, or remote option, refuses federated mirrors with `FEDERATED_ROUTE_READ_ONLY`, reports `{cancelled,ambiguous,unconfirmed}` settlement counts, and moves the private control protocol to version 4 (emb-117).
-- The supported package surface is the CLI, skill, and documented JSON; deep imports of shipped `dist` declarations are unsupported, and unused internal exports have been removed.
-- Expired or unknown peer receipts now return `not_found`, not `route_mismatch`; invalid peer principals still refuse as before.
+### Added
+- `embassy retire --alias <local-alias>` — credential-free, same-UID operator removal of any local route (Claude session, Codex task, or shell peer) through the existing atomic removal. It settles queued and reserved work `cancelled`, armed work `ambiguous`, and accepted work `unconfirmed`, reports those counts, journals one `route_retired` event for every provider, and refuses federated mirrors with `FEDERATED_ROUTE_READ_ONLY`. No token, force, or remote option exists.
+- Proven destination enqueue refusals keep their safe code across federation; transport loss and failures after admission remain unknown and are never replayed.
+
+### Changed
+- Private control protocol 3 → 4: one new method (`retire_route`), 15 control methods, 18 CLI commands. A 3.0.0 CLI and a 3.1.0 broker refuse each other with the control mismatch code; restart the broker after upgrading.
+- `EMBASSY_MAX_ROUTES` accepts 2 through 128 and fails closed at config load above that with `INVALID_GATEWAY_CONFIGURATION`. 3.0.0 accepted 129–256 at parse and then refused provider startup. The tracked advertisement-helper cap is the same number.
+- Every busy-observation code on a Claude route (`CLAUDE_PEER_TARGET_UNKNOWN`, `CLAUDE_PEER_WORKSPACE_UNATTESTED`, `CLAUDE_PEER_NOT_OBSERVED`, `CLAUDE_DISCOVERY_UNAVAILABLE`) renders an operator remedy in `status`; the never-produced `CLAUDE_PEER_TARGET_STALE` and `CLAUDE_PEER_TARGET_CHANGED` codes are gone.
+- An idle or stale connector renders `ok` health; a named connector fault or a real provider failure stays `degraded`.
+- The supported package surface is the CLI, the skill, and the documented JSON. Deep imports of shipped `dist` declarations are unsupported; unused internal exports, dead validators, test-only runtime facades, and startup-owned route wiring were removed.
+- Public docs describe advertisement as one helper per local non-Claude route (`codex-*` or `peer-*`); federated mirrors are not advertised. A test guard rejects any singleton "one `codex-*` record" phrasing.
+
+### Fixed
+- Helper admission reserves a pending creation before forking, coalesces same-alias creation, releases a failed reservation, and joins in-flight creation on shutdown so every created client is closed.
+- Federated mirror routes are no longer handed to local native advertisement (no per-reconcile refusal or `NATIVE_ADVERTISEMENT_FAILED` alert).
+- Expired or unknown peer receipts return `not_found`, not `route_mismatch`; the peer-receipt fixtures no longer race a 100 ms timer on slow runners.
+- A renamed Claude source carries its current alias through envelopes, terminal replies, and native replies.
+- The service command's install/status/uninstall output is pinned byte-for-byte; the delivery runner's peer and provider engines are separate methods with a phase-failure characterization and no behavior change.
 
 ## [3.0.0] - 2026-09-03
 
