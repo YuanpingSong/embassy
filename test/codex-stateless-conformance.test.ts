@@ -27,6 +27,9 @@ const OPT_OUTS = [
   "turn/plan/updated",
 ];
 const NOW = "2040-01-01T00:00:00.000Z";
+const PACKAGE_VERSION = (JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+) as { version: string }).version;
 type Frame = Record<string, unknown>;
 type Classification = "HOLD" | "INTENTIONAL_CHANGE" | "DELETE";
 
@@ -339,7 +342,7 @@ test("stateless transport is inert until execute and opens one exact connection 
     assert.deepEqual(frames[0], {
       id: 1, method: "initialize", params: {
         capabilities: { experimentalApi: true, optOutNotificationMethods: OPT_OUTS },
-        clientInfo: { name: "agent_embassy_gateway", title: "Embassy Gateway", version: "1.7.0" },
+        clientInfo: { name: "agent_embassy_gateway", title: "Embassy Gateway", version: PACKAGE_VERSION },
       },
     });
     assert.deepEqual(frames[1], { method: "initialized", params: {} });
@@ -348,7 +351,9 @@ test("stateless transport is inert until execute and opens one exact connection 
     assert.deepEqual(frames.find(({ method }) => method === "turn/start")?.params,
       { input: [{ text: "synthetic body", type: "text" }], threadId: THREAD });
     const normalized = normalizeFrames(frames);
-    assert.deepEqual(normalized.slice(0, 2), manifest.wireGolden.initialize);
+    const initializeGolden = structuredClone(manifest.wireGolden.initialize);
+    ((initializeGolden[0]!.params as Frame).clientInfo as Frame).version = PACKAGE_VERSION;
+    assert.deepEqual(normalized.slice(0, 2), initializeGolden);
     assert.deepEqual(normalized.find(({ method }) => method === "thread/resume"), manifest.wireGolden.resume);
     assert.deepEqual(normalized.find(({ method }) => method === "turn/start"), manifest.wireGolden.start);
     assert.equal(frames.some(({ method }) => ["thread/loaded/list", "thread/unsubscribe", "turn/interrupt"].includes(String(method))), false);

@@ -4,6 +4,7 @@ import { mkdtemp, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
+import { BridgeError } from "../src/errors.js";
 import { Coordinator, type Destination, type WakeInput, type WakeResult } from "../src/gateway/coordinator.js";
 import { Ledger, bodyHash, ledgerDefaults, sameEndpoint, type Endpoint, type EndpointRef } from "../src/gateway/ledger.js";
 import { createLedgerCodec } from "../src/gateway/ledger-codec.js";
@@ -17,7 +18,8 @@ const deferred = <T>() => {
   return { promise, resolve };
 };
 
-async function fixture(t: TestContext, deliver: (input: WakeInput) => Promise<WakeResult>) {
+async function fixture(t: TestContext, deliver: (input: WakeInput) => Promise<WakeResult>,
+  options: Readonly<{ assertWritable?: () => void }> = {}) {
   const root = await mkdtemp(path.join(await realpath(os.tmpdir()), "emb-v4-coordinator-"));
   let now = 1_000;
   const store = new OwnedStateFile(path.join(root, "state"), createLedgerCodec("local", ledgerDefaults), { now: () => new Date(now) });
@@ -29,7 +31,8 @@ async function fixture(t: TestContext, deliver: (input: WakeInput) => Promise<Wa
   const resolve = async (identity: EndpointRef) => [...(await store.snapshot()).endpoints, ...remote].find((e) => sameEndpoint(e, identity));
   const destination: Destination = { deliver, close: async () => {} };
   const coordinator = new Coordinator({ host: "local", limits: ledgerDefaults, store, resolve,
-    claude: destination, codex: destination, ssh: destination, now: () => now });
+    claude: destination, codex: destination, ssh: destination, now: () => now,
+    ...(options.assertWritable === undefined ? {} : { assertWritable: options.assertWritable }) });
   const admit = (body: string, from = source, to = target, steer = false) => change((ledger) => ledger.admit({
     id: `msg_${randomUUID()}`, token: `dlv_${randomBytes(18).toString("base64url")}`, reply: `conv_${randomBytes(24).toString("base64url")}`,
     source: from, target: to, body, deadline: now + 10_000, steer,
@@ -119,6 +122,44 @@ test("generic throws follow committed phase; clean retries never replay armed or
       if (phase !== "reserved") { await f.coordinator.wake(f.target); assert.equal(calls, 1); }
     });
   }
+});
+
+test("uncertain destination results settle from the committed write phase and keep their exact code", async (t) => {
+  const cases = [
+    { name: "before authorize", authorize: false, accepted: false, failureAt: 0, expected: "queued" },
+    { name: "authorization callback before commit", authorize: true, accepted: false, failureAt: 1, expected: "queued" },
+    { name: "authorization callback after commit", authorize: true, accepted: false, failureAt: 3, expected: "ambiguous" },
+    { name: "armed unknown", authorize: true, accepted: false, failureAt: 0, expected: "ambiguous" },
+    { name: "accepted unknown", authorize: true, accepted: true, failureAt: 0, expected: "unconfirmed" },
+  ] as const;
+  for (const reported of ["ambiguous", "unconfirmed"] as const) for (const entry of cases) await t.test(`${entry.name}/${reported}`, async (t) => {
+    let assertions = 0, calls = 0;
+    const f = await fixture(t, async (input) => {
+      calls++;
+      if (entry.authorize) {
+        try { await input.authorize(evidence(input)); }
+        catch { return { outcome: "ambiguous", code: "WRITE_AUTHORIZATION_UNCERTAIN" }; }
+      }
+      if (entry.accepted) await input.accepted("unconfirmed");
+      return { outcome: reported, code: "WRITE_AUTHORIZATION_UNCERTAIN" };
+    }, { assertWritable: () => {
+      assertions++;
+      if (assertions === entry.failureAt) throw new BridgeError("WRITE_AUTHORIZATION_UNCERTAIN", "test fence");
+    } });
+    await f.admit("uncertain");
+    await f.coordinator.wake(f.target);
+    const state = (await f.store.snapshot()).deliveries[0]!.state;
+    assert.equal(state.phase === "terminal" ? state.outcome : state.phase, entry.expected);
+    if (entry.expected === "queued") {
+      assert.deepEqual(state, { phase: "queued", tries: 1, readyAt: 1_500 });
+      await f.coordinator.wake(f.target);
+      assert.equal(calls, 1);
+    }
+    assert.deepEqual(f.coordinator.observation(f.target), {
+      outcome: entry.expected === "queued" ? "deferred" : entry.expected,
+      code: "WRITE_AUTHORIZATION_UNCERTAIN",
+    });
+  });
 });
 
 test("rename during preparation refuses the old envelope and a later clean attempt uses the new name", async (t) => {

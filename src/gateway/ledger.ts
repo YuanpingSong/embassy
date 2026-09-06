@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { BridgeError } from "../errors.js";
+import { composeProvenanceEnvelope } from "./provenance-envelope.js";
 
 export type EndpointRef = Readonly<{ id: string; host: string; provider: "claude" | "codex" }>;
 export type Endpoint = EndpointRef & { alias: string; handle: string };
@@ -15,6 +16,8 @@ export type DeliveryPhase =
 export type Delivery = {
   id: string; reply: string; token: string; source: EndpointRef; target: EndpointRef;
   body: string; admittedAt: number; deadline: number; steer: boolean;
+  /** Present only after a terminal body is pruned; preserves exact duplicate proof. */
+  bodyHash?: string;
   /** Only authenticated remote admission supplies this display label. Local labels
    * are always read from the current endpoint at write authorization. */
   sourceAlias?: string; state: DeliveryPhase;
@@ -28,14 +31,14 @@ export type LedgerState = {
 export type LedgerLimits = Readonly<{
   endpoints: number; queued: number; perEndpoint: number; queueBytes: number;
   bodyBytes: number; wakeBytes: number; inFlight: number; retained: number; retainedBytes: number;
-  retentionMs: number; rateWindowMs: number; rate: number;
+  retirements: number; retentionMs: number; rateWindowMs: number; rate: number; rateHosts: number;
   deadlineMs: number;
 }>;
 export const ledgerDefaults: LedgerLimits = Object.freeze({
   endpoints: 128, queued: 100, perEndpoint: 20, queueBytes: 1_048_576,
   bodyBytes: 16_384, wakeBytes: 65_536, inFlight: 16, retained: 500, retainedBytes: 1_048_576,
-  retentionMs: 86_400_000, rateWindowMs: 60_000,
-  rate: 30, deadlineMs: 14_400_000,
+  retirements: 500, retentionMs: 86_400_000, rateWindowMs: 60_000,
+  rate: 30, rateHosts: 33, deadlineMs: 14_400_000,
 });
 export const sameEndpoint = (a: EndpointRef, b: EndpointRef): boolean =>
   a.id === b.id && a.host === b.host && a.provider === b.provider;
@@ -45,6 +48,16 @@ export const nativeKey = (endpoint: Pick<Endpoint, "provider" | "handle">): stri
 const ref = ({ id, host, provider }: EndpointRef): EndpointRef => ({ id, host, provider });
 const reject = (code: string): never => { throw new BridgeError(code, "The ledger request was refused."); };
 const pending = (d: Delivery): boolean => d.state.phase !== "terminal";
+const MAX_ALIAS = `${"a".repeat(32)}@${"a".repeat(63)}`;
+const MAX_CONVERSATION = `conv_${"a".repeat(64)}`;
+export const NATIVE_FRAME_RESERVE_BYTES = 4_096;
+
+function fitsEscapedEnvelope(input: Pick<Delivery, "source" | "target" | "body">, wakeBytes: number): boolean {
+  const envelope = composeProvenanceEnvelope({ sourceProvider: input.source.provider,
+    recipientProvider: input.target.provider, sourceAlias: MAX_ALIAS, targetAlias: MAX_ALIAS,
+    conversationId: MAX_CONVERSATION, body: input.body });
+  return Buffer.byteLength(JSON.stringify(envelope)) + NATIVE_FRAME_RESERVE_BYTES <= wakeBytes;
+}
 
 export function emptyLedger(): LedgerState {
   return { schemaVersion: 6, commit: { sequence: 0, id: "initial" }, endpoints: [], deliveries: [], retirements: [], rates: [] };
@@ -92,12 +105,13 @@ export class Ledger {
     return ref(target);
   }
 
-  admit(input: Omit<Delivery, "admittedAt" | "state">): { delivery: Delivery; duplicate: boolean } {
+  admit(input: Omit<Delivery, "admittedAt" | "state" | "bodyHash">): { delivery: Delivery; duplicate: boolean } {
     if (input.source.host !== this.host && input.target.host !== this.host) reject("INVALID_PEER_HANDOFF");
     this.assertLocal(input.source);
     this.assertLocal(input.target);
     const bytes = Buffer.byteLength(input.body);
-    if (!input.body.trim() || input.body.includes("\0") || bytes > this.limits.bodyBytes) reject("INVALID_MESSAGE_BODY");
+    if (!input.body.trim() || input.body.includes("\0") || bytes > this.limits.bodyBytes ||
+      !fitsEscapedEnvelope(input, this.limits.wakeBytes)) reject("INVALID_MESSAGE_BODY");
     if (input.deadline <= this.now || input.deadline > this.now + this.limits.deadlineMs) reject("MESSAGE_EXPIRED");
     if (input.steer && (input.source.provider !== "claude" || input.target.provider !== "codex" || !input.body.startsWith("STEER:"))) reject("INVALID_MESSAGE_BODY");
     if (input.source.host !== this.host && (!input.sourceAlias || !input.sourceAlias.endsWith(`@${input.source.host}`))) reject("INVALID_PEER_HANDOFF");
@@ -105,7 +119,8 @@ export class Ledger {
     const duplicate = this.state.deliveries.find((d) => d.id === input.id);
     if (duplicate) {
       if (!sameEndpoint(duplicate.source, input.source) || !sameEndpoint(duplicate.target, input.target) ||
-        duplicate.body !== input.body || duplicate.steer !== input.steer || duplicate.deadline !== input.deadline ||
+        (duplicate.bodyHash ?? bodyHash(duplicate.body)) !== bodyHash(input.body) ||
+        duplicate.steer !== input.steer || duplicate.deadline !== input.deadline ||
         duplicate.reply !== input.reply || duplicate.sourceAlias !== input.sourceAlias) reject("INVALID_PEER_HANDOFF");
       return { delivery: duplicate, duplicate: true };
     }
@@ -118,10 +133,11 @@ export class Ledger {
     if (rate && rate.count >= this.limits.rate) reject("RATE_LIMITED");
     if (rate) rate.count++;
     else {
-      this.state.rates = this.state.rates.filter((r) => r.since + this.limits.rateWindowMs > this.now);
-      // Remote first contacts cannot create an unbounded source-rate table.
-      if (this.state.rates.length >= this.limits.retained) reject("RATE_LIMITED");
-      this.state.rates.push({ source: ref(input.source), since: this.now, count: 1 });
+      const activeRates = this.state.rates.filter((r) => r.since + this.limits.rateWindowMs > this.now);
+      const hosts = new Set(activeRates.map((r) => r.source.host));
+      if (activeRates.filter((r) => r.source.host === input.source.host).length >= this.limits.endpoints ||
+        (!hosts.has(input.source.host) && hosts.size >= this.limits.rateHosts)) reject("RATE_LIMITED");
+      this.state.rates = [...activeRates, { source: ref(input.source), since: this.now, count: 1 }];
     }
     const delivery: Delivery = { ...input, source: ref(input.source), target: ref(input.target),
       admittedAt: this.now, state: { phase: "queued", tries: 0, readyAt: this.now } };
@@ -277,10 +293,16 @@ export class Ledger {
     const cutoff = this.now - this.limits.retentionMs;
     const recent = this.state.deliveries.filter((d) => d.state.phase === "terminal" && d.state.at > cutoff).slice(-this.limits.retained);
     let bytes = recent.reduce((sum, d) => sum + Buffer.byteLength(d.body), 0);
-    while (bytes > this.limits.retainedBytes) bytes -= Buffer.byteLength(recent.shift()!.body);
+    for (const delivery of recent) {
+      if (bytes <= this.limits.retainedBytes) break;
+      if (!delivery.body) continue;
+      bytes -= Buffer.byteLength(delivery.body);
+      delivery.bodyHash = bodyHash(delivery.body);
+      delivery.body = "";
+    }
     const retained = new Set(recent);
     this.state.deliveries = this.state.deliveries.filter((d) => pending(d) || retained.has(d));
-    this.state.retirements = this.state.retirements.filter((r) => r.at > cutoff).slice(-this.limits.retained);
+    this.state.retirements = this.state.retirements.filter((r) => r.at > cutoff).slice(-this.limits.retirements);
     this.state.rates = this.state.rates.filter((r) => r.since + this.limits.rateWindowMs > this.now);
   }
 }

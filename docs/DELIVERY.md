@@ -117,6 +117,14 @@ stable across a reset.
 `embassy wait-delivery --token <token>` polls the private broker control socket
 until that delivery becomes terminal or its bounded wait ends. Delivery tokens
 are opaque capabilities and must not be put in logs or provider messages.
+Both status and delivery-status report the actual nonterminal phase: queued,
+reserved, armed, or accepted. A missing/evicted receipt returns `found:false`;
+wait-delivery exits 3 for that lookup failure, not the terminal-delivery-failure
+exit 6. Receipt retention is bounded and never promises indefinite lookup.
+The default receipt bounds are 500 terminal rows and 24 hours. The 1 MiB
+retained-body budget removes old bodies, not their receipt/outcome or reply
+identity; a hash retains exact duplicate-message checking after body removal.
+Retirement evidence has a separate 500-row bound and the same time window.
 
 `embassy retire --alias <local-name>` removes the resolved local endpoint in
 one transaction. Incident queued/reserved work becomes `cancelled`; armed work

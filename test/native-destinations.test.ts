@@ -231,6 +231,18 @@ test("Claude destination preserves clean refusal and authorization uncertainty",
   } });
   assert.deepEqual(await missing.deliver(wake(claude)), { outcome: "deferred", code: "ROUTE_BUSY" });
 
+  let changedAuthorizations = 0;
+  const changed = new ClaudeDestination({ host: "m5dev", stateRoot: "/state", peer: {
+    ...peer,
+    prepareSend: async () => ({ messageId: "00000000-0000-4000-8000-000000000001",
+      frameBytes: 5, sha256: "b".repeat(64), cancel: () => undefined,
+      perform: async () => { throw new BridgeError("CLAUDE_PEER_TARGET_CHANGED", "new generation", true); } }),
+  } });
+  assert.deepEqual(await changed.deliver(wake(claude, { authorize: async () => {
+    changedAuthorizations++; return true;
+  } })), { outcome: "deferred", code: "ROUTE_BUSY" });
+  assert.equal(changedAuthorizations, 0);
+
   for (const [error, expected] of [
     [new BridgeError("CLAUDE_PEER_CONNECT_TIMEOUT", "no write", true),
       { outcome: "failed", code: "CLAUDE_PEER_CONNECT_TIMEOUT" }],

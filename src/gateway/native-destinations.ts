@@ -21,6 +21,7 @@ type ClaudePeerPort = Pick<
 
 const CLAUDE_CLEAN_RETRY_CODES = new Set([
   "CLAUDE_PEER_TARGET_UNKNOWN",
+  "CLAUDE_PEER_TARGET_CHANGED",
   "CLAUDE_PEER_WORKSPACE_UNATTESTED",
 ]);
 
@@ -61,6 +62,10 @@ function claudePrewrite(error: unknown): WakeResult {
 }
 
 function claudePostAuthorization(error: unknown): WakeResult {
+  // perform() re-attests the prepared generation before it invokes authorization.
+  if (error instanceof BridgeError && error.code === "CLAUDE_PEER_TARGET_CHANGED") {
+    return { outcome: "deferred", code: "ROUTE_BUSY" };
+  }
   if (error instanceof BridgeError && error.code === "WRITE_AUTHORIZATION_DENIED") {
     return { outcome: "deferred", code: error.code };
   }

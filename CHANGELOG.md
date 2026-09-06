@@ -19,6 +19,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Deprecated `reply` and `unregister-codex` spellings; use `send --conversation` and operator-authorized `retire`. Unused deduplication and delivery-notice configuration are no longer part of the runtime.
 - Historical deep-import compatibility remains unsupported: the maintained package surface is the CLI, packaged skill and documented public JSON.
 
+### Fixed during RC verification
+- The site quickstart uses the v4 sending forms. Supervision documentation distinguishes crash-signal relaunch from an operator's `kill -9`.
+- Claude pre-write generation changes retry cleanly. Uncertainty follows the committed write phase, without manufacturing a terminal ambiguous result before authorization.
+- Admission rejects bodies that cannot fit the escaped provenance frame. Body pruning preserves bounded receipt/reply stubs, retirement retention is independently bounded, and source-rate capacity is partitioned by host.
+- Delivery status reports its actual nonterminal phase; a missing receipt is a lookup failure rather than a failed delivery. Older RC readers do not understand body-pruned stubs: use the documented reset/rollback policy when replacing RC installations.
+
 ## [3.1.0] - 2026-09-05
 
 ### Added

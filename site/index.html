@@ -25,7 +25,7 @@ code{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace}p code{font-siz
 </head>
 <body>
 <h1><img src="assets/mark.svg" alt="">Embassy</h1>
-<p><strong>A local embassy for your AI agents.</strong> Embassy is a small local broker that lets a Claude Code session and a Codex CLI task on the same Mac message each other by name, with a receipt for every delivery — and the receipt never claims more than it proved. <code>delivered</code> means the provider boundary was crossed: toward Claude, the native mailbox write (<code>transport_written</code>) completed; toward Codex, the App Server accepted the turn. <code>held</code> is progress, never success, and <code>unconfirmed</code> or <code>ambiguous</code> means the evidence is missing. Claude-bound mail is written immediately; Codex-bound mail waits for an idle turn. The recipient answers with the <code>conv_</code> token it was delivered, and no state ever implies a model read the message. Local, single-user, unofficial — not affiliated with or endorsed by Anthropic or OpenAI.</p>
+<p><strong>A local embassy for your AI agents.</strong> Embassy is a small same-user broker that lets Claude Code sessions and Codex CLI tasks message one another by name, on one Mac or across directly configured SSH gateways. The receiving agent wakes through its native interface; agents never poll for inbound mail. Every message has its own receipt and provenance, but no receipt claims that a model read or understood the message. Names are lookup labels while an opaque endpoint identity holds routing authority. Personal, single-user, unofficial — not affiliated with or endorsed by Anthropic or OpenAI.</p>
 <h2>Quickstart</h2>
 <p>Each command is what the shipped CLI accepts once you substitute your host. Replace <code>your-host</code> with the <code>hostId</code> on the broker's ready line.</p>
 <pre><span class="c"># install, and run the broker as your launchd agent</span>
@@ -33,17 +33,15 @@ npm install -g agent-embassy
 embassy service install
 <span class="c"># 1. inside the Codex task — ask the agent to run it</span>
 embassy register-codex --alias codex-reviewer@your-host
-<span class="c"># 2. read the live Claude session names</span>
-embassy status
-<span class="c"># 3. from the Codex task — body via stdin, never an argument</span>
-embassy send --from codex-reviewer@your-host --to advisor@your-host --expects-reply &lt;&lt;'MSG'
+<span class="c"># 2. from Claude or Codex — the caller is inferred; body stays on stdin</span>
+embassy send --to advisor@your-host &lt;&lt;'MSG'
 Which auth middleware did you settle on?
 MSG
-<span class="c"># 4. the recipient answers with the token from its reply hint</span>
-embassy send --conversation conv_&lt;token&gt; --from advisor@your-host &lt;&lt;'MSG'
+<span class="c"># 3. the recipient uses the exact reference in its reply hint</span>
+embassy send --conversation conv_&lt;reference&gt; &lt;&lt;'MSG'
 The session-scoped one; the risk is the double-write window.
 MSG</pre>
-<p>Everything else — the shell-peer fallback, federation, <code>embassy check</code> after an upstream update, and safety in one minute — is in the <a href="https://github.com/YuanpingSong/embassy#readme">README</a>. What each release changed is in the <a href="https://github.com/YuanpingSong/embassy/blob/main/CHANGELOG.md">changelog</a>.</p>
+<p>Federation, the broker-only <code>embassy check</code>, delivery semantics, and safety in one minute are in the <a href="https://github.com/YuanpingSong/embassy#readme">README</a>. What each release changed is in the <a href="https://github.com/YuanpingSong/embassy/blob/main/CHANGELOG.md">changelog</a>.</p>
 <footer><p>MIT licensed. Claude and Codex are trademarks of their respective owners, used here only to name the tools this gateway connects. This page loads no external assets, sets no cookies, and collects nothing.</p></footer>
 </body>
 </html>

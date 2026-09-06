@@ -109,7 +109,7 @@ export class MessagingBroker {
     await this.change((ledger) => ledger.expire());
     const d = (await this.options.store.snapshot()).deliveries.find((d) => d.token === token);
     if (!d) return { found: false as const };
-    return { found: true as const, state: d.state.phase === "terminal" ? d.state.outcome : "queued",
+    return { found: true as const, state: d.state.phase === "terminal" ? d.state.outcome : d.state.phase,
       terminal: d.state.phase === "terminal", deadlineAt: new Date(d.deadline).toISOString(),
       ...(d.state.phase === "terminal" ? { safeErrorCode: d.state.code } : { pendingForMs: Math.max(0, this.now() - d.admittedAt) }) };
   }

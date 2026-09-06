@@ -78,6 +78,11 @@ test("CLI register, named send, retained reply and broker check traverse the rea
   assert.match(terminal.read(), /Recent deliveries:/);
   assert.match(terminal.read(), /Recent retirements:[\s\S]*codex-b@local/);
   assert.doesNotMatch(terminal.read(), /hello from A|explicit reply/);
+  const unknown = sink();
+  assert.equal(await runCoreCli(["wait-delivery", "--token", "dlv_abcdefghijklmnopqrstuvwx"], {
+    env: { EMBASSY_STATE_DIR: stateDir }, stdout: unknown.stream, stderr: errors.stream,
+  }), 3, "a missing retained receipt is not a failed delivery");
+  assert.deepEqual(JSON.parse(unknown.read()).result, { found: false });
 });
 
 test("help/version avoid state access", async () => {

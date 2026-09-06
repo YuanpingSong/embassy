@@ -219,7 +219,7 @@ export async function runCoreCli(args: readonly string[], dependencies: CoreCliD
     }
     if (command === "status" && !json && stdout.isTTY) stdout.write(renderStatus(result));
     else write(command, result);
-    if (command === "wait-delivery") return object(result) && result.found === true && result.state === "delivered" ? 0 : 6;
+    if (command === "wait-delivery") return object(result) && result.found === true ? result.state === "delivered" ? 0 : 6 : 3;
     return 0;
   } catch (error) {
     const code = error instanceof BridgeError || error instanceof LocalControlError ? error.code : "INTERNAL_ERROR";

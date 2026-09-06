@@ -22,8 +22,6 @@ const exact = (value: unknown, keys: readonly string[], optional: readonly strin
 const natural = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0;
 const bounded = (value: unknown, maximum: number): value is string => typeof value === "string" &&
   value.length > 0 && value.length <= maximum && !value.includes("\0");
-const boundedText = (value: unknown, maximum: number): value is string => typeof value === "string" &&
-  value.length > 0 && !value.includes("\0") && Buffer.byteLength(value, "utf8") <= maximum;
 const list = (value: unknown, check: Check): boolean => Array.isArray(value) && value.every(check);
 
 function endpointRef(value: unknown): value is EndpointRef {
@@ -66,17 +64,21 @@ function phase(value: unknown, limits: LedgerLimits): boolean {
 
 function delivery(value: unknown, limits: LedgerLimits): value is Delivery {
   if (!exact(value, ["id", "reply", "token", "source", "target", "body", "admittedAt", "deadline",
-    "steer", "state"], ["sourceAlias"]) || typeof value.id !== "string" || !MESSAGE.test(value.id) ||
+    "steer", "state"], ["sourceAlias", "bodyHash"]) || typeof value.id !== "string" || !MESSAGE.test(value.id) ||
     typeof value.reply !== "string" || !CONVERSATION.test(value.reply) || typeof value.token !== "string" ||
     !DELIVERY.test(value.token) || !endpointRef(value.source) || !endpointRef(value.target) ||
-    !boundedText(value.body, limits.bodyBytes) || !natural(value.admittedAt) || !natural(value.deadline) ||
+    typeof value.body !== "string" || value.body.includes("\0") || Buffer.byteLength(value.body) > limits.bodyBytes ||
+    !natural(value.admittedAt) || !natural(value.deadline) ||
     value.deadline <= value.admittedAt || value.deadline > value.admittedAt + limits.deadlineMs ||
     typeof value.steer !== "boolean" || (value.sourceAlias !== undefined &&
       (typeof value.sourceAlias !== "string" || !ALIAS.test(value.sourceAlias) || !value.sourceAlias.endsWith(`@${value.source.host}`))) ||
     !phase(value.state, limits)) return false;
   const parsed = value as unknown as Delivery;
   if (parsed.state.phase === "terminal" && parsed.state.at < parsed.admittedAt) return false;
-  return !parsed.steer || parsed.source.provider === "claude" && parsed.target.provider === "codex" && parsed.body.startsWith("STEER:");
+  if (parsed.bodyHash === undefined ? parsed.body.length === 0
+    : parsed.state.phase !== "terminal" || parsed.body !== "" || !SHA256.test(parsed.bodyHash)) return false;
+  return !parsed.steer || parsed.source.provider === "claude" && parsed.target.provider === "codex" &&
+    (parsed.bodyHash !== undefined || parsed.body.startsWith("STEER:"));
 }
 
 const duplicate = <T>(values: readonly T[], key: (value: T) => string): boolean =>
@@ -138,8 +140,12 @@ export function createLedgerCodec(host: string, limits: LedgerLimits): OwnedStat
         const key = `${row.target.host}\0${row.target.provider}\0${row.target.id}`;
         perTarget.set(key, (perTarget.get(key) ?? 0) + 1);
       }
+      const rateHosts = new Set(state.rates.map((row) => row.source.host));
+      const ratesPerHost = new Map<string, number>();
+      for (const row of state.rates) ratesPerHost.set(row.source.host, (ratesPerHost.get(row.source.host) ?? 0) + 1);
       if (state.endpoints.length > limits.endpoints || pending.length > limits.queued || terminal > limits.retained ||
-        state.retirements.length > limits.retained || state.rates.length > limits.retained ||
+        state.retirements.length > limits.retirements || rateHosts.size > limits.rateHosts ||
+        [...ratesPerHost.values()].some((count) => count > limits.endpoints) ||
         inFlight.size > limits.inFlight || [...perTarget.values()].some((count) => count > limits.perEndpoint) ||
         pending.reduce((sum, row) => sum + Buffer.byteLength(row.body), 0) > limits.queueBytes ||
         state.deliveries.filter((row) => row.state.phase === "terminal")

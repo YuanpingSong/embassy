@@ -107,7 +107,7 @@ test("delivery phases are closed and prepared batch hashes are collective eviden
 
 test("configured collection, queue-byte, per-target, in-flight, rate and retention bounds refuse loudly", () => {
   const tiny = { ...ledgerDefaults, endpoints: 2, queued: 1, perEndpoint: 1, queueBytes: 5,
-    inFlight: 1, retained: 1, retainedBytes: 5, rate: 1 };
+    inFlight: 1, retained: 1, retainedBytes: 5, retirements: 1, rate: 1 };
   const bounded = createLedgerCodec(host, tiny);
   const state = valid();
   const assertCorrupt = (current: LedgerState) => assert.throws(() => bounded.assertBounds?.(current),
@@ -145,4 +145,44 @@ test("decoding never normalizes or repairs the supplied document", () => {
   const corrupt = JSON.stringify(state);
   assert.equal(codec.decode(state), undefined);
   assert.equal(JSON.stringify(state), corrupt);
+});
+
+test("a terminal pruned body retains only an exact duplicate digest", () => {
+  const state = valid(), row = state.deliveries[0]!;
+  row.state = { phase: "terminal", outcome: "delivered", at: 1_100, code: "TRANSPORT_WRITTEN" };
+  row.body = "";
+  row.bodyHash = "a".repeat(64);
+  assert.equal(decode(state), true);
+  delete row.bodyHash;
+  assert.equal(decode(state), false);
+  row.bodyHash = "a".repeat(64);
+  row.body = "still present";
+  assert.equal(decode(state), false);
+  row.body = "";
+  row.state = { phase: "queued", tries: 0, readyAt: 1_000 };
+  assert.equal(decode(state), false);
+});
+
+test("rate and retirement bounds are partitioned independently from receipt retention", () => {
+  const state = valid();
+  state.retirements = [
+    { endpoint: ref(state.endpoints[0]!), nativeKey: "a".repeat(64), alias: state.endpoints[0]!.alias, at: 1_000 },
+    { endpoint: ref(state.endpoints[1]!), nativeKey: "b".repeat(64), alias: state.endpoints[1]!.alias, at: 1_000 },
+  ];
+  assert.doesNotThrow(() => createLedgerCodec(host, { ...ledgerDefaults, retained: 1, retirements: 2 }).assertBounds?.(state));
+  assert.throws(() => createLedgerCodec(host, { ...ledgerDefaults, retained: 2, retirements: 1 }).assertBounds?.(state),
+    { code: "CORRUPT_GATEWAY_STATE" });
+
+  state.retirements = [];
+  state.rates = [
+    { source: { id: "reg_one", host: "peer", provider: "claude" }, since: 900, count: 1 },
+    { source: { id: "reg_two", host: "peer", provider: "codex" }, since: 900, count: 1 },
+    { source: { id: "reg_three", host: "peer", provider: "claude" }, since: 900, count: 1 },
+  ];
+  assert.throws(() => createLedgerCodec(host, { ...ledgerDefaults, endpoints: 2 }).assertBounds?.(state),
+    { code: "CORRUPT_GATEWAY_STATE" });
+  state.rates.pop();
+  state.rates[1] = { ...state.rates[1]!, source: { ...state.rates[1]!.source, host: "other-peer" } };
+  assert.throws(() => createLedgerCodec(host, { ...ledgerDefaults, rateHosts: 1 }).assertBounds?.(state),
+    { code: "CORRUPT_GATEWAY_STATE" });
 });

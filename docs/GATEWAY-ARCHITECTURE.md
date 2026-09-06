@@ -87,8 +87,14 @@ The document holds:
 - endpoint bindings;
 - deliveries and their exact source/target identities;
 - recent bounded retirement evidence;
-- bounded per-source rate windows;
+- bounded per-source rate windows, partitioned by host (128 source rows per
+  host, at most 33 hosts including this gateway);
 - a commit sequence and random commit identity.
+
+Terminal body pruning leaves a receipt/reply stub and a SHA-256 body proof;
+the count/time receipt bounds are independent of the retained-body byte
+budget. Retirement evidence has its own count bound. A peer exhausting its
+source-rate partition cannot consume the local host's source slots.
 
 Each delivery contains its body, opaque message/conversation/delivery IDs,
 deadline, STEER classification, and one phase:

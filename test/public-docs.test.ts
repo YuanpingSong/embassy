@@ -56,7 +56,9 @@ test("public command list agrees with the side-effect-free CLI help", async () =
 });
 
 test("quickstart teaches inferred sending, native receiving, and identity-bound replies", async () => {
-  const readme = await read("README.md");
+  const [readme, site, help] = await Promise.all([
+    read("README.md"), read("site/index.html"), helpText(),
+  ]);
   assert.match(readme, /sender is inferred from the calling session/i);
   assert.match(readme, /embassy send --to claude-reviewer@studio/);
   assert.match(readme, /embassy send --conversation conv_example/);
@@ -68,6 +70,26 @@ test("quickstart teaches inferred sending, native receiving, and identity-bound 
   assert.match(squash(readme), /may survive a broker restart while their retained ledger row and both exact endpoints remain valid/i);
   assert.match(squash(readme), /stop resolving after retirement, replacement, expiry, eviction, or a state reset/i);
   assert.doesNotMatch(readme, /embassy send --from|embassy register-peer|embassy await|embassy watch|send-to-(?:claude|codex)/);
+  assert.match(site, /embassy send --to advisor@your-host &lt;&lt;'MSG'/);
+  assert.match(site, /embassy send --conversation conv_&lt;reference&gt; &lt;&lt;'MSG'/);
+  assert.match(site, /the caller is inferred/i);
+  assert.match(help, /embassy send --to <name@host>/);
+  assert.match(help, /embassy send --conversation <reference>/);
+  assert.doesNotMatch(site, /--from|--expects-reply|shell-peer|register-peer|embassy await/);
+});
+
+test("service documentation states launchd's crash-only restart boundary", async () => {
+  const [readme, configuration, implementation] = await Promise.all([
+    read("README.md"), read("docs/CONFIGURATION.md"), read("src/gateway/service-agent.ts"),
+  ]);
+  for (const document of [readme, configuration]) {
+    assert.match(squash(document), /SIGABRT.*relaunch/i);
+    assert.match(squash(document), /kill -9.*(?:leaves it stopped|leaves the service not running)/i);
+    assert.match(document, /embassy service status/);
+  }
+  assert.match(implementation, /<key>KeepAlive<\/key>/);
+  assert.match(implementation, /<key>Crashed<\/key>/);
+  assert.doesNotMatch(implementation, /<key>KeepAlive<\/key>\s*<true\/>/);
 });
 
 test("delivery guide pins batching and the no-replay phase law", async () => {

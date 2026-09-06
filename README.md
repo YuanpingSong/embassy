@@ -31,6 +31,11 @@ The launchd service records the absolute installation path used by
 `embassy service install`. After replacing or removing that installation, run
 the install command again.
 
+The agent starts at login and uses launchd's crash-only keepalive policy. A
+verified `SIGABRT` crash relaunches it. A clean exit, boot refusal, `SIGTERM`,
+or deliberate `kill -9` leaves it stopped; inspect `embassy service status`
+and install/start it deliberately rather than assuming every signal restarts it.
+
 ## Quickstart
 
 For an explicit host name or federation, create `nodes.json` before starting

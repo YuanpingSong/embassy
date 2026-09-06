@@ -613,7 +613,11 @@ test("name, cwd, and kind changes preserve the logical session UUID", async (t) 
   await prepareAndPerform(current, first.targetId, "current workspace proven");
 });
 
-test("preparation freshly attests safe replacement state and workspace roots", { skip: process.platform !== "darwin" }, async (t) => {
+test("preparation freshly attests safe replacement state and workspace roots", {
+  skip: process.platform === "darwin"
+    ? false
+    : "the shipped runtime is macOS-only; this replacement test exercises its Darwin filesystem boundary",
+}, async (t) => {
   let connections = 0;
   const current = await fixture(t);
   await addPeer(current, {

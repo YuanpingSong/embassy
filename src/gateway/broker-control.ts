@@ -55,7 +55,7 @@ export function isBrokerResult(method: BrokerCommand["method"], value: unknown):
     case "delivery_status": return exact(value, ["found"]) && value.found === false ||
       exact(value, ["found", "state", "terminal", "deadlineAt"], ["pendingForMs", "safeErrorCode"]) && value.found === true && date(value.deadlineAt) &&
       (value.terminal === true ? outcomes.includes(String(value.state)) && code(value.safeErrorCode) && value.pendingForMs === undefined
-        : value.terminal === false && value.state === "queued" && count(value.pendingForMs) && value.safeErrorCode === undefined);
+        : value.terminal === false && ["queued", "reserved", "armed", "accepted"].includes(String(value.state)) && count(value.pendingForMs) && value.safeErrorCode === undefined);
     case "list_snapshot": return exact(value, ["health", "revision", "routes", "messages", "retirements"], ["safeErrorCode", "federation"]) &&
       ["healthy", "degraded"].includes(String(value.health)) && count(value.revision) &&
       (value.safeErrorCode === undefined || code(value.safeErrorCode)) &&

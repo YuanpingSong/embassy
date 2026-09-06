@@ -135,6 +135,12 @@ entry and no arbitrary `PATH`; do not put secrets in an `EMBASSY_*` variable.
 Re-run installation after moving or replacing the package.
 `service status` reports when a recorded program path no longer exists.
 
+The plist uses `RunAtLoad` and `KeepAlive` with only `Crashed: true`. A verified
+`SIGABRT` crash relaunches it. A clean exit, nonzero boot refusal, ordinary
+`SIGTERM`, or a deliberate
+`kill -9` leaves the service not running. Use `embassy service status` to
+observe that state and start or reinstall it deliberately.
+
 The foreground alternative is `embassy serve`. It does not daemonize or open
 a network listener. Both forms acquire the same fixed host-wide advisory lease
 before provider setup, so only one broker can run.

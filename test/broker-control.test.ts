@@ -53,6 +53,7 @@ const results: ReadonlyArray<readonly [BrokerCommand["method"], unknown]> = [
   ["peer_handoff", { accepted: true }], ["peer_handoff", { accepted: false, code: "QUEUE_FULL" }],
   ["delivery_status", { found: false }],
   ["delivery_status", { found: true, state: "queued", terminal: false, deadlineAt: now, pendingForMs: 1 }],
+  ...["reserved", "armed", "accepted"].map((state) => ["delivery_status", { found: true, state, terminal: false, deadlineAt: now, pendingForMs: 1 }] as const),
   ["delivery_status", { found: true, state: "delivered", terminal: true, deadlineAt: now,
     safeErrorCode: "TRANSPORT_WRITTEN" }], ["list_snapshot", snapshot],
 ];

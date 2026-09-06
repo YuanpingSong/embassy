@@ -62,7 +62,7 @@ embassy delivery-status --token dlv_REPLACE_WITH_EXACT_TOKEN
 embassy wait-delivery --token dlv_REPLACE_WITH_EXACT_TOKEN
 ```
 
-The waiter is bounded by the deadline plus three seconds. A found result has `state`, `terminal`, `deadlineAt`, and either `pendingForMs` or `safeErrorCode`; an evicted token returns `{found:false}`. `queued` is nonterminal. Terminal states are `delivered`, `failed`, `cancelled`, `expired`, `ambiguous`, and `unconfirmed`. Cross-host confirmation means the destination durably owns the handoff, not that its agent consumed it.
+The waiter is bounded by the deadline plus three seconds. A found result has `state`, `terminal`, `deadlineAt`, and either `pendingForMs` or `safeErrorCode`; an evicted token returns `{found:false}` and waiter exit 3, not a failed-delivery result. `queued`, `reserved`, `armed`, and `accepted` are nonterminal. Terminal states are `delivered`, `failed`, `cancelled`, `expired`, `ambiguous`, and `unconfirmed`. Body pruning keeps receipt and reply references until their count/time retention expires. Cross-host confirmation means the destination durably owns the handoff, not that its agent consumed it.
 
 Do not resend an ambiguous or unconfirmed delivery. `CONTROL_WRITE_OUTCOME_AMBIGUOUS` also means the operation may have applied: inspect status, do not repeat it. Explicit replies are new messages, not automatic forwarding of Codex output.
 

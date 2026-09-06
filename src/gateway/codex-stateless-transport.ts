@@ -696,7 +696,7 @@ class OperationSession {
       clientInfo: {
         name: "agent_embassy_gateway",
         title: "Embassy Gateway",
-        version: "1.7.0",
+        version: "4.0.0-dev",
       },
     });
     if (!isRecord(result)) throw new OperationError("RESULT_SCHEMA_MISMATCH");

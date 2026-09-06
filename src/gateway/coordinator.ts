@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { BridgeError } from "../errors.js";
-import { Ledger, bodyHash, sameEndpoint, type Delivery, type Endpoint, type EndpointRef, type LedgerLimits, type LedgerState, type Outcome } from "./ledger.js";
+import { Ledger, NATIVE_FRAME_RESERVE_BYTES, bodyHash, sameEndpoint, type Delivery, type Endpoint, type EndpointRef, type LedgerLimits, type LedgerState, type Outcome } from "./ledger.js";
 import { OwnedStateFile } from "./owned-state.js";
 import { composeProvenanceEnvelope } from "./provenance-envelope.js";
 
@@ -109,7 +109,7 @@ export class Coordinator {
         // Leave space for their bounded RPC/identity fields, then authorize against
         // the actual immutable native frame rather than this packing estimate.
         const framedBytes = Buffer.byteLength(JSON.stringify(frame)) + (frames.length ? 2 : 0);
-        if (bytes + framedBytes + 4_096 > this.options.limits.wakeBytes) {
+        if (bytes + framedBytes + NATIVE_FRAME_RESERVE_BYTES > this.options.limits.wakeBytes) {
           if (!frames.length) {
             await this.change((ledger) => ledger.settle([d.id], attempt, "failed", "PROVENANCE_ENVELOPE_TOO_LARGE"));
             continue;
@@ -156,16 +156,36 @@ export class Coordinator {
           }
         },
       });
-      this.observed(identity, result);
       if (result.outcome === "deferred") {
         const expiredMember = (await this.options.store.snapshot()).deliveries.some((d) => ids().includes(d.id) &&
           d.state.phase === "terminal" && d.state.outcome === "expired");
         const clean = await this.change((ledger) => ledger.defer(ids(), attempt, expiredMember ? 0 : 500));
         if (!clean) await this.change((ledger) => ledger.lose(ids(), attempt, result.code));
+        const outcome = clean ? "deferred" : await this.committedOutcome(ids(), result.code);
+        this.observed(identity, { outcome, code: result.code });
         return expiredMember;
       } else if (result.outcome === "expired" && result.unwritten) {
         await this.change((ledger) => ledger.unwritten(ids(), attempt));
-      } else await this.change((ledger) => ledger.settle(ids(), attempt, result.outcome as Outcome, result.code));
+        this.observed(identity, { outcome: await this.committedOutcome(ids(), result.code), code: result.code });
+      } else if (result.outcome === "ambiguous" || result.outcome === "unconfirmed") {
+        const outcome = await this.change((ledger) => {
+          const live = ledger.state.deliveries.filter((d) => ids().includes(d.id) && d.state.phase !== "terminal" &&
+            d.state.phase !== "queued" && d.state.attempt === attempt);
+          if (live.length > 0 && live.every((d) => d.state.phase === "reserved")) {
+            ledger.lose(ids(), attempt, result.code);
+            return "deferred" as const;
+          }
+          const accepted = live.find((d) => d.state.phase === "accepted");
+          const outcome = accepted?.state.phase === "accepted" ? accepted.state.loss : "ambiguous";
+          ledger.settle(ids(), attempt, outcome, result.code);
+          return outcome;
+        });
+        this.observed(identity, { outcome, code: result.code });
+        if (outcome === "deferred") return false;
+      } else {
+        await this.change((ledger) => ledger.settle(ids(), attempt, result.outcome as Outcome, result.code));
+        this.observed(identity, result);
+      }
       return true;
     } catch (error) {
       // A generic error is never evidence of a clean post-write refusal. The recorded
@@ -180,6 +200,13 @@ export class Coordinator {
       this.observed(identity, { outcome, code });
       return false;
     }
+  }
+
+  private async committedOutcome(ids: readonly string[], code: string): Promise<WakeResult["outcome"]> {
+    const rows = (await this.options.store.snapshot()).deliveries.filter((d) => ids.includes(d.id));
+    return (["ambiguous", "unconfirmed", "failed", "cancelled", "expired", "delivered"] as const)
+      .find((outcome) => rows.some((d) => d.state.phase === "terminal" && d.state.outcome === outcome)) ??
+      (rows.some((d) => d.state.phase === "queued") ? "deferred" : (code === "ROUTE_BUSY" ? "deferred" : "failed"));
   }
 
   async close(settle = true): Promise<void> {

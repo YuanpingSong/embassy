@@ -188,7 +188,7 @@ test("owner-authenticated remote resolution is injected and never persists catal
 });
 
 test("an evicted retirement re-enrolls one native endpoint under a new identity without reviving old authority", async (t) => {
-  const limits = { ...ledgerDefaults, retained: 1 };
+  const limits = { ...ledgerDefaults, retained: 1, retirements: 1 };
   const f = await fixture(t, undefined, { limits, randomIds: true });
   f.claude.peers = [peer(UUID_B, "returning")];
   const retired = (await f.directory.named(UUID_B))!;

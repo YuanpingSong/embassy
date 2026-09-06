@@ -206,3 +206,65 @@ test("an explicit delivery id cannot change its reply or authenticated remote al
     { code: "INVALID_PEER_HANDOFF" });
   assert.equal(JSON.stringify(f.state), before);
 });
+
+test("admission refuses a raw-small body whose escaped provenance frame cannot fit one wake", () => {
+  assert.doesNotThrow(() => fixture().admit("x".repeat(ledgerDefaults.bodyBytes)));
+  const f = fixture();
+  const before = JSON.stringify(f.state);
+  assert.throws(() => f.admit("\u0001".repeat(12_000)), { code: "INVALID_MESSAGE_BODY" });
+  assert.equal(JSON.stringify(f.state), before);
+});
+
+test("body pruning keeps the bounded receipt, reply identity, and exact duplicate evidence", () => {
+  const f = fixture(), delivery = f.admit("receipt body");
+  const { state: _state, admittedAt: _admittedAt, ...replay } = structuredClone(delivery);
+  const ledger = () => new Ledger(f.state, "local", { ...ledgerDefaults, retainedBytes: 1 }, 1_000);
+  ledger().reserve(f.target, "receipt");
+  ledger().authorize([delivery.id], "receipt", f.prepare([delivery.body]));
+  ledger().settle([delivery.id], "receipt", "delivered", "TRANSPORT_WRITTEN");
+  assert.equal(f.state.deliveries.length, 1);
+  assert.equal(f.state.deliveries[0]?.body, "");
+  assert.equal(f.state.deliveries[0]?.bodyHash, bodyHash("receipt body"));
+  assert.deepEqual(ledger().replyTarget(delivery.reply, f.target), delivery.source);
+  assert.equal(ledger().admit(replay).duplicate, true);
+  assert.throws(() => ledger().admit({ ...replay, body: "different" }), { code: "INVALID_PEER_HANDOFF" });
+});
+
+test("retirement evidence is bounded independently from receipt count", () => {
+  const f = fixture(), ledger = () => new Ledger(f.state, "local", { ...ledgerDefaults, retained: 1 }, 1_000);
+  ledger().retire(f.source);
+  ledger().retire(f.target);
+  assert.equal(f.state.retirements.length, 2);
+});
+
+test("rate capacity is partitioned per source host and a peer cannot exhaust local admission", () => {
+  const f = fixture();
+  const limits = { ...ledgerDefaults, endpoints: 2, queued: 100, perEndpoint: 100, retained: 2, rate: 100 };
+  const ledger = () => new Ledger(f.state, "local", limits, 1_000);
+  for (let i = 0; i < 2; i++) ledger().admit({ id: `remote-${i}`, reply: `reply-${i}`, token: `token-${i}`,
+    source: endpoint(`remote-${i}`, "claude", "peer"), target: f.target,
+    sourceAlias: `remote-${i}@peer`, body: `remote ${i}`, deadline: 2_000, steer: false });
+  const before = JSON.stringify(f.state);
+  assert.throws(() => ledger().admit({ id: "remote-over", reply: "reply-over", token: "token-over",
+    source: endpoint("remote-over", "claude", "peer"), target: f.target, sourceAlias: "remote-over@peer",
+    body: "remote over", deadline: 2_000, steer: false }), { code: "RATE_LIMITED" });
+  assert.equal(JSON.stringify(f.state), before);
+  assert.doesNotThrow(() => ledger().admit({ id: "local-after-peer", reply: "reply-local", token: "token-local",
+    source: f.source, target: f.target, body: "local", deadline: 2_000, steer: false }));
+});
+
+test("rate partitions admit at most the local host plus 32 peer hosts", () => {
+  const f = fixture();
+  const limits = { ...ledgerDefaults, queued: 100, perEndpoint: 100, retained: 100, rate: 100 };
+  const ledger = () => new Ledger(f.state, "local", limits, 1_000);
+  ledger().admit({ id: "local", reply: "reply-local", token: "token-local", source: f.source,
+    target: f.target, body: "local", deadline: 2_000, steer: false });
+  for (let i = 0; i < 32; i++) ledger().admit({ id: `remote-${i}`, reply: `reply-${i}`, token: `token-${i}`,
+    source: endpoint(`remote-${i}`, "claude", `peer-${i}`), target: f.target, sourceAlias: `remote-${i}@peer-${i}`,
+    body: `remote ${i}`, deadline: 2_000, steer: false });
+  const before = JSON.stringify(f.state);
+  assert.throws(() => ledger().admit({ id: "remote-over", reply: "reply-over", token: "token-over",
+    source: endpoint("remote-over", "claude", "peer-over"), target: f.target, sourceAlias: "remote-over@peer-over",
+    body: "remote over", deadline: 2_000, steer: false }), { code: "RATE_LIMITED" });
+  assert.equal(JSON.stringify(f.state), before);
+});
