@@ -145,7 +145,7 @@ test("help/version avoid state access", async () => {
     const stdout = sink();
     assert.equal(await runCoreCli([arg], { env: { EMBASSY_STATE_DIR: "not-absolute" }, stdout: stdout.stream }), 0);
     assert.ok(stdout.read().length > 0);
-    assert.equal(CORE_VERSION, "4.0.0");
+    assert.equal(CORE_VERSION, "4.1.0");
     if (arg === "--version") assert.equal(stdout.read(), `embassy ${CORE_VERSION}\n`);
   }
 });
