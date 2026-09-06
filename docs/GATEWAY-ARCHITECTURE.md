@@ -2,7 +2,7 @@
 
 ## Product contract
 
-Embassy connects live Claude Code sessions and registered Codex CLI tasks by
+Embassy connects live Claude Code sessions and Codex CLI agents by
 name, locally or across directly configured SSH gateways. All four provider
 pairs are supported. Sending is one `embassy send` command; receiving wakes the
 target through its native interface. A receipt proves delivery machinery, not
@@ -52,13 +52,17 @@ and restart. Retirement retains a bounded private hash of the native binding
 to fence immediate re-enrollment. After that evidence is evicted, a later
 registration gets a new ID; old replies and remote references cannot revive.
 
-Codex endpoints are explicitly registered by the task that inherits the exact
-task UUID. Claude endpoints are discovered by exact session UUID and recorded
+Codex endpoints are discovered as bounded metadata from the same-user App
+Server daemon. The immutable native thread UUID is their private identity;
+native names are mutable lookup aliases, and opaque parent references preserve
+root/child grouping when both rows are present without publishing native IDs. Explicit registration by a
+task that inherits the exact UUID remains a fallback and reconciles with the
+same endpoint row. Claude endpoints are discovered by exact session UUID and recorded
 when a Claude caller or target is resolved. A same-UUID rename updates one
-endpoint; a different identity never inherits work. Two live Claude sessions
-may share a display name, but name resolution then refuses with
-`PEER_ALIAS_COLLISION`. An exact user-supplied Claude UUID can disambiguate
-selection without making UUIDs public output.
+endpoint; a different identity never inherits work. Live endpoints may share
+a display name, but name resolution then refuses with `PEER_ALIAS_COLLISION`.
+An exact user-supplied Claude UUID can disambiguate Claude selection without
+making UUIDs public output.
 Partial discovery cannot clear an observed collision. The bounded collision
 proof sets fail closed on overflow until a complete scan; exact UUID lookup
 remains available. Operator retirement can use `--endpoint <public-id>` when
@@ -69,8 +73,10 @@ and any local cache are bounded and memory-only; neither grants lookup or write
 authority. Remote endpoint rows contain opaque IDs and aliases, not native
 handles.
 
-`refresh` runs local Claude discovery and all configured catalog observations
-in parallel. Each successful node observation replaces its rows and timestamp.
+`refresh` runs local Claude and Codex discovery and all configured catalog
+observations in parallel. Codex discovery also follows bounded daemon metadata
+events and reconnects with a fresh bounded enumeration after daemon loss. Each
+successful node observation replaces its rows and timestamp.
 A failure retains the last timestamped rows with `PEER_TUNNEL_UNAVAILABLE`.
 The status projection reads this cache without network I/O and caps the combined
 remote display at 128 rows, reporting truncation. Routing still uses the owner
@@ -172,10 +178,22 @@ native socket is still used for receive and reply wake-up.
 
 ### Codex operation
 
+One bounded App Server observer enumerates unarchived root and child agents,
+combines loaded-state and lifecycle/name events, and retains only the metadata
+used by the endpoint directory. It drains unwanted notifications and
+unsubscribes from threads it is not actively brokering so observation does not
+pin them in memory. An incomplete scan cannot prove an endpoint disappeared;
+archive/delete evidence can. `thread/closed` marks an agent unloaded, not
+retired. Retirement evidence suppresses rediscovery.
+
 The Codex adapter creates a fresh App Server connection per operation, checks
-the current interface, resumes the exact registered thread with history
-excluded, and starts one turn carrying the bounded batch. Returned history and
-model output are not retained or forwarded.
+the current interface and direct-input capability, resumes the exact known
+thread with history excluded when needed, and starts one turn carrying the
+bounded batch only after an immediate idle-status check. Returned history and
+model output are not retained or forwarded. While active, ordinary messages
+remain in Embassy's ledger. A competing client can start a turn between the
+idle check and write; the indistinguishable App Server response means the
+receipt proves acceptance and lifetime, not that Embassy started a fresh turn.
 
 An accepted operation remains tracked until its terminal lifetime notification.
 An exact leading Claude-to-Codex `STEER:` may use that same accepted
@@ -218,7 +236,7 @@ reset.
 
 ## Local control and CLI
 
-The private control protocol is version 5. Each connection carries one bounded
+The private control protocol is version 6. Each connection carries one bounded
 JSON request and one closed JSON response over the expected private Unix
 socket. A mutating request whose reply is lost after write reports
 `CONTROL_WRITE_OUTCOME_AMBIGUOUS`; the CLI does not retry it.
@@ -236,8 +254,9 @@ serve            service           peer-stdio
 `send` accepts exactly one of `--to` and `--conversation`; it has no `--from`.
 Human `status` is a rendering of the same closed body-free JSON shape. Its
 health word describes control/ledger health, local route rows expose their last
-native operation, and the federation section exposes only the last bounded
-catalog observation. `health` is a control-path probe. `check` creates temporary
+native operation, and Codex rows may expose observed loaded/busy/approval state,
+direct-input capability and an opaque parent endpoint. The federation section
+exposes only the last bounded catalog observation. `health` is a control-path probe. `check` creates temporary
 private loopback endpoints and uses the real ledger/coordinator/receipt path,
 then retires them; no provider or model is contacted. It is not a
 provider-readiness test.
@@ -283,7 +302,7 @@ model interrupt.
 | Surface | Version | Compatibility policy |
 |---|---:|---|
 | Private state (`gateway-state.json`) | 6 | Reset only; older and unknown schemas refuse without mutation |
-| Private control (CLI ↔ broker) | 5 | CLI and broker must come from one installation |
+| Private control (CLI ↔ broker) | 6 | CLI and broker must come from one installation |
 | Federation (`peer-stdio`) | 3 | Exact version and host handshake; no compatibility mode |
 | Consumed Claude peer protocol | 1 | Incompatible records are rejected in isolation |
 

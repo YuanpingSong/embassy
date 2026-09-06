@@ -5,6 +5,7 @@ import { EndpointDirectory, type EndpointCaller } from "./endpoint-directory.js"
 import { Ledger, type Delivery, type Endpoint, type EndpointRef, type LedgerLimits, type LedgerState } from "./ledger.js";
 import type { OwnedStateFile } from "./owned-state.js";
 import type { FederatedHandoff, Federation } from "./federation.js";
+import type { CodexDiscoveryObservation } from "./codex-discovery.js";
 
 export type BrokerOptions = Readonly<{
   host: string; store: OwnedStateFile<LedgerState>; limits: LedgerLimits;
@@ -13,6 +14,7 @@ export type BrokerOptions = Readonly<{
   nodes?: readonly string[];
   steeringEnabled?: boolean;
   federation?: Pick<Federation, "catalog" | "snapshot">;
+  codexDiscovery?: { refresh(): Promise<void>; observation(): CodexDiscoveryObservation };
 }>;
 const publicEndpoint = ({ id, alias, provider, host }: Endpoint) => ({ id, alias, provider, host });
 const admissionRefusals = new Set(["INVALID_PEER_HANDOFF", "ROUTE_UNREGISTERED", "INVALID_MESSAGE_BODY",
@@ -116,7 +118,7 @@ export class MessagingBroker {
 
   async refresh() {
     const [endpoints] = await Promise.all([
-      this.options.directory.refresh(), this.options.federation?.catalog(),
+      this.options.directory.refresh(), this.options.federation?.catalog(), this.options.codexDiscovery?.refresh(),
     ]);
     this.kick();
     return { routes: endpoints.map(publicEndpoint) };
@@ -129,8 +131,10 @@ export class MessagingBroker {
     return {
       health: this.fault ? "degraded" : "healthy", ...(this.fault ? { safeErrorCode: this.fault } : {}),
       revision: state.commit.sequence,
+      ...(this.options.codexDiscovery ? { codex: this.options.codexDiscovery.observation() } : {}),
       ...(this.options.federation ? { federation: this.options.federation.snapshot() } : {}),
       routes: state.endpoints.map((e) => ({ ...publicEndpoint(e),
+        ...(e.provider === "codex" && this.options.codexDiscovery ? { codex: this.options.directory.codexMetadata(e, state.endpoints) } : {}),
         ...(this.options.coordinator.observation(e) === undefined ? {} : { lastOperation: this.options.coordinator.observation(e) }),
         queueDepth: state.deliveries.filter((d) => d.target.id === e.id && d.target.host === e.host && d.state.phase !== "terminal").length })),
       messages: state.deliveries.map((d) => ({ source: alias(d.source) ?? d.sourceAlias, target: alias(d.target),

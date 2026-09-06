@@ -31,8 +31,8 @@ code{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace}p code{font-siz
 <pre><span class="c"># install, and run the broker as your launchd agent</span>
 npm install -g agent-embassy
 embassy service install
-<span class="c"># 1. inside the Codex task — ask the agent to run it</span>
-embassy register-codex --alias codex-reviewer@your-host
+<span class="c"># 1. Codex agents appear automatically; inspect their public names</span>
+embassy status
 <span class="c"># 2. from Claude or Codex — the caller is inferred; body stays on stdin</span>
 embassy send --to advisor@your-host &lt;&lt;'MSG'
 Which auth middleware did you settle on?

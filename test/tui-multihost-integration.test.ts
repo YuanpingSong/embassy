@@ -28,6 +28,7 @@ test("one terminal reads two real test-owned brokers and retires only the confir
     await mkdir(state(host), { mode: 0o700 }); await chmod(state(host), 0o700);
     await writeFile(path.join(state(host), "nodes.json"), JSON.stringify({ version: 1, host, nodes: [] }), { mode: 0o600 });
     const dependencies: CoreRuntimeDependencies = {
+      createCodexDiscovery: () => undefined,
       loginHome: () => state(host),
       acquireLease: async () => ({ lost: new Promise<void>(() => {}), isLost: () => false, close: async () => {} }),
       attestClaudeRuntime: async () => ({ sessionsDir: path.join(root, "sessions"), socketDir: path.join(root, "sockets") }),

@@ -37,6 +37,7 @@ const GATEWAY_RUNTIME_MODULES = [
   "claude-peer",
   "claude-runtime",
   "codex-app-server",
+  "codex-discovery",
   "codex-local-transport",
   "codex-stateless-transport",
   "config",

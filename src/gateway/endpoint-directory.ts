@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { BridgeError } from "../errors.js";
 import type { ClaudePeerAdapter, ClaudePeerDescriptor } from "./claude-peer.js";
+import type { CodexThread } from "./codex-discovery.js";
 import { Ledger, nativeKey, sameEndpoint, type Endpoint, type EndpointRef, type LedgerLimits, type LedgerState } from "./ledger.js";
 import type { OwnedStateFile } from "./owned-state.js";
 
@@ -18,6 +19,12 @@ export type RemoteEndpointResolver = Readonly<{
 }>;
 export type EndpointCaller = Readonly<{ kind: "codex"; handle: string }> |
   Readonly<{ kind: "claude"; address: string }>;
+export type CodexEndpointMetadata = Readonly<{
+  state: CodexThread["status"];
+  canAcceptDirectInput: boolean | "unknown";
+  parentEndpoint?: string;
+}>;
+export type CodexReconciliation = Readonly<{ endpoints: readonly Endpoint[]; truncated: boolean }>;
 export type EndpointDirectoryOptions = Readonly<{
   host: string; limits: LedgerLimits; store: OwnedStateFile<LedgerState>;
   claude: ClaudeDirectoryAdapter; remote?: RemoteEndpointResolver;
@@ -32,6 +39,8 @@ export class EndpointDirectory {
   readonly #createRegistrationId: (provider: "claude" | "codex", handle: string) => string;
   readonly #collidingAliases = new Set<string>();
   readonly #observedClaudeAliases = new Set<string>();
+  #codexMetadata = new Map<string, CodexThread>();
+  #codexProofIncomplete = false;
   #completeRefreshObserved = false;
   #proofOverflow = false;
 
@@ -69,6 +78,58 @@ export class EndpointDirectory {
     });
   }
 
+  async reconcileCodex(threads: readonly CodexThread[], positiveRemovedIds: readonly string[] = [],
+    incomplete = false): Promise<CodexReconciliation> {
+    const current = new Map<string, CodexThread>();
+    for (const thread of threads) {
+      if (!UUID.test(thread.id)) throw new BridgeError("INVALID_GATEWAY_CONFIGURATION", "The discovered Codex identity is invalid.");
+      current.set(thread.id.toLowerCase(), { ...thread, id: thread.id.toLowerCase() });
+    }
+    const removed = new Set(positiveRemovedIds.map((id) => {
+      if (!UUID.test(id)) throw new BridgeError("INVALID_GATEWAY_CONFIGURATION", "The removed Codex identity is invalid.");
+      return id.toLowerCase();
+    }));
+    const reconciled = await this.options.store.transact((state, now) => {
+      const ledger = new Ledger(state, this.options.host, this.options.limits, now.getTime());
+      for (const handle of removed) {
+        const endpoint = state.endpoints.find((row) => row.provider === "codex" && row.handle === handle);
+        if (endpoint !== undefined) ledger.retire(reference(endpoint));
+      }
+      let overflow = false;
+      const metadata: [string, CodexThread][] = [];
+      for (const [handle, thread] of current) {
+        const existing = state.endpoints.find((row) => row.provider === "codex" && row.handle === handle);
+        if (state.retirements.some((row) => row.nativeKey === nativeKey({ provider: "codex", handle }))) continue;
+        if (existing === undefined && state.endpoints.length >= this.options.limits.endpoints) {
+          overflow = true;
+          continue;
+        }
+        const endpoint: Endpoint = { id: existing?.id ?? this.#id("codex", handle), host: this.options.host,
+          provider: "codex", alias: "", handle };
+        endpoint.alias = this.#codexAlias(thread, endpoint.id);
+        ledger.register(endpoint);
+        metadata.push([endpoint.id, thread]);
+      }
+      return { endpoints: state.endpoints.filter((row) => row.provider === "codex"), metadata, overflow };
+    });
+    const retainedIds = new Set(reconciled.endpoints.map((endpoint) => endpoint.id));
+    for (const id of this.#codexMetadata.keys()) if (!retainedIds.has(id)) this.#codexMetadata.delete(id);
+    if (!incomplete && !reconciled.overflow) this.#codexMetadata.clear();
+    for (const [id, thread] of reconciled.metadata) this.#codexMetadata.set(id, thread);
+    this.#codexProofIncomplete = incomplete || reconciled.overflow;
+    return { endpoints: reconciled.endpoints, truncated: this.#codexProofIncomplete };
+  }
+
+  codexMetadata(endpoint: Endpoint, allEndpoints: readonly Endpoint[]): CodexEndpointMetadata | undefined {
+    if (endpoint.provider !== "codex") return undefined;
+    const thread = this.#codexMetadata.get(endpoint.id);
+    if (thread === undefined) return { state: "unknown", canAcceptDirectInput: "unknown" };
+    const parent = thread.parentThreadId === undefined ? undefined : allEndpoints.find((row) =>
+      row.provider === "codex" && row.handle === thread.parentThreadId!.toLowerCase());
+    return { state: thread.status, canAcceptDirectInput: thread.canAcceptDirectInput ?? "unknown",
+      ...(parent === undefined ? {} : { parentEndpoint: parent.id }) };
+  }
+
   async caller(input: EndpointCaller): Promise<Endpoint> {
     if (input.kind === "codex") {
       if (!UUID.test(input.handle)) throw new BridgeError("ROUTE_UNREGISTERED", "The Codex caller is invalid.");
@@ -97,6 +158,9 @@ export class EndpointDirectory {
     const before = await this.options.store.snapshot();
     const known = before.endpoints.filter((row) => row.alias === selector);
     const codex = known.filter((row) => row.provider === "codex");
+    if (codex.length > 1 || this.#codexProofIncomplete && selector.startsWith("codex-")) {
+      throw new BridgeError("PEER_ALIAS_COLLISION", "A complete Codex discovery is required to resolve this name.");
+    }
     let live: Endpoint[];
     try {
       live = await this.refresh();
@@ -225,6 +289,22 @@ export class EndpointDirectory {
     if (!ALIAS.test(alias) || !alias.endsWith(`@${this.options.host}`) || codex && !alias.startsWith("codex-")) {
       throw new BridgeError("INVALID_GATEWAY_CONFIGURATION", "The endpoint alias is invalid.");
     }
+  }
+
+  #codexAlias(thread: CodexThread, id: string): string {
+    const candidate = thread.name?.trim() || thread.agentNickname?.trim() || "";
+    const native = thread.id.toLowerCase().replace(/[^a-z0-9]/gu, "");
+    const exposesNative = candidate.toLowerCase().replace(/[^a-z0-9]/gu, "").includes(native);
+    let local = candidate.normalize("NFKD").toLowerCase().replace(/\p{M}/gu, "")
+      .replace(/[^a-z0-9_-]+/gu, "-").replace(/^[-_]+|[-_]+$/gu, "").replace(/[-_]{2,}/gu, "-");
+    if (!local || exposesNative) {
+      const publicPart = id.slice(4).toLowerCase().replace(/[^a-z0-9]/gu, "").slice(0, 18) || "endpoint";
+      local = `agent-${publicPart}`;
+    }
+    if (!local.startsWith("codex-")) local = `codex-${local}`;
+    const alias = `${local.slice(0, 32)}@${this.options.host}`;
+    this.#assertAlias(alias, true);
+    return alias;
   }
 
   #id(provider: "claude" | "codex", handle: string): string {

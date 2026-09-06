@@ -10,8 +10,10 @@ Its `name@host` alias is a lookup index and display label. A send by name
 resolves once, before admission. Every later transition and reply uses the
 endpoint tuple; a rename or replacement cannot retarget old work.
 
-Codex callers must already be registered. A Claude caller is derived from its
-inherited native socket and recorded under the exact discovered session UUID.
+Codex callers must already be known through daemon discovery or fallback
+registration. Both paths identify the same endpoint kind by the exact native
+task identity. A Claude caller is derived from its inherited native socket and
+recorded under the exact discovered session UUID.
 The caller never supplies `--from`. A remote source is supplied by the trusted
 SSH peer. Its claimed host must be in `nodes.json`, and the message's source
 host must match that claim. The destination does not wait for a catalog poll
@@ -72,10 +74,18 @@ The receiving Claude session wakes through its native socket.
 ### Codex destination
 
 The broker creates a fresh bounded App Server operation, resumes the exact
-registered task without retaining returned history, prepares the input, then
-revalidates the registration and operation immediately before the write. The
-accepted operation remains attached until its terminal lifetime event so an
-active-turn STEER has a valid target.
+known task without retaining returned history, prepares the input, then
+revalidates the endpoint and operation immediately before the write. Dormant
+agents therefore wake through ordinary delivery. A native direct-input refusal
+remains a visible endpoint refusal. The accepted operation remains attached
+until its terminal lifetime event so an active-turn STEER has a valid target.
+
+Ordinary messages remain queued while the immediately observed task status is
+active. If another client starts a turn between Embassy's idle check and its
+write, the message enters that turn as steer text; the App Server response
+cannot distinguish this, so the receipt proves acceptance and lifetime only,
+not that a fresh turn started. The same residual race applies to fallback-
+registered tasks. Embassy does not use the App Server's native queue.
 
 An exact leading `STEER:` is special only from Claude to Codex. It is delivered
 through that exact accepted operation's `turn/steer` capability at the next

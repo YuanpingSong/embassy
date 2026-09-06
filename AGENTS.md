@@ -72,8 +72,12 @@ propose a contract change rather than expanding the boundary through a test.
 - Endpoint `(opaque ID, host, provider)` is identity. An alias is current lookup
   and display data. Resolve a name once; never silently retarget admitted work
   after rename, replacement, retirement, or catalog change.
-- A Codex task self-registers from inherited `CODEX_THREAD_ID`. Never accept,
-  print, or guess it. A Claude caller is derived from its inherited absolute
+- Discover Codex agents from bounded same-user App Server metadata. Keep the
+  immutable native ID private, preserve opaque root/child grouping, and treat
+  native names as mutable aliases. `register-codex` remains a fallback using
+  inherited `CODEX_THREAD_ID`; discovery and registration must reconcile one
+  endpoint identity. Never accept, print, or guess the native ID. A Claude
+  caller is derived from its inherited absolute
   `CLAUDE_CODE_MESSAGING_SOCKET`; never accept, print, or persist that path.
   Native IDs may exist only in closed private route state.
 - Every provider write revalidates the exact current local endpoint and exact
@@ -92,10 +96,16 @@ propose a contract change rather than expanding the boundary through a test.
   accepted operation's `turn/steer` capability at a safe tool-call boundary;
   never inject mid-generation or call `turn/interrupt`. A cleanly unavailable
   boundary returns to the normal bounded queue.
+- Ordinary Codex messages queue while an immediate status observation is
+  active. Start only after observing idle. The residual other-client race is
+  undetectable on the App Server wire: a receipt proves acceptance/lifetime,
+  not fresh-turn creation. Do not add a native provider queue or replay the
+  write.
 - Embassy never changes a Codex approval or sandbox policy and never answers
-  an approval. Keep `experimentalApi: true` limited to
-  `thread/resume.excludeTurns: true`; require empty returned turns and never
-  retain provider history or model output.
+  an approval. Keep `experimentalApi: true` limited to the explicit metadata,
+  unsubscribe, resume and delivery methods used by this integration; require
+  empty returned turns on resume and never retain provider history or model
+  output.
 - Direct SSH is authenticated by the user's configured `/usr/bin/ssh` process.
   The destination owns the queue. The peer's claimed host must be in nodes.json
   and its handoff source hosts must match; the SSH login and host claim are
@@ -111,10 +121,11 @@ propose a contract change rather than expanding the boundary through a test.
 - `health` describes local control. `check` proves only the broker's loopback
   ledger/coordinator/receipt path. Neither proves provider readiness, model
   comprehension, or cross-machine delivery.
-- State schema 6 and private control protocol 5 are reset-only. Old or unknown
-  state refuses without mutation. There is no converter or compatibility
-  reader. A reset invalidates routes, receipts, and conversations; rollback
-  requires the untouched old state and matching old binary.
+- State schema 6 is reset-only; private control protocol 6 requires a matching
+  CLI and broker. Old or unknown state refuses without mutation. There is no
+  converter or compatibility reader. A reset invalidates routes, receipts,
+  and conversations; rollback requires the untouched old state and matching
+  old binary.
 - Preserve exact current-user ownership, modes, symlink, inode, lease, and
   used-artifact generation checks for every owned/executed path. Unsafe Claude
   registry evidence may quarantine Claude; unsafe broker-owned authority may

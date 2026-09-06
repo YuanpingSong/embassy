@@ -16,9 +16,10 @@ identity, so a rename or replacement never silently retargets queued work.
 - macOS and Node.js 20 or newer.
 - Claude Code installed for the Claude sessions you use.
 - To receive in Codex, use its managed standalone installation with its App
-  Server daemon already running under the same macOS login; merely having a
-  `codex` executable on PATH is insufficient, and Embassy does not install or
-  start that daemon.
+  Server daemon already running under the same macOS login. Embassy discovers
+  its current unarchived agents automatically, but does not install, start or
+  update that daemon; merely having a `codex` executable on PATH is
+  insufficient.
 - A private `nodes.json` when choosing an explicit host name or federating;
   first single-machine boot creates one from the short hostname.
 - Key-based, non-interactive SSH between configured machines when federating.
@@ -84,9 +85,14 @@ Read `host` from the `nodes.json` that first boot created and use it as every
 local `@host` suffix; the examples use `@studio` only when you explicitly chose
 `host: studio`, not as a universal alias suffix.
 
-Ask the live Codex CLI task to execute the following registration through its
-shell tool; an ordinary terminal lacks that task's inherited identity. Embassy
-never accepts or prints the task ID:
+Codex agents appear automatically from the same-user App Server daemon. Run
+`embassy status` to see their current public names; dormant agents remain
+addressable and wake on delivery. Native task IDs, previews and history never
+appear in Embassy output.
+
+For a harness without native daemon integration, ask the live Codex CLI task
+to execute this fallback registration through its shell tool; an ordinary
+terminal lacks that task's inherited identity:
 
 ```sh
 embassy register-codex --alias codex-reviewer@studio
@@ -96,7 +102,7 @@ Claude sessions are discovered and recorded by exact native identity when a
 Claude caller sends or when a named Claude target is resolved. No helper or
 native advertisement process is installed.
 
-After Codex registers `codex-reviewer@studio`, ask the live Claude Code session
+After `codex-reviewer@studio` appears in status, ask the live Claude Code session
 to run `embassy send --to codex-reviewer@studio` with 'Please review the change
 and reply using the supplied Embassy hint' on stdin; execute this through the
 agent's shell tool, not an unrelated terminal. The sender is inferred from the calling session:
@@ -158,8 +164,9 @@ with each peer name matching both the remote inventory's `host` and a working
 SSH destination or `~/.ssh/config` Host alias.
 
 After changing a running broker's inventory, reload it with
-`embassy service install`; register `codex-reviewer@laptop` from the live
-Codex task on laptop, then ask the Claude session on studio to run
+`embassy service install`; wait for `codex-reviewer@laptop` to appear from the
+Codex daemon on laptop (or use fallback registration), then ask the Claude
+session on studio to run
 `embassy send --to codex-reviewer@laptop` with the message on stdin.
 
 From studio, verify the remote command environment with
@@ -182,8 +189,8 @@ queue and trusts the peer's source identity, so first contact does not wait
 for a destination catalog poll. Catalogs are bounded memory-only observations,
 never routing authority.
 
-`embassy refresh` observes local Claude sessions and every configured SSH
-catalog in parallel. `status` performs no provider or network I/O: it shows the
+`embassy refresh` observes local Claude and Codex sessions and every configured
+SSH catalog in parallel. `status` performs no provider or network I/O: it shows the
 last per-node catalog rows and observation time, retains the last rows when a
 later refresh fails, and labels that node `PEER_TUNNEL_UNAVAILABLE`. At most 128
 remote rows are displayed; truncation is explicit. Named and exact sends still
@@ -280,16 +287,18 @@ See [Security](SECURITY.md), [Configuration](docs/CONFIGURATION.md), and
 
 ## Upgrading to 4.x
 
-Version 4 accepts only fresh private state schema 6 and private control
-protocol 5. It does not migrate or read 3.x state.
+Version 4 accepts only fresh private state schema 6. Codex discovery changes
+the private control protocol from 5 to 6; CLI and broker must come from one
+installation. It does not migrate or read 3.x state.
 
 Before replacing a 3.x installation, use its matching CLI to inspect and
 settle or explicitly abandon pending work; stop a launchd broker with
 `embassy service uninstall` (or stop the foreground serve process) and confirm
 it is stopped with `embassy service status`, back up and move aside only
 `gateway-state.json` in that broker's state directory while retaining
-`nodes.json`, then install 4.0.0, run `embassy service install`, and re-register
-the Codex tasks.
+`nodes.json`, then install the current discovery-enabled 4.x release and run
+`embassy service install`. Current Codex agents are discovered; use fallback
+registration only for non-native harnesses.
 
 All state produced by Embassy 3.x is unsupported by 4.x; preserve the matching
 old binary as well as its old state if rollback may be needed, and never run

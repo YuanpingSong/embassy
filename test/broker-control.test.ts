@@ -91,3 +91,20 @@ test("broker results are bounded, disclosure-free and reject duplicate endpoint 
   assert.equal(isBrokerResult("list_snapshot", { ...snapshot,
     routes: [snapshot.routes[0], { ...aliasTwin, queueDepth: 0 }] }), true);
 });
+
+test("Codex metadata is closed, bounded and cannot expose native identities through status or federation", () => {
+  const codex = { state: "waitingOnApproval", canAcceptDirectInput: false, parentEndpoint: "reg_parent" };
+  const observed = { complete: true, truncated: false, observedAt: now };
+  const project = (metadata: unknown, observation: unknown = observed) => ({ ...snapshot, codex: observation,
+    routes: [{ ...snapshot.routes[0], codex: metadata }] });
+  assert.equal(isBrokerResult("list_snapshot", project(codex)), true);
+  for (const invalid of [{ ...codex, threadId: uuid }, { ...codex, parentEndpoint: uuid },
+    { ...codex, state: "ready" }, { ...codex, canAcceptDirectInput: "yes" }, { ...codex, preview: "private" }])
+    assert.equal(isBrokerResult("list_snapshot", project(invalid)), false);
+  for (const observation of [{ ...observed, threads: [] }, { ...observed, observedAt: "yesterday" },
+    { ...observed, safeErrorCode: "native error text" }, { ...observed, truncated: 1 }])
+    assert.equal(isBrokerResult("list_snapshot", project(codex, observation)), false);
+  assert.equal(isBrokerResult("peer_catalog", [{ ...endpoint, codex }]), false);
+  assert.equal(isBrokerResult("list_snapshot", { ...project(codex), routes: [
+    { ...snapshot.routes[0], provider: "claude", codex } ] }), false);
+});

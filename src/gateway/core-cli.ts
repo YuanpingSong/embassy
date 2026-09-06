@@ -15,7 +15,7 @@ import { LocalControlError, requestLocalControl } from "./local-control.js";
 import { runCoreRuntime } from "./runtime.js";
 import { defaultRunLaunchctl } from "./service-agent.js";
 import { runCoreServiceCommand } from "./core-service-command.js";
-import { runTui } from "./tui.js";
+import { groupCodexEndpoints, runTui } from "./tui.js";
 import { createTuiSshClient } from "./tui-ssh.js";
 
 import { CORE_VERSION } from "./core-version.js";
@@ -102,6 +102,7 @@ function hint(command: string, code: string, stateDir: string): string {
   if (code === "CONTROL_VERSION_MISMATCH") return "Rebuild or repoint the CLI and broker to the same installation; restarting an unchanged binary cannot fix version skew.";
   if (code === "CONTROL_WRITE_OUTCOME_AMBIGUOUS") return "The operation may have applied. Inspect status; do not resend an uncertain write.";
   if (code === "CONTROL_INVALID_RESPONSE") return "If installations changed, rebuild or repoint the CLI and broker; otherwise inspect the broker and restart it if necessary.";
+  if (code === "CODEX_DIRECT_INPUT_UNAVAILABLE") return "This Codex agent does not accept direct input; choose its parent or another endpoint.";
   if (code === "CONTROL_SOCKET_UNSAFE" || code === "INSECURE_STATE_DIR") return `Check ownership and private modes for ${stateDir}, and local sandbox access. Do not move state or start a second broker.`;
   if (code === "CONTROL_SOCKET_MISSING" || code === "CONTROL_LISTENER_UNAVAILABLE") return `No broker is reachable at ${stateDir}. Run embassy service install, or embassy serve in a trusted terminal.`;
   return "";
@@ -110,11 +111,13 @@ function hint(command: string, code: string, stateDir: string): string {
 function renderStatus(value: unknown): string {
   if (!object(value) || !Array.isArray(value.routes)) return invalid("CONTROL_INVALID_RESPONSE");
   const lines = [`Broker: ${String(value.health)}${value.safeErrorCode ? ` / ${value.safeErrorCode}` : ""} (control/ledger; not a provider readiness proof)`];
-  for (const row of value.routes) {
-    if (!object(row)) return invalid("CONTROL_INVALID_RESPONSE");
+  if (object(value.codex)) { const observed = typeof value.codex.observedAt === "string" ? Date.parse(value.codex.observedAt) : Number.NaN;
+    lines.push(`Codex discovery: ${value.codex.complete ? "complete" : "partial"}${value.codex.truncated ? " / truncated" : ""}${value.codex.safeErrorCode ? ` / ${value.codex.safeErrorCode}` : ""} (${Number.isFinite(observed) ? `${Math.max(0, Date.now() - observed)} ms ago` : "not yet observed"})`); }
+  for (const { row, depth } of groupCodexEndpoints(value.routes.filter(object))) {
     const last = object(row.lastOperation) ? `  last ${String(row.lastOperation.outcome)} / ${String(row.lastOperation.code)}` : "  not yet observed";
     const collision = value.routes.filter((candidate) => object(candidate) && candidate.alias === row.alias).length > 1;
-    lines.push(`${String(row.alias)}${collision ? ` [ambiguous name; endpoint ${row.id}]` : ""}  ${String(row.provider)}  queued ${String(row.queueDepth)}${last}`);
+    const codex = object(row.codex) ? `  ${String(row.codex.state)} / direct input ${row.codex.canAcceptDirectInput === false ? "refused" : row.codex.canAcceptDirectInput === true ? "yes" : "unknown"}` : "";
+    lines.push(`${depth ? "  ↳ " : ""}${String(row.alias)}${collision ? ` [ambiguous name; endpoint ${row.id}]` : ""}  ${String(row.provider)}${codex}  queued ${String(row.queueDepth)}${last}`);
   }
   if (value.routes.length === 0) lines.push("No registered endpoints.");
   if (object(value.federation) && Array.isArray(value.federation.nodes)) {

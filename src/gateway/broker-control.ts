@@ -36,6 +36,10 @@ const rows = (x: unknown, maximum: number, accepts: (row: unknown) => boolean): 
   Array.isArray(x) && x.length <= maximum && x.every(accepts);
 const endpoints = (x: unknown, accepts = endpoint): boolean => rows(x, 128, accepts) &&
   new Set((x as Obj[]).map((row) => JSON.stringify([row.host, row.id]))).size === (x as Obj[]).length;
+const codexMetadata = (x: unknown): boolean => exact(x, ["state", "canAcceptDirectInput"], ["parentEndpoint"]) &&
+  ["notLoaded", "idle", "active", "waitingOnApproval", "waitingOnUserInput", "systemError", "unknown"].includes(String(x.state)) &&
+  (typeof x.canAcceptDirectInput === "boolean" || x.canAcceptDirectInput === "unknown") &&
+  (x.parentEndpoint === undefined || token(x.parentEndpoint, "reg_", "1,252"));
 
 /** One public projection contract, used before emission and after transport. Native
  * handles and arbitrary adapter fields can never hitchhike in a valid result. */
@@ -56,9 +60,13 @@ export function isBrokerResult(method: BrokerCommand["method"], value: unknown):
       exact(value, ["found", "state", "terminal", "deadlineAt"], ["pendingForMs", "safeErrorCode"]) && value.found === true && date(value.deadlineAt) &&
       (value.terminal === true ? outcomes.includes(String(value.state)) && code(value.safeErrorCode) && value.pendingForMs === undefined
         : value.terminal === false && ["queued", "reserved", "armed", "accepted"].includes(String(value.state)) && count(value.pendingForMs) && value.safeErrorCode === undefined);
-    case "list_snapshot": return exact(value, ["health", "revision", "routes", "messages", "retirements"], ["safeErrorCode", "federation"]) &&
+    case "list_snapshot": return exact(value, ["health", "revision", "routes", "messages", "retirements"], ["safeErrorCode", "federation", "codex"]) &&
       ["healthy", "degraded"].includes(String(value.health)) && count(value.revision) &&
       (value.safeErrorCode === undefined || code(value.safeErrorCode)) &&
+      (value.codex === undefined || exact(value.codex, ["truncated", "complete"], ["observedAt", "safeErrorCode"]) &&
+        typeof value.codex.truncated === "boolean" && typeof value.codex.complete === "boolean" &&
+        (value.codex.observedAt === undefined || date(value.codex.observedAt)) &&
+        (value.codex.safeErrorCode === undefined || code(value.codex.safeErrorCode))) &&
       (value.federation === undefined || exact(value.federation, ["nodes", "truncated"]) && typeof value.federation.truncated === "boolean" &&
         rows(value.federation.nodes, 32, (node) => exact(node, ["host", "routes"], ["observedAt", "safeErrorCode"]) && host(node.host) &&
           endpoints(node.routes, (row) => endpoint(row) && (row as Obj).host === node.host) &&
@@ -66,8 +74,9 @@ export function isBrokerResult(method: BrokerCommand["method"], value: unknown):
           (node.safeErrorCode === undefined || node.safeErrorCode === "PEER_TUNNEL_UNAVAILABLE")) &&
         new Set((value.federation.nodes as Obj[]).map((node) => node.host)).size === (value.federation.nodes as Obj[]).length &&
         (value.federation.nodes as Obj[]).reduce((sum, node) => sum + (node.routes as unknown[]).length, 0) <= 128) &&
-      endpoints(value.routes, (row) => exact(row, ["id", "alias", "provider", "host", "queueDepth"], ["lastOperation"]) &&
+      endpoints(value.routes, (row) => exact(row, ["id", "alias", "provider", "host", "queueDepth"], ["lastOperation", "codex"]) &&
         endpoint({ id: row.id, alias: row.alias, provider: row.provider, host: row.host }) && count(row.queueDepth) &&
+        (row.codex === undefined || row.provider === "codex" && codexMetadata(row.codex)) &&
         (row.lastOperation === undefined || exact(row.lastOperation, ["outcome", "code"]) &&
           [...outcomes, "deferred"].includes(String(row.lastOperation.outcome)) && code(row.lastOperation.code))) &&
       rows(value.messages, 600, (row) => exact(row, ["state", "ageMs"], ["source", "target", "safeErrorCode"]) &&

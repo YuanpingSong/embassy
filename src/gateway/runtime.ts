@@ -7,6 +7,7 @@ import { MessagingBroker } from "./broker.js";
 import { ClaudePeerAdapter } from "./claude-peer.js";
 import { attestClaudePeerRuntime, type AttestedClaudePeerRuntime } from "./claude-runtime.js";
 import { createStatelessCodexOperationTransport, type StatelessCodexOperationTransport } from "./codex-stateless-transport.js";
+import { createCodexDiscoveryObserver, type CodexDiscoveryObservation } from "./codex-discovery.js";
 import { loadGatewayConfig, defaultGatewayStateDir, type GatewayConfig } from "./config.js";
 import { Coordinator, type Destination } from "./coordinator.js";
 import { EndpointDirectory, type ClaudeDirectoryAdapter, type RemoteEndpointResolver } from "./endpoint-directory.js";
@@ -35,6 +36,7 @@ export type CoreRuntimeDependencies = Readonly<{
   attestClaudeRuntime?: () => Promise<AttestedClaudePeerRuntime>;
   createClaudePeer?: (runtime: AttestedClaudePeerRuntime, config: GatewayConfig) => RuntimeClaudePeer;
   createCodexOperation?: (env: NodeJS.ProcessEnv) => StatelessCodexOperationTransport;
+  createCodexDiscovery?: (...args: Parameters<typeof createCodexDiscoveryObserver>) => ReturnType<typeof createCodexDiscoveryObserver> | undefined;
   createFederation?: (host: string, nodes: readonly string[]) => RuntimeFederation;
   serveControl?: typeof serveLocalControl;
   addSignalListener?: (signal: SignalName, listener: () => void) => void;
@@ -49,8 +51,8 @@ const cancelled = () => new BridgeError("GATEWAY_START_CANCELLED",
 const codexEnvironment = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => Object.fromEntries(
   ["HOME", "USER", "LOGNAME"].flatMap((key) => env[key] === undefined ? [] : [[key, env[key]!]]));
 
-/** Assemble the schema-6 broker. Construction is inert: provider and SSH I/O starts
- * only when an addressed operation reaches its destination. */
+/** Assemble the schema-6 broker. The bounded Codex metadata observer starts only
+ * after control and state ownership are established; provider writes stay per-operation. */
 export async function runCoreRuntime(options: CoreRuntimeOptions, dependencies: CoreRuntimeDependencies = {}): Promise<void> {
   const env = options.env ?? process.env;
   const d = {
@@ -64,6 +66,7 @@ export async function runCoreRuntime(options: CoreRuntimeOptions, dependencies: 
       new ClaudePeerAdapter({ ...runtime })),
     createCodexOperation: dependencies.createCodexOperation ?? ((source: NodeJS.ProcessEnv) =>
       createStatelessCodexOperationTransport({ local: { environment: codexEnvironment(source) } })),
+    createCodexDiscovery: dependencies.createCodexDiscovery ?? createCodexDiscoveryObserver,
     createFederation: dependencies.createFederation ?? ((host: string, nodes: readonly string[]) => new Federation({ host, nodes })),
     serveControl: dependencies.serveControl ?? serveLocalControl,
     add: dependencies.addSignalListener ?? ((signal: SignalName, listener: () => void) => process.on(signal, listener)),
@@ -82,6 +85,7 @@ export async function runCoreRuntime(options: CoreRuntimeOptions, dependencies: 
   let control: ControlServer | undefined, broker: MessagingBroker | undefined;
   let claude: ClaudeDestination | undefined, loopback: LoopbackDestination | undefined;
   let federation: RuntimeFederation | undefined;
+  let discovery: ReturnType<typeof createCodexDiscoveryObserver> | undefined;
   let primary: unknown;
   try {
     if (controller.signal.aborted) throw cancelled();
@@ -137,10 +141,18 @@ export async function runCoreRuntime(options: CoreRuntimeOptions, dependencies: 
     loopback = new LoopbackDestination(codex);
     federation = d.createFederation(config.hostId, config.peerNodes);
     const directory = new EndpointDirectory({ host: config.hostId, limits: ledgerLimits, store, claude: peer, remote: federation });
+    let codexObservation: CodexDiscoveryObservation = { complete: false, truncated: false };
+    discovery = d.createCodexDiscovery({ hostId: config.hostId, local: { environment: codexEnvironment(env) },
+      maxEndpoints: ledgerLimits.endpoints, onSnapshot: async (snapshot) => {
+        assertWrite();
+        const result = await directory.reconcileCodex(snapshot.threads, snapshot.removedIds, snapshot.observation.truncated);
+        codexObservation = { ...snapshot.observation, truncated: snapshot.observation.truncated || result.truncated };
+      } });
     const coordinator = new Coordinator({ host: config.hostId, limits: ledgerLimits, store, claude,
       codex: loopback, ssh: federation, resolve: (identity) => directory.exact(identity), assertWritable: assertWrite });
     broker = new MessagingBroker({ host: config.hostId, limits: ledgerLimits, store, directory, coordinator,
-      nodes: config.peerNodes, steeringEnabled: config.steeringEnabled, federation });
+      nodes: config.peerNodes, steeringEnabled: config.steeringEnabled, federation,
+      ...(discovery ? { codexDiscovery: { refresh: () => discovery!.refresh(), observation: () => codexObservation } } : {}) });
     control = await d.serveControl({ stateDir: config.stateDir, socketPath: config.controlSocketPath,
       handle: (input) => {
         if (!ready || controller.signal.aborted) throw new Error("CONTROL_NOT_READY");
@@ -154,6 +166,7 @@ export async function runCoreRuntime(options: CoreRuntimeOptions, dependencies: 
     await broker.start();
     assertStarting();
     ready = true;
+    discovery?.start();
     const announced = Promise.resolve(options.onReady({ status: "ready", hostId: config.hostId,
       codexMode: "native_messaging" })).then(() => ({ kind: "ready" as const }),
       (error: unknown) => ({ kind: "error" as const, error }));
@@ -169,7 +182,7 @@ export async function runCoreRuntime(options: CoreRuntimeOptions, dependencies: 
   options.signal?.removeEventListener("abort", stop);
   d.remove("SIGINT", stop); d.remove("SIGTERM", stop);
   const failures: unknown[] = [];
-  for (const resource of [control, broker, ...(broker === undefined ? [loopback, claude, federation] : []), store]) {
+  for (const resource of [control, discovery, broker, ...(broker === undefined ? [loopback, claude, federation] : []), store]) {
     if (resource !== undefined) await resource.close().catch((error) => failures.push(error));
   }
   // If any owned resource did not confirm cleanup, retain a still-held host-wide lease.

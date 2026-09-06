@@ -18,11 +18,15 @@ const DEFAULT_MAX_FRAME_BYTES = 1024 * 1024;
 const DEFAULT_MAX_INPUT_BYTES = 64 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 const MAX_FAST_TERMINAL_CANDIDATES = 4;
+const MAX_HYGIENE_REQUESTS = 16;
 const SETUP_ABORTED = Symbol("setup-aborted");
 const OUTPUT_NOTIFICATION_OPT_OUTS = [
-  "item/started", "item/agentMessage/delta", "item/reasoning/textDelta",
-  "item/reasoning/summaryTextDelta", "item/commandExecution/outputDelta",
-  "turn/diff/updated", "turn/plan/updated",
+  "item/started", "item/agentMessage/delta",
+  "item/plan/delta", "item/reasoning/textDelta",
+  "item/reasoning/summaryTextDelta", "command/exec/outputDelta",
+  "process/outputDelta", "item/commandExecution/outputDelta",
+  "item/fileChange/outputDelta", "item/fileChange/patchUpdated",
+  "item/mcpToolCall/progress", "turn/diff/updated", "turn/plan/updated",
 ] as const;
 
 const APPROVAL_REQUEST_METHODS = new Set([
@@ -89,6 +93,7 @@ export type StatelessCodexSafeErrorCode =
   | LocalCodexTransportErrorCode
   | "ACCEPTANCE_UNCONFIRMED"
   | "APPROVAL_REQUIRED"
+  | "CODEX_DIRECT_INPUT_UNAVAILABLE"
   | "INPUT_INVALID"
   | "MESSAGE_EXPIRED"
   | "PROTOCOL_ERROR"
@@ -163,6 +168,8 @@ type PendingRequest = {
   timer?: NodeJS.Timeout;
 };
 
+type HygieneRequest = Readonly<{ timer: NodeJS.Timeout }>;
+
 type PreparedRequest = Readonly<{
   frame: string;
   frameBytes: number;
@@ -172,6 +179,10 @@ type PreparedRequest = Readonly<{
 type FastCandidate = { terminal: TurnOutcome | null };
 
 type TerminalResult = Readonly<{ outcome: TurnOutcome }>;
+type ThreadObservation = Readonly<{
+  canAcceptDirectInput: boolean | null;
+  status: ReturnType<typeof parseRouteStatus>;
+}>;
 
 type AcceptedOperationKey = Readonly<{
   attemptId: string; registrationId: string; threadId: string; turnId: string;
@@ -193,10 +204,16 @@ class OperationError extends Error {
 }
 
 class RpcRejectedError extends OperationError {
-  constructor() {
+  constructor(
+    readonly reason: "closing" | "direct_input" | "not_found" | "overloaded" | "other",
+  ) {
     super("RPC_REJECTED");
     this.name = "StatelessCodexRpcRejectedError";
   }
+}
+
+class CleanDeferredError extends OperationError {
+  override readonly name = "StatelessCodexCleanDeferredError";
 }
 
 async function awaitSetupResource<T extends SetupResource>(
@@ -372,6 +389,7 @@ function validateMessageInput(
 class OperationSession {
   private nextRequestId = 1;
   private pending: PendingRequest | undefined;
+  private readonly hygiene = new Map<number, HygieneRequest>();
   private phase: OperationPhase = "clean";
   private protocolFailure: OperationError | undefined;
   private selectedTurnId: string | undefined;
@@ -409,6 +427,7 @@ class OperationSession {
     this.sideChannelEvidenceValid = false;
     for (const remove of this.unlisten.splice(0)) remove();
     this.rejectPending(new OperationError("TRANSPORT_CLOSED"));
+    this.clearHygiene();
     this.clearTerminalWait();
   }
 
@@ -430,8 +449,20 @@ class OperationSession {
       await this.initialize();
       this.awaitingAuthorization = true;
       this.prewriteProofValid = true;
-      const status = await this.resume();
-      const held = this.prewriteDisposition(status);
+      const observed = await this.readThread();
+      if (observed?.canAcceptDirectInput === false) {
+        this.awaitingAuthorization = false;
+        return this.cleanFailure("CODEX_DIRECT_INPUT_UNAVAILABLE");
+      }
+      // Resume also subscribes this exact operation connection. Even an
+      // already-loaded thread needs that subscription for terminal and STEER
+      // lifetime evidence; no history or configuration override is requested.
+      const thread = await this.resume();
+      if (thread.canAcceptDirectInput === false) {
+        this.awaitingAuthorization = false;
+        return this.cleanFailure("CODEX_DIRECT_INPUT_UNAVAILABLE");
+      }
+      const held = this.prewriteDisposition(thread.status);
       if (held !== undefined) {
         this.awaitingAuthorization = false;
         return held;
@@ -446,6 +477,7 @@ class OperationSession {
       const prepared = this.prepareRequest("turn/start", {
         input: [{ text: this.input.text, type: "text" }],
         threadId: this.input.route.threadId,
+        turnTrigger: "embassy",
       });
       const responsePromise = this.reservePreparedRequest(prepared);
       void responsePromise.catch(() => undefined);
@@ -545,6 +577,7 @@ class OperationSession {
       const code = this.errorCode(error);
       if (this.phase === "accepted") return this.acceptedUnconfirmed(code);
       if (this.phase === "armed") return this.armedAmbiguous(code);
+      if (error instanceof CleanDeferredError) return this.cleanDeferred(code);
       return this.cleanFailure(code);
     }
   }
@@ -695,7 +728,7 @@ class OperationSession {
         optOutNotificationMethods: OUTPUT_NOTIFICATION_OPT_OUTS,
       },
       clientInfo: {
-        name: "agent_embassy_gateway",
+        name: "embassy",
         title: "Embassy Gateway",
         version: CORE_VERSION,
       },
@@ -712,16 +745,48 @@ class OperationSession {
     }
   }
 
-  private async resume(): Promise<ReturnType<typeof parseRouteStatus>> {
+  private async readThread(): Promise<ThreadObservation | null> {
+    try {
+      return await this.observeThread(
+        "thread/read",
+        { includeTurns: false, threadId: this.input.route.threadId },
+        true,
+      );
+    } catch (error) {
+      if (error instanceof OperationError && error.code === "THREAD_NOT_OBSERVED") {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  private async resume(): Promise<ThreadObservation> {
+    return this.observeThread(
+      "thread/resume",
+      { excludeTurns: true, threadId: this.input.route.threadId },
+      true,
+    );
+  }
+
+  private async observeThread(
+    method: "thread/read" | "thread/resume",
+    params: JsonObject,
+    requireEmptyTurns: boolean,
+  ): Promise<ThreadObservation> {
     let result: unknown;
     try {
-      result = await this.request("thread/resume", {
-        excludeTurns: true,
-        threadId: this.input.route.threadId,
-      });
+      result = await this.request(method, params);
     } catch (error) {
       if (error instanceof RpcRejectedError) {
-        throw new OperationError("THREAD_NOT_OBSERVED");
+        if (error.reason === "closing" || error.reason === "overloaded") {
+          throw new CleanDeferredError("ROUTE_BUSY");
+        }
+        if (error.reason === "direct_input") {
+          throw new OperationError("CODEX_DIRECT_INPUT_UNAVAILABLE");
+        }
+        if (error.reason === "not_found") {
+          throw new OperationError("THREAD_NOT_OBSERVED");
+        }
       }
       throw error;
     }
@@ -730,13 +795,21 @@ class OperationSession {
       !isRecord(result.thread) ||
       result.thread.id !== this.input.route.threadId ||
       !Array.isArray(result.thread.turns) ||
-      result.thread.turns.length !== 0
+      (requireEmptyTurns && result.thread.turns.length !== 0)
     ) {
       throw new OperationError("RESULT_SCHEMA_MISMATCH");
     }
     const status = parseRouteStatus(result.thread.status);
     if (status === null) throw new OperationError("RESULT_SCHEMA_MISMATCH");
-    return status;
+    const directInput = result.thread.canAcceptDirectInput;
+    if (
+      directInput !== undefined &&
+      directInput !== null &&
+      typeof directInput !== "boolean"
+    ) {
+      throw new OperationError("RESULT_SCHEMA_MISMATCH");
+    }
+    return { canAcceptDirectInput: directInput ?? null, status };
   }
 
   private prewriteDisposition(
@@ -767,7 +840,9 @@ class OperationSession {
   private prepareRequest(method: string, params: JsonObject): PreparedRequest {
     if (
       method !== "initialize" &&
+      method !== "thread/read" &&
       method !== "thread/resume" &&
+      method !== "thread/unsubscribe" &&
       method !== "turn/start" &&
       method !== "turn/steer"
     ) {
@@ -834,10 +909,16 @@ class OperationSession {
     }
     if (
       typeof parsed.id !== "number" ||
-      !Number.isSafeInteger(parsed.id) ||
-      this.pending?.id !== parsed.id ||
-      !this.pending.sent
+      !Number.isSafeInteger(parsed.id)
     ) {
+      this.protocolFault();
+      return;
+    }
+    if (this.hygiene.has(parsed.id)) {
+      this.handleHygieneResponse(parsed.id, parsed);
+      return;
+    }
+    if (this.pending?.id !== parsed.id || !this.pending.sent) {
       this.protocolFault();
       return;
     }
@@ -861,13 +942,37 @@ class OperationSession {
         this.protocolFault();
         return;
       }
-      pending.reject(new RpcRejectedError());
+      const message = parsed.error.message;
+      if (message !== undefined && (typeof message !== "string" || message.length > 2_048)) {
+        pending.reject(new OperationError("PROTOCOL_ERROR"));
+        this.protocolFault();
+        return;
+      }
+      const reason = parsed.error.code === -32_001
+        ? "overloaded"
+        : typeof message === "string" && message.includes(" is closing; retry thread/resume ")
+          ? "closing"
+          : typeof message === "string" && message.startsWith(
+            "direct app-server input is not allowed for ",
+          )
+            ? "direct_input"
+            : typeof message === "string" && message.startsWith(
+              "cannot resume an unloaded multi-agent v2 sub-agent through its parent; ",
+            )
+              ? "direct_input"
+          : typeof message === "string" && message.startsWith("thread not found: ")
+            ? "not_found"
+            : "other";
+      pending.reject(new RpcRejectedError(reason));
       return;
     }
     pending.resolve(parsed.result);
   }
 
   private handleNotification(method: string, params: unknown): void {
+    if (method === "thread/started") {
+      this.unsubscribeUnrelatedThread(params);
+    }
     if (this.phase === "clean") {
       this.invalidatePrewriteProof(method, params);
       return;
@@ -1057,6 +1162,71 @@ class OperationSession {
     if (this.pending === undefined) return;
     clearTimeout(this.pending.timer);
     this.pending = undefined;
+  }
+
+  private unsubscribeUnrelatedThread(params: unknown): void {
+    if (!isRecord(params) || !isRecord(params.thread)) {
+      this.protocolFault();
+      return;
+    }
+    const threadId = params.thread.id;
+    if (typeof threadId !== "string" || !validOpaqueId(threadId)) {
+      this.protocolFault();
+      return;
+    }
+    if (threadId === this.input.route.threadId) return;
+    if (this.hygiene.size >= MAX_HYGIENE_REQUESTS) {
+      this.protocolFault();
+      return;
+    }
+    let prepared: PreparedRequest;
+    try {
+      prepared = this.prepareRequest("thread/unsubscribe", { threadId });
+    } catch {
+      this.protocolFault();
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (!this.hygiene.delete(prepared.id)) return;
+      this.protocolFault();
+    }, this.options.requestTimeoutMs);
+    this.hygiene.set(prepared.id, { timer });
+    let write: Promise<void>;
+    try {
+      write = this.transport.send(prepared.frame);
+    } catch {
+      write = Promise.reject(new OperationError("TRANSPORT_WRITE_FAILED"));
+    }
+    void write.catch(() => {
+      const request = this.hygiene.get(prepared.id);
+      if (request === undefined) return;
+      clearTimeout(request.timer);
+      this.hygiene.delete(prepared.id);
+      this.protocolFault();
+    });
+  }
+
+  private handleHygieneResponse(id: number, parsed: JsonObject): void {
+    const request = this.hygiene.get(id);
+    if (request === undefined) return;
+    clearTimeout(request.timer);
+    this.hygiene.delete(id);
+    if (
+      Object.hasOwn(parsed, "error") ||
+      !Object.hasOwn(parsed, "result") ||
+      !isRecord(parsed.result) ||
+      Object.keys(parsed.result).length !== 1 ||
+      !["notLoaded", "notSubscribed", "unsubscribed"].includes(
+        String(parsed.result.status),
+      )
+    ) {
+      this.protocolFault();
+    }
+  }
+
+  private clearHygiene(): void {
+    for (const request of this.hygiene.values()) clearTimeout(request.timer);
+    this.hygiene.clear();
   }
 
   private clearTerminalWait(): void {

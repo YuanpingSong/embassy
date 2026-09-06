@@ -157,6 +157,7 @@ async function fixture(t: TestContext) {
       attestClaudeRuntime: async () => ({ sessionsDir: path.join(root, `sessions-${host}`), socketDir: path.join(root, `sockets-${host}`) }),
       createClaudePeer: () => peer,
       createCodexOperation: () => operation,
+      createCodexDiscovery: () => undefined,
       createFederation: (local, nodes) => new Federation({ host: local, nodes, spawn: spawnFor(host) }),
     };
   };

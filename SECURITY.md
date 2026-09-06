@@ -89,9 +89,13 @@ An endpoint's opaque `(ID, host, provider)` tuple is routing authority. Its
 admission; writes, replies, restart recovery, and settlement use the tuple.
 Historical names never resolve, and queued work is never silently rebound.
 
-Codex tasks self-register from inherited `CODEX_THREAD_ID`. Embassy never
-accepts, prints, or guesses the value. Registration performs no provider I/O.
-Each operation resumes and attests that exact task immediately before write.
+Codex agents are discovered from bounded same-user App Server metadata. Their
+immutable native thread IDs remain private identity and are never accepted as
+arguments, printed or guessed. Native names are mutable aliases; root/child
+grouping may be public only through opaque endpoint references. A task may
+self-register from inherited `CODEX_THREAD_ID` as a fallback; discovery and
+registration reconcile the same identity. Each operation resumes and attests
+that exact task immediately before write.
 
 Claude callers are resolved from inherited `CLAUDE_CODE_MESSAGING_SOCKET`,
 which must be an absolute path. The path may become an in-memory `uds:`
@@ -142,6 +146,13 @@ never interrupts a generation, and falls back to the ordinary bounded queue
 when cleanly unavailable. Embassy never calls `turn/interrupt`, answers an
 approval, or changes a task's approval or sandbox policy.
 
+Ordinary Codex work is started only after an immediate idle-status observation;
+active work remains queued in Embassy. A competing client can start a turn
+between that observation and Embassy's write, and the provider response cannot
+distinguish the resulting steer from a fresh turn. The receipt therefore proves
+acceptance and lifetime, not fresh-turn creation. This residual race is the same
+for discovered and fallback-registered tasks and never authorizes replay.
+
 ## Filesystem and process boundary
 
 The state directory is a current-user-owned mode-0700 real directory. State and
@@ -189,6 +200,8 @@ commit boundary remain uncertain and are never replayed automatically.
 Public JSON is a closed projection. It may contain opaque Embassy endpoint IDs,
 aliases, providers, hosts, queue depths, safe codes, phases/outcomes, ages,
 recent retirement times, and bounded remote catalog rows and observation times.
+Codex rows may additionally contain observed loaded/busy/approval state,
+direct-input capability and an opaque parent endpoint reference.
 It must never contain native IDs or handles, socket paths, message bodies,
 delivery/conversation secrets, credentials, exceptions, raw diagnostics, or
 provider histories. Human output is derived from the same validated shape.
@@ -198,7 +211,7 @@ protocol channel. Operational hints use bounded safe codes and stderr.
 
 ## State reset and rollback
 
-Private state schema 6 and control protocol 5 are the only v4 formats. Older or
+Private state schema 6 and control protocol 6 are the only current v4 formats. Older or
 unknown state refuses before mutation. There is no converter, compatibility
 reader, or alias for removed commands. The operator must inspect and settle old
 work with the old binary, stop the broker, preserve the old state, and start v4

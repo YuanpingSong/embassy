@@ -96,19 +96,46 @@ native agent list.
 
 To receive in Codex, use its managed standalone installation with its App Server
 daemon already running under the same macOS login; merely having a `codex`
-executable on PATH is insufficient, and Embassy does not install or start that daemon.
+executable on PATH is insufficient, and Embassy does not install, start or
+update that daemon.
 
-A Codex task registers itself with `embassy register-codex --alias ...` using
-its inherited `CODEX_THREAD_ID`. The ID is not a command argument or public
-output. Registration is a logical state change and performs no App Server I/O.
-Each delivery independently attests the current App Server interface and exact
-task before authorization, resumes that task without retaining history, and
-writes through a fresh operation.
+Embassy observes the daemon's bounded unarchived agent metadata and keeps it
+current from lifecycle and name events. Native names become public lookup
+aliases; native task IDs remain only in the closed private endpoint binding,
+while previews, turns and item content are neither retained nor printed. When
+both rows are present, root agents and children retain their native grouping
+through opaque endpoint references. A dormant agent remains
+addressable: delivery resumes that exact agent without retaining history
+before starting its wake. A child that natively refuses direct input remains
+visible and refuses the write rather than disappearing.
+Embassy derives a safe alias from the native name (or nickname when unnamed): normalized
+lower-case ASCII tokens, a `codex-` prefix, at most 32 characters before
+`@host`. A missing or native-ID-revealing name instead gets a stable alias from
+the opaque Embassy endpoint ID, never from the native task ID.
+
+Absence from the daemon's loaded list alone never marks an agent unreachable;
+dormant wake is ordinary use. Embassy labels a session unsupported only from
+positive native evidence.
+
+`embassy register-codex --alias ...` remains a fallback for harnesses without
+native daemon integration. It uses the caller's inherited `CODEX_THREAD_ID`;
+the ID is not a command argument or public output. A fallback registration is
+the same endpoint kind as discovery, and a matching native identity cannot
+create a duplicate. Each delivery independently attests the current App Server
+interface and exact task before authorization.
+A later native observation may replace a fallback alias with the current
+native-derived alias without moving the endpoint identity or its admitted work.
 The ellipsis in `--alias ...` is a substitution: use the task's chosen
 `codex-` name with this machine's exact `@host` suffix.
 
 `register-codex --succeeds <old-alias>` atomically retires a predecessor and
 installs the caller. It never reanchors pending work to a new identity.
+
+Explicit retirement suppresses re-discovery of that native identity while its
+bounded retirement evidence remains. Embassy never answers approvals or
+changes a task's sandbox or approval policy. It consumes only the App Server
+metadata and operation methods needed for discovery, unsubscribe, resume,
+delivery and exact-turn STEER; it exposes no generic provider RPC.
 
 ## SSH federation
 
@@ -119,8 +146,9 @@ with each peer name matching both the remote inventory's `host` and a working
 SSH destination or `~/.ssh/config` Host alias.
 
 After changing a running broker's inventory, reload it with
-`embassy service install`; register `codex-reviewer@laptop` from the live
-Codex task on laptop, then ask the Claude session on studio to run
+`embassy service install`; wait for `codex-reviewer@laptop` to appear from the
+Codex daemon on laptop (or use fallback registration), then ask the Claude
+session on studio to run
 `embassy send --to codex-reviewer@laptop` with the message on stdin.
 
 For each configured remote node Embassy runs the fixed system SSH client in
@@ -148,7 +176,7 @@ destination persists its queue before acceptance, and an uncertain result is
 never replayed.
 
 `embassy refresh` observes configured catalogs in parallel with local Claude
-discovery. A successful observation replaces that node's bounded display rows
+and Codex discovery. A successful observation replaces that node's bounded display rows
 and timestamp. A failed observation retains its last rows and records
 `PEER_TUNNEL_UNAVAILABLE`. `embassy status` reads that snapshot without SSH or
 provider I/O. Display is capped at 128 remote rows across all nodes; exact and
@@ -213,9 +241,11 @@ Reset procedure:
    serve process) and confirm it is stopped with `embassy service status`.
 3. Back up and move aside only `gateway-state.json` in that broker's state
    directory. Keep the valid `nodes.json`.
-4. Install 4.0.0, then run `embassy service install`.
+4. Install the current discovery-enabled 4.x release, then run
+   `embassy service install`.
 5. The v4 broker creates fresh schema-6 state.
-6. Re-register Codex tasks. Claude endpoints are recorded on discovery/use.
+6. Let current Codex agents be discovered. Use fallback registration only for
+   non-native harnesses. Claude endpoints are recorded on discovery/use.
 
 All state produced by Embassy 3.x is unsupported by 4.x; preserve the matching
 old binary as well as its old state if rollback may be needed, and never run

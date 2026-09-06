@@ -24,6 +24,7 @@ test("CLI register, named send, retained reply and broker check traverse the rea
   await chmod(path.join(stateDir, "nodes.json"), 0o600);
   const writes: string[] = [];
   const deps: CoreRuntimeDependencies = {
+    createCodexDiscovery: () => undefined,
     loginHome: () => root,
     acquireLease: async () => ({ lost: new Promise<void>(() => {}), isLost: () => false, close: async () => {} }),
     attestClaudeRuntime: async () => ({ sessionsDir: path.join(root, "sessions"), socketDir: path.join(root, "sockets") }),

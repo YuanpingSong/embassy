@@ -111,17 +111,18 @@ test("server caps concurrent control readers at thirty-two", async (t) => {
   await server.close();
 });
 
-test("version 5 is checked before the semantic handler and reply skew preserves mutation ambiguity", async (t) => {
+test("version 6 is checked before the semantic handler and reply skew preserves mutation ambiguity", async (t) => {
+  assert.equal(LOCAL_CONTROL_VERSION, 6);
   const f = await fixture(t);
   let calls = 0;
   const served = await serveLocalControl({ ...f, handle: async () => { calls += 1; return {}; } });
-  assert.deepEqual(await raw(f.socketPath, `${JSON.stringify({ protocolVersion: 4, input: {} })}\n`),
+  assert.deepEqual(await raw(f.socketPath, `${JSON.stringify({ protocolVersion: 5, input: {} })}\n`),
     failed("UNSUPPORTED_VERSION"));
   assert.equal(calls, 0);
   await served.close();
 
   const skewed = net.createServer((socket) => socket.once("data", () => socket.end(`${JSON.stringify({
-    protocolVersion: 4, ok: true, result: {},
+    protocolVersion: 5, ok: true, result: {},
   })}\n`)));
   await listen(skewed, f.socketPath); await chmod(f.socketPath, 0o600);
   await assert.rejects(requestLocalControl({ ...f, request: {}, mutating: false }),

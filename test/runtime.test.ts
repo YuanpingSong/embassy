@@ -12,8 +12,61 @@ import { Ledger, ledgerDefaults, type Endpoint } from "../src/gateway/ledger.js"
 import { requestLocalControl } from "../src/gateway/local-control.js";
 import { OwnedStateFile } from "../src/gateway/owned-state.js";
 import { runCoreRuntime, type CoreRuntimeDependencies } from "../src/gateway/runtime.js";
+import { createCodexDiscoveryObserver } from "../src/gateway/codex-discovery.js";
+import { isBrokerResult } from "../src/gateway/broker-control.js";
 
 const deferred = <T = void>() => { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done; }); return { promise, resolve }; };
+
+test("real observer, directory and control discover without registration, deduplicate fallback and honor retirement", { timeout: 10_000 }, async (t) => {
+  const f = await fixture(t), stop = new AbortController(), observed = deferred();
+  const parent = "00000000-0000-4000-8000-000000000010", child = "00000000-0000-4000-8000-000000000011";
+  const listeners = new Set<(payload: string) => void>();
+  let factoryCloses = 0, transportCloses = 0;
+  const threads = [
+    { id: parent, name: "planner", status: { type: "idle" }, canAcceptDirectInput: true },
+    { id: child, name: "worker", parentThreadId: parent, status: { type: "notLoaded" }, canAcceptDirectInput: false },
+  ];
+  const transport = { cleanupConfirmed: true,
+    onMessage: (fn: (payload: string) => void) => { listeners.add(fn); return () => { listeners.delete(fn); }; },
+    onClose: () => () => {}, onError: () => () => {},
+    close: async () => { transportCloses++; },
+    send: async (payload: string) => {
+      const request = JSON.parse(payload) as { id?: number; method: string };
+      if (request.id === undefined) return;
+      const result = request.method === "thread/list" ? { data: threads, nextCursor: null }
+        : request.method === "thread/loaded/list" ? { data: [parent], nextCursor: null }
+        : request.method === "thread/unsubscribe" ? { status: "unsubscribed" } : {};
+      for (const listener of listeners) listener(JSON.stringify({ id: request.id, result }));
+    } };
+  const call = async (method: string, params: unknown = {}) => {
+    const response = await requestLocalControl({ stateDir: f.stateDir, socketPath: f.socketPath,
+      request: { method, params }, mutating: method !== "list_snapshot" }) as { ok: boolean; result: Record<string, unknown> };
+    assert.equal(response.ok, true); return response.result;
+  };
+  await runCoreRuntime({ env: { EMBASSY_STATE_DIR: f.stateDir }, signal: stop.signal, onReady: async () => {
+    try {
+      await observed.promise;
+      const first = await call("list_snapshot"); assert.equal(isBrokerResult("list_snapshot", first), true);
+      const routes = first.routes as Array<{ id: string; alias: string; codex: { parentEndpoint?: string; canAcceptDirectInput: boolean } }>;
+      assert.equal(routes.length, 2);
+      const root = routes.find((r) => r.alias === "codex-planner@local")!;
+      const worker = routes.find((r) => r.alias === "codex-worker@local")!;
+      assert.equal(worker.codex.parentEndpoint, root.id); assert.equal(worker.codex.canAcceptDirectInput, false);
+      assert.equal(JSON.stringify(first).includes(parent), false); assert.equal(JSON.stringify(first).includes(child), false);
+      const registered = await call("register_codex", { caller: { kind: "codex", handle: parent }, alias: "codex-fallback@local" });
+      assert.equal(registered.id, root.id);
+      await call("refresh_discovery");
+      assert.equal(((await call("list_snapshot")).routes as unknown[]).length, 2);
+      await call("retire_route", { endpoint: worker.id }); await call("refresh_discovery");
+      assert.equal(((await call("list_snapshot")).routes as unknown[]).length, 1);
+    } finally { stop.abort(); }
+  } }, { ...f.dependencies, createCodexDiscovery: (options) => createCodexDiscoveryObserver({ ...options,
+    onSnapshot: async (snapshot) => { await options.onSnapshot(snapshot); if (snapshot.observation.complete) observed.resolve(); },
+  }, { createFactory: async () => ({ appServerVersion: "0.153.4", endpointGeneration: "fake", hostId: "local",
+    protocol: "codex-app-server", protocolVersion: "fake", close: async () => { factoryCloses++; },
+    connectTransport: async () => transport }) }) });
+  assert.equal(factoryCloses, 1); assert.equal(transportCloses, 1); assert.equal(f.providerCalls(), 0);
+});
 
 function signalHarness() {
   const listeners = new Map<"SIGINT" | "SIGTERM", Set<() => void>>();
@@ -48,7 +101,7 @@ async function fixture(t: TestContext) {
     StatelessCodexOperationTransport;
   const dependencies: CoreRuntimeDependencies = { loginHome: () => root, acquireLease: async () => lease,
     attestClaudeRuntime: async () => ({ sessionsDir: path.join(root, "sessions"), socketDir: path.join(root, "sockets") }),
-    createClaudePeer: () => peer, createCodexOperation: () => operation };
+    createClaudePeer: () => peer, createCodexOperation: () => operation, createCodexDiscovery: () => undefined };
   t.after(() => rm(root, { recursive: true, force: true }));
   return { root, stateDir, socketPath: path.join(stateDir, "control.sock"), dependencies,
     lose: () => { lost = true; stopped.resolve(); }, leaseCloses: () => leaseCloses,
