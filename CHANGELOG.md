@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [4.3.0] - 2026-09-06
 
 ### Added
 - Native Codex App Server discovery lists the recency top 20 unarchived root threads as ordinary Codex endpoints without per-task registration; sub-agents are excluded. Dormant agents wake on delivery; `register-codex` remains the fallback for non-native harnesses, and retirement suppresses immediate rediscovery.
