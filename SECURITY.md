@@ -66,6 +66,13 @@ themselves. It does not cryptographically authenticate text inside a provider
 conversation, prove a model read or understood a message, or make aliases
 permanent identifiers.
 
+Configured gateways belong to one same-user trust domain. A plain SSH login
+is sufficient for federation; Embassy does not require a forced command or
+dedicated per-node key and does not independently authenticate a logical host
+label. A copied `nodes.json` with the wrong allowed `host` can therefore
+misattribute a message's machine of origin. Correct host labels are trusted
+operator configuration, not a separately attested property.
+
 Provider availability and version metadata are observations, not authority.
 `embassy health` proves the local broker control path. `embassy check` proves
 the broker's ledger/coordinator/receipt loop without a live agent. Neither is a
@@ -101,9 +108,10 @@ evidence expires receives a fresh opaque ID, never the retired ID. Public
 endpoint IDs can select exact local operator retirement without exposing a
 native ID or authorizing remote mutation.
 
-A remote source is admitted only through an SSH peer named in `nodes.json`.
-The owner attests the source tuple and alias in the handoff, so first contact
-does not rely on a previously polled catalog. Catalogs are bounded memory-only
+A remote peer's claimed host must be named in `nodes.json`; the claim and its
+source tuple and alias are trusted within the SSH login boundary. The message's
+source host must match the claim, so first contact does not rely on a
+previously polled catalog. Catalogs are bounded memory-only
 caches and are never write authority. `refresh` may replace a successful
 node's rows or retain its last timestamped rows with
 `PEER_TUNNEL_UNAVAILABLE`; `status` reads that observation without network I/O.
@@ -165,8 +173,11 @@ Federation is direct and configured statically. Embassy runs the exact system
 SSH client with batch mode, no TTY, no forwarding, no agent forwarding, no
 local command, no tunnel, and no shell interpolation. Only the current user's
 `HOME`, `USER`, `LOGNAME`, and `SSH_AUTH_SOCK` are forwarded to the process.
-SSH authenticates the remote machine; Embassy's correlated protocol validates
-the expected host and protocol version.
+SSH establishes the trusted login using the user's configuration. Embassy's
+correlated protocol checks protocol version, configured membership of the
+peer's claimed host, and matching source hosts in handoffs. It does not inspect
+how SSH authentication was performed or prove that the host label identifies
+the physical machine that opened the connection.
 
 The destination validates and durably enqueues a handoff before returning
 acceptance. Only a protocol-proven pre-enqueue refusal is definite. Process

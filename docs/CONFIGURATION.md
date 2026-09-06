@@ -103,6 +103,13 @@ batch mode with forwarding and local commands disabled. Authentication is the
 user's SSH configuration. The remote command is `embassy peer-stdio`; the two
 installations must speak federation peer protocol 3.
 
+Any plain same-user SSH login that can run that command is sufficient; Embassy
+does not require a forced command, per-node key, or special SSH environment.
+The peer claims its logical host in `initialize`, and the receiving broker
+requires that host to be in its `nodes.json` peer list. The SSH login is
+trusted, so the claim is trusted too. Keep the local `host` correct when
+copying configuration: a wrong allowed host label can misattribute origin.
+
 The non-interactive SSH environment must resolve the intended `embassy`
 installation. Verify that environment with `which -a embassy`. Federation
 does not accept a password, private key, host override, or arbitrary SSH

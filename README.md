@@ -120,10 +120,13 @@ List direct peers in each machine's `nodes.json`. The local broker launches:
 /usr/bin/ssh <node> embassy peer-stdio
 ```
 
-SSH authenticates the machine connection. Federation has no listener and no
-multi-hop routing. The destination owns the queue. The source gateway attests
-the sender on handoff, so first contact does not wait for a destination catalog
-poll. Remote catalog replies and caches are bounded and memory-only; they are
+The plain same-user SSH login is the trust boundary. The peer's claimed host
+must be listed in the destination's `nodes.json`; that claim is trusted, not
+independently bound to a physical machine. No forced command or dedicated
+per-node key is required. Configure each node's host label accurately.
+Federation has no listener or multi-hop routing. The destination owns the
+queue and trusts the peer's source identity, so first contact does not wait
+for a destination catalog poll. Catalogs are bounded memory-only observations,
 never routing authority.
 
 `embassy refresh` observes local Claude sessions and every configured SSH

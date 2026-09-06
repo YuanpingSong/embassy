@@ -213,6 +213,20 @@ test("federation display is an observed cache, never routing authority", async (
   assert.match(squash(architecture), /reporting truncation/i);
 });
 
+test("federation trusts the SSH login and configured host claim without a separate identity mode", async () => {
+  const [readme, configuration, architecture, security] = await Promise.all([
+    read("README.md"), read("docs/CONFIGURATION.md"), read("docs/GATEWAY-ARCHITECTURE.md"), read("SECURITY.md"),
+  ]);
+  assert.match(squash(readme), /plain same-user SSH login is the trust boundary/i);
+  assert.match(squash(configuration), /does not require a forced command, per-node key, or special SSH environment/i);
+  assert.match(squash(architecture), /initialize.host.*peer claim.*nodes.json.*does not bind it independently/i);
+  assert.match(squash(security), /one same-user trust domain/i);
+  assert.match(squash(security), /copied `nodes.json`.*wrong allowed `host`.*misattribute/i);
+  for (const document of [readme, configuration, architecture, security]) {
+    assert.doesNotMatch(squash(document), /validates the authenticated peer host|source owner attests|SSH authenticates the remote machine/i);
+  }
+});
+
 test("setup form asks about the v4 native and federation paths", async () => {
   const issue = await read(".github/ISSUE_TEMPLATE/setup_help.yml");
   for (const phrase of [

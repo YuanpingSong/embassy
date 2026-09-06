@@ -193,11 +193,14 @@ remote `embassy peer-stdio` command. Protocol 3 has four correlated methods:
 - `resolve` — owner-authoritative name or identity lookup;
 - `handoff` — one bounded batch admitted to the destination ledger.
 
-The source owner attests every message's source endpoint, enabling first
-contact without waiting for reverse catalog propagation. The destination
-validates the authenticated peer host and owns admission, storage, scheduling,
-and receipts. A definite refusal is exposed only when proved before enqueue;
-all transport or post-commit uncertainty remains ambiguous and is not replayed.
+The SSH login is the trust boundary. `initialize.host` is a peer claim: it
+must be in the receiver's `nodes.json` peer list, but Embassy does not bind it
+independently to an SSH key, network address, or physical machine. Each handoff
+source host must match that accepted claim. The source identity supplied by
+the trusted peer enables first contact without reverse catalog propagation.
+The destination still validates the exact local target and owns admission,
+storage, scheduling, and receipts. A definite refusal is exposed only when
+proved before enqueue; transport or post-commit uncertainty is not replayed.
 
 ## Provenance and replies
 

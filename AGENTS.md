@@ -97,7 +97,9 @@ propose a contract change rather than expanding the boundary through a test.
   `thread/resume.excludeTurns: true`; require empty returned turns and never
   retain provider history or model output.
 - Direct SSH is authenticated by the user's configured `/usr/bin/ssh` process.
-  The destination owns the queue. The source owner attests first contact. Only
+  The destination owns the queue. The peer's claimed host must be in nodes.json
+  and its handoff source hosts must match; the SSH login and host claim are
+  trusted, without a separate key/address-to-label attestation. Only
   a protocol-proven pre-enqueue refusal is definite; transport or post-commit
   uncertainty is never automatically retried.
 - Remote catalogs are bounded memory-only observations. `refresh` may update

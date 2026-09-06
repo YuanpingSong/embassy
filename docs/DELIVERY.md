@@ -12,9 +12,10 @@ endpoint tuple; a rename or replacement cannot retarget old work.
 
 Codex callers must already be registered. A Claude caller is derived from its
 inherited native socket and recorded under the exact discovered session UUID.
-The caller never supplies `--from`. A remote source is attested by its owning
-SSH-authenticated gateway and admitted directly; the destination does not wait
-for a catalog poll before accepting first contact.
+The caller never supplies `--from`. A remote source is supplied by the trusted
+SSH peer. Its claimed host must be in `nodes.json`, and the message's source
+host must match that claim. The destination does not wait for a catalog poll
+before accepting first contact.
 
 Admission validates the body, deadline, route capacity, byte capacity, rate
 limit, and exact local endpoint identities in one state transaction. It returns
@@ -86,7 +87,7 @@ bounded queue. At most three queued STEER messages target one route.
 
 The source gateway resolves the exact endpoint at its owner, prepares one
 bounded handoff, and writes it once through the authenticated SSH peer. The
-destination verifies the peer host and source attestation, persists its queue,
+destination checks the configured claimed host and source consistency, persists its queue,
 then returns acceptance. A proven pre-enqueue refusal is
 reported precisely; process loss, malformed response, or failure after the
 commit boundary is uncertain and never retried automatically.
