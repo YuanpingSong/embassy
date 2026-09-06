@@ -1296,10 +1296,14 @@ test("a prepared post-connect error is ambiguous and non-retryable", async (t) =
   );
 });
 
-test("a post-connect timeout is ambiguous rather than not-written", async (t) => {
+test("a timeout after socket.end begins is ambiguous rather than not-written", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let began!: () => void;
+  const writing = new Promise<void>((resolve) => { began = resolve; });
+  let writes = 0;
   const fakeSocket = new EventEmitter() as net.Socket;
   fakeSocket.destroy = (() => fakeSocket) as net.Socket["destroy"];
-  fakeSocket.end = (() => fakeSocket) as net.Socket["end"];
+  fakeSocket.end = (() => { writes++; began(); return fakeSocket; }) as net.Socket["end"];
   const current = await fixture(t, {
     createId: () => MESSAGE_ONE,
     connectTimeoutMs: 10,
@@ -1315,13 +1319,40 @@ test("a post-connect timeout is ambiguous rather than not-written", async (t) =>
     "timeout edge",
     { deadlineAt: Date.now() + 30_000 },
   );
-  await assert.rejects(
-    prepared.perform(async () => true),
+  const performed = prepared.perform(async () => true);
+  const rejected = assert.rejects(
+    performed,
     (error: unknown) =>
       error instanceof BridgeError &&
       error.code === "CLAUDE_PEER_WRITE_AMBIGUOUS" &&
       error.recoverable === false,
   );
+  await writing;
+  t.mock.timers.tick(11);
+  await rejected;
+  assert.equal(writes, 1);
+});
+
+test("a connected socket can time out during pre-write revalidation without writing", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const socket = new EventEmitter() as net.Socket;
+  let writes = 0;
+  socket.destroy = (() => socket) as net.Socket["destroy"];
+  socket.end = (() => { writes++; return socket; }) as net.Socket["end"];
+  const current = await fixture(t, { connectTimeoutMs: 10, connect: () => {
+    queueMicrotask(() => {
+      socket.emit("connect");
+      // beforeWrite is awaiting real owned-file/process revalidation here.
+      t.mock.timers.tick(11);
+    });
+    return socket;
+  } });
+  await addPeer(current, { pid: 44_305 });
+  const target = await selectFirstPeer(current);
+  const prepared = await current.adapter.prepareSend(target.targetId, "pre-write timeout", { deadlineAt: Date.now() + 30_000 });
+  await assert.rejects(prepared.perform(async () => true), (error: unknown) =>
+    error instanceof BridgeError && error.code === "CLAUDE_PEER_CONNECT_TIMEOUT" && error.recoverable);
+  assert.equal(writes, 0);
 });
 
 test("a write that hangs across the canonical deadline is ambiguous, not expired", async (t) => {
