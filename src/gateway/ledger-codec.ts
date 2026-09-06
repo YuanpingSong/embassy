@@ -1,5 +1,5 @@
 import { BridgeError } from "../errors.js";
-import { bodyHash, emptyLedger, sameEndpoint, type Delivery, type EndpointRef, type LedgerLimits, type LedgerState } from "./ledger.js";
+import { emptyLedger, sameEndpoint, type Delivery, type EndpointRef, type LedgerLimits, type LedgerState } from "./ledger.js";
 import type { OwnedStateCodec } from "./owned-state.js";
 
 const ALIAS = /^[a-z][a-z0-9_-]{0,31}@[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
@@ -17,8 +17,8 @@ const OUTCOMES = new Set(["delivered", "failed", "cancelled", "expired", "ambigu
 type Obj = Record<string, unknown>;
 type Check = (value: unknown) => boolean;
 const object = (value: unknown): value is Obj => typeof value === "object" && value !== null && !Array.isArray(value);
-const exact = (value: unknown, keys: readonly string[]): value is Obj => object(value) &&
-  Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+const exact = (value: unknown, keys: readonly string[], optional: readonly string[] = []): value is Obj => object(value) &&
+  keys.every((key) => Object.hasOwn(value, key)) && Object.keys(value).every((key) => keys.includes(key) || optional.includes(key));
 const natural = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0;
 const bounded = (value: unknown, maximum: number): value is string => typeof value === "string" &&
   value.length > 0 && value.length <= maximum && !value.includes("\0");
@@ -51,7 +51,7 @@ function phase(value: unknown, limits: LedgerLimits): boolean {
   if (!object(value) || typeof value.phase !== "string") return false;
   const tries = (candidate: unknown): boolean => natural(candidate) &&
     Number(candidate) <= 1 + Math.ceil(limits.deadlineMs / 500);
-  if (value.phase === "queued") return exact(value, ["phase", "tries"]) && tries(value.tries);
+  if (value.phase === "queued") return exact(value, ["phase", "tries", "readyAt"]) && tries(value.tries) && natural(value.readyAt);
   if (value.phase === "reserved") return exact(value, ["phase", "attempt", "tries"]) &&
     typeof value.attempt === "string" && ATTEMPT.test(value.attempt) && tries(value.tries);
   if (value.phase === "armed") return exact(value, ["phase", "attempt", "tries", "prepared"]) &&
@@ -66,19 +66,16 @@ function phase(value: unknown, limits: LedgerLimits): boolean {
 
 function delivery(value: unknown, limits: LedgerLimits): value is Delivery {
   if (!exact(value, ["id", "reply", "token", "source", "target", "body", "admittedAt", "deadline",
-    "steer", "fingerprint", "state"]) || typeof value.id !== "string" || !MESSAGE.test(value.id) ||
+    "steer", "state"], ["sourceAlias"]) || typeof value.id !== "string" || !MESSAGE.test(value.id) ||
     typeof value.reply !== "string" || !CONVERSATION.test(value.reply) || typeof value.token !== "string" ||
     !DELIVERY.test(value.token) || !endpointRef(value.source) || !endpointRef(value.target) ||
     !boundedText(value.body, limits.bodyBytes) || !natural(value.admittedAt) || !natural(value.deadline) ||
     value.deadline <= value.admittedAt || value.deadline > value.admittedAt + limits.deadlineMs ||
-    typeof value.steer !== "boolean" || typeof value.fingerprint !== "string" || !SHA256.test(value.fingerprint) ||
+    typeof value.steer !== "boolean" || (value.sourceAlias !== undefined &&
+      (typeof value.sourceAlias !== "string" || !ALIAS.test(value.sourceAlias) || !value.sourceAlias.endsWith(`@${value.source.host}`))) ||
     !phase(value.state, limits)) return false;
   const parsed = value as unknown as Delivery;
-  if (parsed.fingerprint !== bodyHash(JSON.stringify([
-    { id: parsed.source.id, host: parsed.source.host, provider: parsed.source.provider },
-    { id: parsed.target.id, host: parsed.target.host, provider: parsed.target.provider },
-    parsed.body, parsed.steer,
-  ])) || parsed.state.phase === "terminal" && parsed.state.at < parsed.admittedAt) return false;
+  if (parsed.state.phase === "terminal" && parsed.state.at < parsed.admittedAt) return false;
   return !parsed.steer || parsed.source.provider === "claude" && parsed.target.provider === "codex" && parsed.body.startsWith("STEER:");
 }
 
@@ -101,6 +98,8 @@ export function createLedgerCodec(host: string, limits: LedgerLimits): OwnedStat
       !list(value.rates, (row) => exact(row, ["source", "since", "count"]) && endpointRef(row.source) &&
         natural(row.since) && natural(row.count) && row.count > 0 && row.count <= limits.rate)) return undefined;
     const state = value as LedgerState;
+    if (state.deliveries.some((d) => (d.source.host === host) === (d.sourceAlias !== undefined) ||
+      (d.source.host !== host && d.target.host !== host))) return undefined;
     if (duplicate(state.endpoints, (row) => row.id) ||
       duplicate(state.endpoints, (row) => `${row.provider}\0${row.handle}`) ||
       duplicate(state.deliveries, (row) => row.id) || duplicate(state.deliveries, (row) => row.reply) ||

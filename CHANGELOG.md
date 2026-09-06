@@ -4,6 +4,20 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased] — v4
+
+### Changed
+- Replaced the accumulated route/service machinery with endpoint identities, one bounded delivery ledger, one batch coordinator, and explicit Claude, Codex, and SSH destinations. All four Claude/Codex directions work locally and across configured SSH nodes.
+- Both agents send with `embassy send --to <name@host>` or `--conversation <reference>`, using the inherited caller identity rather than `--from`. Receiving remains native. A bounded backlog is delivered in one wake with separately attributed messages; an active Codex operation retains its exact STEER capability until completion or its delivery deadline.
+- Replies are identity-bound ledger relations that survive broker restart while retained. Remote catalogs are display caches, never routing authority; direct owner resolution admits authenticated first contact without waiting for a reverse catalog poll.
+- Status is metadata-only: recent ledger outcomes, retirement evidence and timestamped remote catalog observations. `check` proves a broker-only round trip without contacting a model; it does not claim provider readiness.
+- Breaking reset-only upgrade: private state schema 6, local control protocol 5, federation protocol 3. Stop and inspect unsettled work using the old build, preserve its state backup, and follow [the private-state reset procedure](docs/CONFIGURATION.md#private-state-reset). No automatic conversion or mixed-version federation is supported. Existing queued bodies and reply references do not cross a reset.
+
+### Removed
+- Native Claude sending advertisements and helper processes, shell-peer user endpoints and token/await commands, automatic Codex output forwarding and synthetic reply machinery, general activity/accounting journals, persisted remote mirrors, and `watch`.
+- Deprecated `reply` and `unregister-codex` spellings; use `send --conversation` and operator-authorized `retire`. Unused deduplication and delivery-notice configuration are no longer part of the runtime.
+- Historical deep-import compatibility remains unsupported: the maintained package surface is the CLI, packaged skill and documented public JSON.
+
 ## [3.1.0] - 2026-09-05
 
 ### Added

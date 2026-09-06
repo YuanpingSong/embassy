@@ -2,365 +2,194 @@
 
 ## Supported versions
 
-Security fixes are applied to the latest Embassy release and the `main`
-branch. Pre-release prototype versions are not supported.
+Security fixes are provided for the current release line. Version 4 uses a
+reset-only state boundary and does not run compatibility code for older private
+state or control protocols.
 
 ## Reporting a vulnerability
 
-Please use this repository's private GitHub Security Advisory interface. Do
-not open a public issue for a suspected vulnerability.
-
-Reports should contain the smallest synthetic reproduction possible. Do not
-include credentials, OAuth material, Keychain data, message bodies, raw model
-output, provider histories, local Embassy state, socket addresses, native
-session or thread identifiers, or unredacted personal paths.
+Open a private security report with the repository owner. Do not put message
+bodies, credentials, native identifiers, socket paths, provider histories, or
+raw diagnostic output in a public issue.
 
 ## Deployment boundary
 
-Embassy is personal software for one macOS user. Each broker remains local to
-one machine; an explicit private `nodes.json` may connect the user's own
-SSH-reachable machines through the user's existing OpenSSH configuration.
-Broker identity always comes from that owned mode-0600 `nodes.json`; when it
-is absent, the broker creates it once from this machine's hostname, and that
-recorded identity stays as written when the machine is later renamed. Run
-every node only under an OS account that is yours alone and where you trust
-every process already running as that user. Do not expose Embassy sockets or
-state on a network, host it as a service, or use it to share a provider
-subscription between users.
+Embassy is a personal, same-user gateway for user-owned Macs. The broker is a
+foreground process or a per-user launchd agent. It has one private Unix-domain
+control socket and no TCP or HTTP listener. Cross-machine delivery is an
+outbound `/usr/bin/ssh` process to another explicitly configured Embassy
+gateway.
 
-The broker is local; the agents are not. Embassy does not call a provider API,
-but a delivered body becomes model input in the receiving product and may be
-sent to and retained by Anthropic or OpenAI under that product's normal terms
-and settings.
-
-## Trust model
-
-Embassy provides same-UID containment and route attribution, not authentication
-against other processes running as the same OS user.
-
-- A Codex route is attributed to the exact inherited `CODEX_THREAD_ID` of the
-  task that self-registers it. App Server attachment and endpoint generations
-  are current transport facts, never durable route authority.
-- A Claude route is attributed to a validated live peer generation and native
-  session UUID. An inherited `CLAUDE_CODE_MESSAGING_SOCKET` is a transient
-  reply capability, not a credential.
-- Aliases are labels. They do not grant authority and are re-resolved against
-  the exact private route binding before delivery.
-- Immediately before provider delivery, Embassy places the body inside one
-  broker-owned `cross-session-message` textual frame. Its sender attribution
-  and first-child reply hint come from validated broker metadata, not from the
-  message body. This is a provenance boundary for the receiving model, not a
-  cryptographic signature or authentication against same-UID code.
-- Any process already running as the same OS user may be able to present local
-  environment or socket capabilities. Embassy is not a sandbox for untrusted
-  same-user code.
+The design assumes the login account and machines are trusted. It does not turn
+one Unix user into multiple security principals, sandbox an untrusted agent, or
+provide hostile multi-user isolation.
 
 ## What Embassy defends, and what it deliberately does not
 
-Embassy's security boundary is intentionally narrower than “protect this user
-from every process this user runs.” The boundary below governs implementation,
-review, and audit work.
-
 ### What Embassy defends
 
-- **The same-UID OS and artifact boundary for anything Embassy executes or
-  treats as identity evidence.** Embassy validates canonical paths, ownership,
-  symlink policy, modes, approved version-directory containment, its own state
-  and sockets, and the generation of artifacts it owns. Before acting on an
-  identity-bearing input—such as an inherited task identity, provider record,
-  route, provider record, or reply request—it validates the input's bounded
-  shape and its current ownership and correlation. Immediately before an
-  effect, the owning transport re-attests every changing path, socket,
-  process, interface, target, and generation fact it actually uses. Unsafe
-  controller-wide evidence is fatal; this class comprises Embassy-owned or
-  executed artifacts and Embassy callback, control, and state paths. The
-  Claude-owned external sessions registry root is instead a read-side identity
-  source: unsafe UID or mode evidence quarantines and write-fences only Claude,
-  with a loud observation, while the broker and other provider stay available.
-  A bad provider record, endpoint, or acted-on input is rejected or fenced at
-  that artifact rather than accepted on a best-effort basis.
-- **Honest provenance at the message boundary.** The broker creates the outer
-  `cross-session-message` frame and first-child reply hint from validated route
-  metadata, and neutralizes body text shaped like its reserved framing tags
-  before composition. Those marks tell the receiver which transport path and
-  sender alias Embassy observed. They are not a signature, and every delivered
-  body remains untrusted input whose claims and requested actions require the
-  receiver's normal judgment, sandbox, and approval policy.
-- **Anti-runaway containment.** Queue counts and bytes, message and frame sizes,
-  callbacks, conversations, retained bodies, deduplication records, rate
-  windows, and deadlines are bounded. Exhaustion rejects, expires, or fences
-  work with an explicit result; a bound never creates permission or justifies
-  replaying an ambiguous write.
+Embassy defends the boundary between model-authored content and authority to
+address or write to a live session. A body, alias, provider response, catalog
+row, or persisted field cannot grant that authority by itself. Authority comes
+from the current same-user process boundary, an exact endpoint identity,
+owned private state, and fresh per-operation transport attestation.
+
+Specifically, Embassy defends:
+
+- exact Claude session and Codex task identity across alias changes;
+- refusal rather than guessed routing when a name is absent or ambiguous;
+- one bounded, private state document with atomic replacement and strict schema
+  validation;
+- per-operation ownership, path, protocol, and artifact checks before every
+  native write;
+- bounded bodies, queues, batches, deadlines, rates, in-flight operations, and
+  retained evidence;
+- a durable `queued` → `reserved` → `armed` → `accepted` → `terminal` phase law
+  that never replays an uncertain write;
+- structural provenance framing and identity-bound replies;
+- authenticated, direct SSH handoff with a destination-owned queue and no
+  post-commit retry;
+- redaction of native IDs, addresses, credentials, histories, raw frames, and
+  bodies from public status and errors;
+- retirement and replacement that settle incident work without moving it to a
+  different endpoint.
+
+Every proposed audit check or hardening rule must enforce one of these stated
+boundaries. A new boundary requires an explicit product decision; it must not
+arrive disguised as a regression test.
 
 ### What Embassy deliberately does not defend
 
-- **Other local software already running as the same user.** Embassy provides
-  no local-process authentication and no capability or local-user consent
-  boundary against software already operating under that UID. Addressing is
-  routing, not authorization; aliases, conversation tokens,
-  inherited environment values, private sockets, and same-user file modes do
-  not authenticate one same-user process from another.
-- **Predictions based on version strings.** A version string is diagnostic
-  metadata, never routing authority, security evidence, or attack detection.
-  Current path, ownership, protocol, interface, used-artifact generation, and
-  correlated operation facts decide what Embassy can safely do. Codex
-  registration performs no provider I/O; every delivery proves the current
-  boundary independently. Boot refusal is reserved
-  for an unsafe or lost singleton lease, corrupt controller state, or an unsafe
-  OS boundary. Interface drift or one unavailable optional provider degrades
-  that surface; it does not take down the broker or the other providers.
+Embassy does not defend against the login user, root, a compromised user-owned
+machine, the user's SSH configuration, or the provider applications
+themselves. It does not cryptographically authenticate text inside a provider
+conversation, prove a model read or understood a message, or make aliases
+permanent identifiers.
 
-### Audit rule
+Provider availability and version metadata are observations, not authority.
+`embassy health` proves the local broker control path. `embassy check` proves
+the broker's ledger/coordinator/receipt loop without a live agent. Neither is a
+provider readiness, model comprehension, or cross-machine proof.
 
-Every new audit check must cite the sentence in this doctrine that it enforces.
-If the proposed check has no supporting sentence here, raise it explicitly as
-a doctrine-change proposal, including the product and threat-model consequence,
-before adding the check. A test, review finding, or “hardening” patch must not
-silently expand Embassy's claimed boundary.
+The textual provenance envelope is a structural marker, not a signature. A
+recipient must treat user-supplied text inside it as untrusted content. Embassy
+neutralizes reserved envelope tags but does not sanitize general prompts.
 
-## Routing and the permission model
+## Identity and routing
 
-- Retirement is a credential-free same-UID operator action on local routes;
-  federated mirrors are refused with `FEDERATED_ROUTE_READ_ONLY`.
-- A universal shell peer explicitly registers one `peer-*` alias. Its principal
-  is that alias plus a `peer_` token minted and printed exactly once. The token
-  is supplied on stdin (or inherited only by a harness with a stable shell),
-  compared in constant time, and rechecked immediately before effects. This is
-  same-UID attribution, not authentication against other same-user software;
-  there is deliberately no PID binding, token file, Keychain entry, or daemon.
-- A Codex task must explicitly self-register with a `codex-*` alias before it
-  can participate.
-- The permission to message is the OS boundary Embassy already sits inside:
-  the same UID, the same host — or a host the operator configured in the
-  private `nodes.json` — and an exact alias. Embassy holds no separate,
-  revocable grant between two endpoints, and never claimed one could defend
-  against software already running as that UID.
-- A discovered Claude session's logical route is installed by the broker on
-  the session's first use — the first message sent to it, or its first native
-  message out. Installation records identity; it grants nothing that
-  addressing did not already imply.
-- A name is not an identity. A route's identity is its (host, native session
-  UUID) pair: a session that re-anchors or renames itself keeps its
-  registration and its in-flight conversations, while a name that currently
-  belongs to more than one live session is refused with
-  `PEER_ALIAS_COLLISION` at send time and never resolved by picking first.
-  That fence is a fence on names: the session UUID stays addressable, and a
-  sender is never fenced by its own display name, because its identity was
-  attested rather than typed.
-- Every routed body carries the broker-composed provenance envelope naming its
-  sender, and what "naming" is worth depends on the hop. On a local hop the
-  sender is verified: the broker read it from the inherited socket capability,
-  the inherited Codex thread id, or a shell peer's minted token, none of which
-  the sender chose. Across a federated hop the sender is named by the sending
-  node, and what the destination authorizes is that node's membership in its
-  own `nodes.json` — the destination trusts the peer broker to have verified
-  its own local sender, exactly as much as it trusts that operator. In both
-  cases the envelope is attribution, not authentication of the body's claims,
-  and the boundary that stops anyone else is the operating system's.
-- Explicitly requested endpoint replacement
-  (`register-codex --succeeds`) is one atomic logical-route transaction: it
-  settles the outgoing route's work by recorded write phase, removes its
-  capabilities, and publishes only the replacement. There is no prepared,
-  activated, re-anchored, or recovery generation and no half-replaced state.
-- Embassy never mutates a Codex task's approval or sandbox policy and never
-  answers an approval request. An inbound turn uses the task's existing native
-  policy. With `approvalPolicy: never`, no human confirmation occurs on that
-  path; with an approval-requiring policy, the turn may wait for the user.
-- Claude's native `crossSessionInbound` setting controls messages entering a
-  Claude session. Embassy cannot override an accept, hold, or refuse decision.
-- Delivery scheduling is asymmetric. After routing and pre-write validation,
-  Claude-bound bodies are written immediately to Claude's native mailbox
-  regardless of an observed busy or idle state; `transport_written` proves the
-  mailbox write and settles that direction as `delivered`, not read or
-  consumed. Codex-bound ordinary bodies remain idle-gated, and only the exact
-  `STEER:` path below can use the active turn's next tool-call boundary.
-- A CLI initiator receives the full conversation token in the accepted control
-  result, and every routed recipient receives it in the broker-owned first
-  `embassy-reply-hint`. The token is a transient participant-scoped locator,
-  not sufficient authority: `send --conversation` rechecks inherited caller identity,
-  conversation membership, and current routing policy.
+An endpoint's opaque `(ID, host, provider)` tuple is routing authority. Its
+`name@host` alias is a current lookup index. A name is resolved once before
+admission; writes, replies, restart recovery, and settlement use the tuple.
+Historical names never resolve, and queued work is never silently rebound.
 
-Every routed message is untrusted input capable of steering the receiving
-agent. The OS boundary and routing control reachability; the provenance marker
-does not make the message content or asserted intent trustworthy.
+Codex tasks self-register from inherited `CODEX_THREAD_ID`. Embassy never
+accepts, prints, or guesses the value. Registration performs no provider I/O.
+Each operation resumes and attests that exact task immediately before write.
 
-The literal leading `STEER:` prefix is a protocol instruction, not proof of a
-trusted author or safe intent. Any exact same-UID Claude sender already allowed
-to reach the registered Codex task can use it. The receiver's existing Codex
-policy still governs tools and approvals, and an operator who does not want
-this timing behavior must set `EMBASSY_STEERING_ENABLED=0` before starting the
-broker.
+Claude callers are resolved from inherited `CLAUDE_CODE_MESSAGING_SOCKET`,
+which must be an absolute path. The path may become an in-memory `uds:`
+capability only; it is never a CLI argument, public output, or persisted field.
+Claude native session UUIDs are stored only in closed private route state.
+Discovery accepts only compatible interactive/background same-user records and
+checks the exact record and socket again before use.
 
-## Process and protocol boundary
+Aliases may collide in discovered Claude state. In that case name lookup
+refuses; user-supplied exact UUID selection can identify a Claude target, but
+Embassy never publishes a UUID. A retired or replaced endpoint remains fenced
+while its bounded retirement evidence is retained.
 
-- The launcher is foreground and macOS-only. Provider attestation and the
-  control plane remain machine-local. Configured federation owns only a fixed
-  outbound `ssh ... embassy peer-stdio` subprocess; SSH supplies transport
-  authentication, encryption, and liveness, and Embassy opens no federation
-  listener.
-- Before provider setup, the launcher acquires one host-wide macOS advisory
-  lease. If its lease helper exits or the lease is otherwise lost
-  unexpectedly, Embassy shuts down rather than continuing without singleton
-  ownership.
-- The control plane is a private Unix-domain socket in a controller-owned
-  mode-0700 state directory. `embassy serve` has no TCP or HTTP listener; its
-  only listeners are private Unix-domain sockets.
-- Provider startup validates exact OS ownership, path, symlink, lease, state,
-  and generation evidence. Unsafe evidence for Embassy-owned or executed
-  artifacts and Embassy callback, control, or state paths refuses broker
-  startup; unsafe UID or mode evidence for Claude's external sessions registry
-  root quarantines only Claude. A provider version is best-effort diagnostic
-  metadata and carries no routing authority. Runtime authority comes from the
-  OS boundary, exact owned route and session identity, current
-  per-operation transport facts, strict protocol handling, and correlated
-  operation results.
-  A Claude record whose peer protocol is not 1 is rejected in isolation and
-  included in bounded rejection evidence. Every Codex endpoint used by a
-  delivery must negotiate its current interface and resume the exact task
-  before that operation receives final write authorization.
-- Advertisement tracks a helper per local non-Claude route (`codex-*` or `peer-*`):
-  one forked process, one callback socket, and one process-owned registry record
-  with the supported explicit versioned Embassy-advertisement marker.
-  The tracked-helper cap is `maxRoutes` (default and maximum 128).
-  Federated mirrors are excluded from local helper advertisement.
-  Pending creations reserve capacity before the factory runs; overlapping same-alias reconciliations share that creation, and shutdown joins pending creations before completing cleanup.
-  Default-helper initialization requests time out after 5 seconds; forced close
-  escalates to SIGKILL after 2 seconds, but completion still awaits the child's
-  exit. This is an escalation schedule, not a shutdown deadline; injected
-  factories may remain pending.
-  The prefix is a visible alias convention, not the discriminator: an unmarked
-  genuine Claude session named `codex-*` remains discoverable. Each helper creates
-  one callback socket and removes only exact-owned artifacts whose generation
-  still matches during graceful shutdown.
-- App Server methods are allowlisted. Connectors expose no archive, deletion,
-  shell, configuration, authentication, plugin, history, approval-response, or
-  generic RPC method.
-- `turn/steer` is reachable only for an exact leading `STEER:` body in the
-  Claude-to-Codex direction, with an exact observed active-turn ID. App Server
-  admits it at the next tool-call boundary; Embassy never interrupts or injects
-  mid-generation. Clean boundary refusal falls back to the normal queue, which
-  retains at most three steers per route. The environment kill switch defaults
-  on and can disable this classification globally. Embassy never issues
-  `turn/interrupt`.
-- The App Server 0.147.0 initialization this adapter targets enables `experimentalApi: true`
-  solely for `thread/resume.excludeTurns: true`. It adds no general
-  experimental method or authority. Missing, malformed, or nonempty returned
-  turns fail closed and are never retained.
-- Queues, frames, bodies, callbacks, deadlines, deduplication,
-  rate limits, and transient conversations are bounded. Ambiguous writes are
-  never retried automatically.
-- A peer catalog contains only bounded, body-free local metadata. It never
-  exports imported rows, message or conversation tokens, native identifiers,
-  provider frames, sockets, paths, credentials, or raw diagnostics. Each
-  destination broker owns its durable queue; loss after a federated write is
-  UNKNOWN and is never replayed.
-- Raw-body classification and accounting happen before framing. In the
-  untrusted body only, Embassy case-insensitively neutralizes boundary-shaped
-  opening or closing copies of its reserved framing tags before composing the
-  real outer frame. Framing or size failure occurs before provider write and is
-  never an ambiguous write.
-- Embassy creates no network listener at all. Everything enumerated above
-  concerns `embassy serve`.
+A remote source is admitted only through an SSH peer named in `nodes.json`.
+The owner attests the source tuple and alias in the handoff, so first contact
+does not rely on a previously polled catalog. Catalogs are bounded memory-only
+caches and are never write authority. `refresh` may replace a successful
+node's rows or retain its last timestamped rows with
+`PEER_TUNNEL_UNAVAILABLE`; `status` reads that observation without network I/O.
+Named and exact routing still queries the owner.
 
-## Filesystem boundary
+## Delivery and uncertainty
 
-Controller-owned state is a dedicated mode-0700 directory. Its files and
-control socket are mode 0600 and validated against replacement, symlinks, and
-unexpected ownership or permissions. Those files include message content:
-the durable queue and the bounded recent-delivery ledger both retain message
-bodies, so the state file holds mail at rest and not metadata alone. Anything
-already running as the same OS user can read it.
+One transaction admits a message. One coordinator reserves a bounded FIFO
+batch for one exact destination and delivery class. Provider I/O occurs outside
+the state transaction; authorization then revalidates the exact prepared bytes
+and every locally owned endpoint ID, alias, and native handle under the
+transaction immediately before the write.
 
-The host-wide singleton has one fixed surface under the verified login home:
-the private mode-0700 `~/.local/state/agent-embassy` directory and its mode-0600
-`.gateway-host.lock`. Neither `EMBASSY_STATE_DIR` nor `XDG_STATE_HOME` relocates
-that lease. Embassy executes the exact `/usr/bin/lockf` and `/bin/cat` helpers,
-without a shell, to hold the kernel lease for the foreground process lifetime.
-The lock file is retained and reused across restarts; process exit releases the
-kernel lock.
+Only a positive no-write result may return work to the queue. Reserved work may
+recover after a process restart. Armed work becomes `ambiguous`; accepted work
+becomes its recorded `ambiguous` or `unconfirmed` loss result. Neither is
+replayed. A late callback cannot overwrite a terminal result.
 
-Embassy's provider-facing access is intentionally enumerable:
+The broker persists message bodies and opaque delivery/conversation values only
+inside the bounded private ledger. It does not persist provider histories,
+provider output, raw frames, tool data, callback sockets, or credentials.
+Recent terminal delivery and retirement evidence is bounded by count, bytes,
+and time; it is not a general analytics journal.
 
-- derive the fixed Claude registry and callback roots from the verified current
-  OS user, without reading a Claude launcher or configuration file;
-- read the live Claude session registry and validate only the registry record,
-  peer socket, PID, workspace, state-root, and generation evidence used by the
-  current operation;
-- fork advertisement helper processes for local non-Claude routes, each owning one
-  callback socket and one registry record (`codex-*` or `peer-*`); the tracked-count
-  admission cap is `maxRoutes` (default and maximum 128),
-  including pending creations in that cap;
-- resolve the managed Codex installation and open one attested local App Server
-  connection per operation; and
-- inspect canonical filesystem metadata needed to validate provider-advertised
-  endpoints and generations.
+`STEER:` is recognized only as an exact leading prefix from Claude to Codex.
+It targets the exact already-accepted operation at a safe tool-call boundary,
+never interrupts a generation, and falls back to the ordinary bounded queue
+when cleanly unavailable. Embassy never calls `turn/interrupt`, answers an
+approval, or changes a task's approval or sandbox policy.
 
-The Claude-owned external sessions registry root must be owned by the current
-UID with exact mode 0700 before Embassy enumerates it; failure quarantines and
-write-fences only Claude, including when that registry root is absent. Within
-an admitted root, individual registry records
-and peer sockets retain their bounded schema, file/socket type, PID/path and
-allowed-root correlation, accessibility, liveness, and generation checks.
-Embassy invents no additional owner or mode rule for those individual
-provider-owned artifacts.
+## Filesystem and process boundary
 
-Embassy does not need or intentionally read credentials, Keychain items,
-Claude project history, Codex or Claude transcripts, shell history, or provider
-configuration contents. Report a bug if any normal code path attempts to do so.
+The state directory is a current-user-owned mode-0700 real directory. State and
+configuration files are mode-0600 regular files. Reads and writes reject
+symbolic links, ownership changes, mode changes, inode swaps, oversized data,
+and unsupported schema. Atomic persistence uses an exclusive private temporary
+file, file sync, rename, and directory sync. An unknown commit outcome poisons
+the running store rather than guessing.
 
-## Persistence and disclosure
+One fixed host-wide kernel lease is acquired before provider setup. Changing
+`EMBASSY_STATE_DIR` does not create permission to run a second broker. The
+control socket is accepted only at the expected private path with current-user
+ownership and exact socket type. Mutating control requests that lose a reply
+after write report an ambiguous outcome and are not retried.
 
-Raw provider frames, tool data, stderr, callback addresses, and socket paths
-remain memory-only and are discarded on restart. Message bodies are the
-exception: queued and recently delivered bodies are retained under bounded caps
-in the mode-0600 state file. A queued or reserved message may resume once after
-a broker restart against its still-exact logical route. An
-armed or accepted message at crash settles ambiguous or unconfirmed and is
-never replayed.
+The launchd agent records absolute executable paths, nonempty `EMBASSY_*`
+values, and `XDG_STATE_HOME`. It copies no other shell state or arbitrary
+`PATH`; operators must not place secrets in an `EMBASSY_*` variable.
+`embassy serve` stays foreground and does not daemonize.
 
-For a shell peer, durable route ownership stores only
-`peer:<sha256(uid NUL alias NUL token)>`; the raw peer token and private mailbox
-receipts never enter state, logs, snapshots, or routed frames.
-Pending waiters, acknowledgements, and the bounded exact-duplicate receipt
-tombstone are memory-only. A restart therefore cannot falsely confirm a
-stdout write whose acknowledgement was not observed.
+Claude registry failures quarantine Claude operations rather than authorizing a
+guess. Embassy validates each consumed peer-protocol-1 field while tolerating
+unknown top-level registry fields. Unsafe controller-owned state may refuse the
+whole broker because its ownership is the broker's authority boundary.
 
-The full `conv_` token exposed to a CLI initiator or routed recipient travels
-only inside the accepted CLI result or transient provider payload. It is never
-persisted, journaled, logged, placed in a receipt, or projected through public
-events or snapshots; public metadata may retain only an existing
-non-reconstructable suffix. Broker-owned marker fields
-introduce no socket paths, Codex thread IDs, Claude session UUIDs, endpoint
-generations, or private route handles. The untrusted body remains opaque text
-and may itself contain sender-provided strings.
+## SSH boundary
 
-The closed private binding store may retain the exact Codex thread ID and Claude
-session UUID required for logical ownership. Native IDs are
-forbidden from public snapshots, normalized events, aliases,
-logs, errors, and CLI output. A Claude UUID may enter only as a user-supplied
-explicit CLI selector (`embassy send --to <uuid>`); Embassy never discovers or
-prints it publicly.
+Federation is direct and configured statically. Embassy runs the exact system
+SSH client with batch mode, no TTY, no forwarding, no agent forwarding, no
+local command, no tunnel, and no shell interpolation. Only the current user's
+`HOME`, `USER`, `LOGNAME`, and `SSH_AUTH_SOCK` are forwarded to the process.
+SSH authenticates the remote machine; Embassy's correlated protocol validates
+the expected host and protocol version.
 
-## Validation boundary
+The destination validates and durably enqueues a handoff before returning
+acceptance. Only a protocol-proven pre-enqueue refusal is definite. Process
+death, malformed data, wrong correlation, transport loss, and failure after the
+commit boundary remain uncertain and are never replayed automatically.
 
-Routine tests use temporary directories, fake peers, and fake App Server
-transports. They do not inspect live provider state or contact a model.
+## Public disclosure boundary
 
-Broker/provider startup owns bounded validation of configured installations and
-exact OS boundaries. Unsafe Embassy-owned or executed artifacts, callback,
-control, or state paths remain startup-fatal; unsafe UID or mode evidence on
-Claude's external sessions registry root quarantines only that provider.
-Runtime derives no authority from version metadata. It reports best-effort connector health, observation
-freshness, and last safe codes while strict record, frame, response, identity,
-current used-artifact generation, correlation, and deadline checks decide each
-operation. Claude registry parsing remains strict for every required and
-consumed field while ignoring unknown top-level fields; bounded rejected-record
-counts and an observed-empty registry are surfaced instead of hidden. Each
-Codex delivery independently attests, connects, initializes, and resumes the
-exact registered task before its final write authorization. No observation
-traffic routes a user message or starts a model turn.
+Public JSON is a closed projection. It may contain opaque Embassy endpoint IDs,
+aliases, providers, hosts, queue depths, safe codes, phases/outcomes, ages,
+recent retirement times, and bounded remote catalog rows and observation times.
+It must never contain native IDs or handles, socket paths, message bodies,
+delivery/conversation secrets, credentials, exceptions, raw diagnostics, or
+provider histories. Human output is derived from the same validated shape.
 
-Passive live discovery, a live provider connection, a native message, and an
-App Server turn are distinct authorization gates. Each requires an explicit
-user request for that operation. Never infer permission for a live send from a
-previous smoke test, and never enable live provider traffic in CI.
+Never write protocol diagnostics to stdout: stdout may itself be a framed
+protocol channel. Operational hints use bounded safe codes and stderr.
+
+## State reset and rollback
+
+Private state schema 6 and control protocol 5 are the only v4 formats. Older or
+unknown state refuses before mutation. There is no converter, compatibility
+reader, or alias for removed commands. The operator must inspect and settle old
+work with the old binary, stop the broker, preserve the old state, and start v4
+with a fresh `gateway-state.json` while keeping `nodes.json`.
+
+Reset invalidates all old routes, receipts, and conversation references. The
+only rollback is the preserved old binary with its untouched old state. Embassy
+does not merge schemas or promise conversation continuity across reset.

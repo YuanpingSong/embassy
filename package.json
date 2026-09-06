@@ -1,6 +1,6 @@
 {
   "name": "agent-embassy",
-  "version": "3.1.0",
+  "version": "4.0.0-dev",
   "description": "A local gateway for bidirectional messaging between Claude Code sessions and Codex tasks.",
   "license": "MIT",
   "repository": {
@@ -24,7 +24,7 @@
     "darwin"
   ],
   "bin": {
-    "embassy": "dist/src/gateway/cli.js"
+    "embassy": "dist/src/gateway/core-cli.js"
   },
   "files": [
     "dist/src/gateway",
@@ -51,15 +51,15 @@
     "build": "npm run clean && tsc -p tsconfig.build.json",
     "check": "npm run typecheck && npm test",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "embassy": "node dist/src/gateway/cli.js",
+    "embassy": "node dist/src/gateway/core-cli.js",
     "prepack": "npm run build",
     "probe:codex-local": "tsx scripts/probe-codex-local.ts",
     "probe:codex-remote": "tsx scripts/probe-codex-remote.ts",
     "pretest": "npm run build",
-    "start": "node dist/src/gateway/cli.js serve",
+    "start": "node dist/src/gateway/core-cli.js serve",
     "test": "tsx --test test/*.test.ts",
     "typecheck": "tsc -p tsconfig.json",
-    "soak": "tsx --test test/soak/gateway-soak.test.ts"
+    "soak": "tsx --test test/soak/core-soak.test.ts"
   },
   "engines": {
     "node": ">=20"

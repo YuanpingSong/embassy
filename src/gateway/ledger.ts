@@ -7,7 +7,7 @@ export type Outcome = "delivered" | "failed" | "cancelled" | "expired" | "ambigu
 export type PreparedWake = Readonly<{ bytes: number; sha256: string; bodies: readonly string[] }>;
 type Attempt = { attempt: string; tries: number };
 export type DeliveryPhase =
-  | { phase: "queued"; tries: number }
+  | { phase: "queued"; tries: number; readyAt: number }
   | (Attempt & { phase: "reserved" })
   | (Attempt & { phase: "armed"; prepared: PreparedWake })
   | (Attempt & { phase: "accepted"; prepared: PreparedWake; loss: "ambiguous" | "unconfirmed" })
@@ -15,7 +15,9 @@ export type DeliveryPhase =
 export type Delivery = {
   id: string; reply: string; token: string; source: EndpointRef; target: EndpointRef;
   body: string; admittedAt: number; deadline: number; steer: boolean;
-  fingerprint: string; state: DeliveryPhase;
+  /** Only authenticated remote admission supplies this display label. Local labels
+   * are always read from the current endpoint at write authorization. */
+  sourceAlias?: string; state: DeliveryPhase;
 };
 export type LedgerState = {
   schemaVersion: 6; commit: { sequence: number; id: string };
@@ -26,13 +28,13 @@ export type LedgerState = {
 export type LedgerLimits = Readonly<{
   endpoints: number; queued: number; perEndpoint: number; queueBytes: number;
   bodyBytes: number; wakeBytes: number; inFlight: number; retained: number; retainedBytes: number;
-  retentionMs: number; dedupeMs: number; rateWindowMs: number; rate: number;
+  retentionMs: number; rateWindowMs: number; rate: number;
   deadlineMs: number;
 }>;
 export const ledgerDefaults: LedgerLimits = Object.freeze({
   endpoints: 128, queued: 100, perEndpoint: 20, queueBytes: 1_048_576,
   bodyBytes: 16_384, wakeBytes: 65_536, inFlight: 16, retained: 500, retainedBytes: 1_048_576,
-  retentionMs: 86_400_000, dedupeMs: 300_000, rateWindowMs: 60_000,
+  retentionMs: 86_400_000, rateWindowMs: 60_000,
   rate: 30, deadlineMs: 14_400_000,
 });
 export const sameEndpoint = (a: EndpointRef, b: EndpointRef): boolean =>
@@ -62,6 +64,7 @@ export class Ledger {
   }
 
   register(endpoint: Endpoint): void {
+    this.prune();
     if (endpoint.host !== this.host) reject("FEDERATED_ROUTE_READ_ONLY");
     const owned = this.state.endpoints.find((e) => e.id === endpoint.id);
     if (owned && (!sameEndpoint(owned, endpoint) || owned.handle !== endpoint.handle)) reject("ROUTE_BINDING_MISMATCH");
@@ -78,7 +81,7 @@ export class Ledger {
 
   replyTarget(reply: string, caller: EndpointRef): EndpointRef {
     const delivery = this.state.deliveries.find((d) => d.reply === reply);
-    if (!delivery) return reject("CONVERSATION_NOT_FOUND");
+    if (!delivery || (delivery.state.phase === "terminal" && delivery.state.at + this.limits.retentionMs <= this.now)) return reject("CONVERSATION_NOT_FOUND");
     this.assertLocal(caller);
     const target = sameEndpoint(delivery.target, caller) ? delivery.source
       : sameEndpoint(delivery.source, caller) ? delivery.target : undefined;
@@ -87,7 +90,7 @@ export class Ledger {
     return ref(target);
   }
 
-  admit(input: Omit<Delivery, "admittedAt" | "fingerprint" | "state">): { delivery: Delivery; duplicate: boolean } {
+  admit(input: Omit<Delivery, "admittedAt" | "state">): { delivery: Delivery; duplicate: boolean } {
     if (input.source.host !== this.host && input.target.host !== this.host) reject("INVALID_PEER_HANDOFF");
     this.assertLocal(input.source);
     this.assertLocal(input.target);
@@ -95,9 +98,14 @@ export class Ledger {
     if (!bytes || input.body.includes("\0") || bytes > this.limits.bodyBytes) reject("INVALID_MESSAGE_BODY");
     if (input.deadline <= this.now || input.deadline > this.now + this.limits.deadlineMs) reject("MESSAGE_EXPIRED");
     if (input.steer && (input.source.provider !== "claude" || input.target.provider !== "codex" || !input.body.startsWith("STEER:"))) reject("INVALID_MESSAGE_BODY");
-    const fingerprint = bodyHash(JSON.stringify([ref(input.source), ref(input.target), input.body, input.steer]));
-    const duplicate = this.state.deliveries.find((d) => d.fingerprint === fingerprint && d.admittedAt + this.limits.dedupeMs > this.now);
-    if (duplicate) return { delivery: duplicate, duplicate: true };
+    if (input.source.host !== this.host && (!input.sourceAlias || !input.sourceAlias.endsWith(`@${input.source.host}`))) reject("INVALID_PEER_HANDOFF");
+    if (input.source.host === this.host && input.sourceAlias !== undefined) reject("INVALID_PEER_HANDOFF");
+    const duplicate = this.state.deliveries.find((d) => d.id === input.id);
+    if (duplicate) {
+      if (!sameEndpoint(duplicate.source, input.source) || !sameEndpoint(duplicate.target, input.target) ||
+        duplicate.body !== input.body || duplicate.steer !== input.steer || duplicate.deadline !== input.deadline) reject("INVALID_PEER_HANDOFF");
+      return { delivery: duplicate, duplicate: true };
+    }
     const active = this.state.deliveries.filter(pending);
     const steers = active.filter((d) => sameEndpoint(d.target, input.target) && d.steer && d.state.phase === "queued");
     if (input.steer && steers.length >= 3) reject("QUEUE_FULL");
@@ -113,7 +121,7 @@ export class Ledger {
       this.state.rates.push({ source: ref(input.source), since: this.now, count: 1 });
     }
     const delivery: Delivery = { ...input, source: ref(input.source), target: ref(input.target),
-      admittedAt: this.now, fingerprint, state: { phase: "queued", tries: 0 } };
+      admittedAt: this.now, state: { phase: "queued", tries: 0, readyAt: this.now } };
     this.state.deliveries.push(delivery);
     this.prune();
     return { delivery, duplicate: false };
@@ -128,8 +136,9 @@ export class Ledger {
     if (operations.size >= this.limits.inFlight || active.some((d) => sameEndpoint(d.target, target) && d.steer === steer)) return [];
     let bytes = 0;
     const batch: Delivery[] = [];
-    for (const d of this.state.deliveries) {
+    for (const d of [...this.state.deliveries]) {
       if (d.state.phase !== "queued" || !sameEndpoint(d.target, target) || d.steer !== steer) continue;
+      if (d.state.readyAt > this.now) break;
       // Frame composition may reduce this prefix further before authorization.
       if (bytes + Buffer.byteLength(d.body) > this.limits.wakeBytes || (steer && batch.length === 1)) break;
       if (d.state.tries >= 1 + Math.ceil((d.deadline - d.admittedAt) / 500)) {
@@ -144,6 +153,7 @@ export class Ledger {
   }
 
   authorize(ids: readonly string[], attempt: string, prepared: PreparedWake, attested: readonly Endpoint[] = []): boolean {
+    this.expire();
     const batch = this.batch(ids, attempt);
     if (!batch || batch.some((d) => d.state.phase !== "reserved" || d.deadline <= this.now)) return false;
     for (const d of batch) { this.assertLocal(d.source); this.assertLocal(d.target); }
@@ -169,11 +179,23 @@ export class Ledger {
   }
 
   /** Only a transport-proven no-write result may return reserved work to the queue. */
-  defer(ids: readonly string[], attempt: string): boolean {
-    const batch = this.batch(ids, attempt);
+  defer(ids: readonly string[], attempt: string, delayMs = 500): boolean {
+    const batch = this.batch(ids, attempt, true);
     if (!batch || batch.some((d) => d.state.phase !== "reserved")) return false;
-    for (const d of batch) d.state = { phase: "queued", tries: (d.state as Attempt).tries };
+    for (const d of batch) d.state = { phase: "queued", tries: (d.state as Attempt).tries, readyAt: this.now + delayMs };
     return true;
+  }
+
+  /** Called only on the owning adapter's positive proof that perform wrote nothing.
+   * In particular, a short batch deadline cannot fail a later, still-valid member. */
+  unwritten(ids: readonly string[], attempt: string): void {
+    const batch = this.batch(ids, attempt, true);
+    if (!batch || batch.some((d) => d.state.phase !== "reserved" && d.state.phase !== "armed")) return;
+    for (const d of batch) {
+      if (d.deadline <= this.now) this.finish(d, "expired", "MESSAGE_EXPIRED");
+      else d.state = { phase: "queued", tries: (d.state as Attempt).tries, readyAt: this.now };
+    }
+    this.prune();
   }
 
   settle(ids: readonly string[], attempt: string, outcome: Outcome, code: string): boolean {
@@ -192,7 +214,7 @@ export class Ledger {
     for (const id of ids) {
       const d = this.state.deliveries.find((m) => m.id === id);
       if (!d || d.state.phase === "terminal" || d.state.phase === "queued" || d.state.attempt !== attempt) continue;
-      if (d.state.phase === "reserved") d.state = { phase: "queued", tries: d.state.tries };
+      if (d.state.phase === "reserved") d.state = { phase: "queued", tries: d.state.tries, readyAt: this.now + 500 };
       else this.finish(d, d.state.phase === "armed" ? "ambiguous" : d.state.loss, code);
     }
     this.prune();
@@ -216,7 +238,7 @@ export class Ledger {
   }
 
   restart(): void {
-    for (const d of this.state.deliveries) {
+    for (const d of [...this.state.deliveries]) {
       if (d.state.phase !== "queued" && d.state.phase !== "terminal") this.lose([d.id], d.state.attempt, "CONTROLLER_RESTARTED");
     }
     this.expire();
@@ -242,6 +264,10 @@ export class Ledger {
 
   private finish(d: Delivery, outcome: Outcome, code: string): void {
     d.state = { phase: "terminal", outcome, at: this.now, code };
+    // The array preserves pending FIFO, while its terminal subsequence is ordered
+    // by settlement. A late completion must not evict its own fresh receipt.
+    this.state.deliveries = this.state.deliveries.filter((row) => row !== d);
+    this.state.deliveries.push(d);
   }
 
   private prune(): void {

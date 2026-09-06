@@ -1,12 +1,12 @@
 {
   "name": "agent-embassy",
-  "version": "3.1.0",
+  "version": "4.0.0-dev",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "agent-embassy",
-      "version": "3.1.0",
+      "version": "4.0.0-dev",
       "license": "MIT",
       "os": [
         "darwin"
@@ -15,7 +15,7 @@
         "ws": "8.21.3"
       },
       "bin": {
-        "embassy": "dist/src/gateway/cli.js"
+        "embassy": "dist/src/gateway/core-cli.js"
       },
       "devDependencies": {
         "@types/node": "24.10.1",

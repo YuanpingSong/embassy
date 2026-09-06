@@ -638,6 +638,52 @@ test("accepted handle keeps steering on one connector with exact cap and key", a
   assert.equal(current.counts().semanticWrites, 4);
 });
 
+test("accepted operation defaults to the message deadline and keeps STEER live past two minutes", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const timers: NodeJS.Timeout[] = [];
+  const delays: number[] = [];
+  globalThis.setTimeout = ((callback: (...args: unknown[]) => void, delay?: number) => {
+    delays.push(Number(delay));
+    const timer = originalSetTimeout(callback, Number(delay));
+    timers.push(timer);
+    return timer;
+  }) as typeof setTimeout;
+
+  let nowMs = Date.parse(NOW);
+  const deadlineAt = new Date(nowMs + 10 * 60_000).toISOString();
+  const current = statelessFixture(["accepted-timeout"], false, {
+    now: () => new Date(nowMs),
+    turnTimeoutMs: undefined,
+  });
+  let publish!: (accepted: StatelessCodexAcceptedOperation) => void;
+  const published = new Promise<StatelessCodexAcceptedOperation>((resolve) => { publish = resolve; });
+  const execution = current.operation.execute({
+    ...input(async () => true, "synthetic body", async (accepted) => { publish(accepted); }),
+    deadlineAt,
+  });
+
+  try {
+    const accepted = await published;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(delays.includes(10 * 60_000), true);
+    assert.equal(delays.includes(2 * 60_000), false);
+
+    nowMs += 3 * 60_000;
+    const steer = await accepted.steer({
+      attemptId: "steer-after-old-timeout",
+      authorizeWrite: async () => true,
+      deadlineAt,
+      text: "synthetic steer",
+    });
+    assertState(steer, "terminal", "terminal");
+    emitTerminal(current.transports[0]!);
+    assertState(await execution, "terminal", "terminal");
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+    for (const timer of timers) clearTimeout(timer);
+  }
+});
+
 test("same-connector steer RPC rejection is ambiguous and never replayed", async () => {
   const current = statelessFixture(["steer-reject"], false, { turnTimeoutMs: 100 });
   let publish!: (accepted: StatelessCodexAcceptedOperation) => void;

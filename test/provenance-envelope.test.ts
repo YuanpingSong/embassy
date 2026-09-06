@@ -8,7 +8,8 @@ import {
   composeProvenanceEnvelope,
   type ComposeProvenanceEnvelopeInput,
 } from "../src/gateway/provenance-envelope.js";
-import type { GatewayProvider } from "../src/gateway/types.js";
+import type { EndpointRef } from "../src/gateway/ledger.js";
+type GatewayProvider = EndpointRef["provider"];
 
 const CONVERSATION_ID = "conv_0123456789abcdef";
 
@@ -43,7 +44,7 @@ test("composes the exact Codex-bound provenance envelope", () => {
   assert.equal(
     compose(),
     `<cross-session-message from-name="embassy-pm@this-mac" conversation="conv_0123456789abcdef">
-<embassy-reply-hint conversation="conv_0123456789abcdef" reply-as="codex-main@this-mac" from-provider="claude">Reply by running \`embassy send --conversation conv_0123456789abcdef --from codex-main@this-mac\` with the reply body on stdin. Caller, conversation, and route policy are rechecked.</embassy-reply-hint>
+<embassy-reply-hint conversation="conv_0123456789abcdef" reply-as="codex-main@this-mac" from-provider="claude">Reply by running \`embassy send --conversation conv_0123456789abcdef\` with the reply body on stdin. Caller, conversation, and route policy are rechecked.</embassy-reply-hint>
 Status is green.
 </cross-session-message>`,
   );
@@ -59,14 +60,14 @@ test("composes the exact Claude-bound canonical outer shape", () => {
       body: "PONG",
     }),
     `<cross-session-message from-name="codex-main@this-mac">
-<embassy-reply-hint conversation="conv_0123456789abcdef" reply-as="embassy-pm@this-mac" from-provider="codex">Reply by running \`embassy send --conversation conv_0123456789abcdef --from embassy-pm@this-mac\` with the reply body on stdin. Caller, conversation, and route policy are rechecked.</embassy-reply-hint>
+<embassy-reply-hint conversation="conv_0123456789abcdef" reply-as="embassy-pm@this-mac" from-provider="codex">Reply by running \`embassy send --conversation conv_0123456789abcdef\` with the reply body on stdin. Caller, conversation, and route policy are rechecked.</embassy-reply-hint>
 PONG
 </cross-session-message>`,
   );
 });
 
 test("covers every provider pair through its recipient profile", () => {
-  const providers = ["codex", "claude", "peer"] as const satisfies
+  const providers = ["codex", "claude"] as const satisfies
     readonly GatewayProvider[];
 
   for (const sourceProvider of providers) {
@@ -91,7 +92,7 @@ test("covers every provider pair through its recipient profile", () => {
         ),
       );
       assert.equal(
-        envelope.match(/ from-provider="(?:codex|claude|peer)"/gu)
+        envelope.match(/ from-provider="(?:codex|claude)"/gu)
           ?.length,
         1,
       );
@@ -101,30 +102,13 @@ test("covers every provider pair through its recipient profile", () => {
 
 test("provider attribution is independent of alias spelling", () => {
   const envelope = compose({
-    sourceProvider: "peer",
+    sourceProvider: "claude",
     recipientProvider: "codex",
     sourceAlias: "codex-looking@this-mac",
   });
   assert.ok(envelope.includes(' from-name="codex-looking@this-mac"'));
-  assert.ok(envelope.includes(' from-provider="peer"'));
+  assert.ok(envelope.includes(' from-provider="claude"'));
   assert.doesNotMatch(envelope, / from-provider="codex"/u);
-});
-
-test("peer provenance permits its store-vetted same-provider route", () => {
-  assert.match(compose({ sourceProvider: "peer", recipientProvider: "peer",
-    sourceAlias: "peer-a@one-mac", targetAlias: "peer-b@two-mac" }),
-  /from-provider="peer"/u);
-});
-
-test("adds one broker-owned queued-ahead marker only for a positive Codex count", () => {
-  assert.equal(
-    compose({ queuedAhead: 2 }),
-    `<cross-session-message from-name="embassy-pm@this-mac" conversation="conv_0123456789abcdef">
-<embassy-reply-hint conversation="conv_0123456789abcdef" reply-as="codex-main@this-mac" from-provider="claude">Reply by running \`embassy send --conversation conv_0123456789abcdef --from codex-main@this-mac\` with the reply body on stdin. Caller, conversation, and route policy are rechecked.</embassy-reply-hint>
-<embassy-queued-ahead count="2">2 earlier messages are queued for this route and will arrive at your next turn boundaries.</embassy-queued-ahead>
-Status is green.
-</cross-session-message>`,
-  );
 });
 
 test("neutralizes only boundary-aware reserved tags in the raw body", () => {
@@ -181,24 +165,6 @@ test("produces deterministic framing and neutralizes an already framed body", ()
   assert.ok(reframed.includes("<\\cross-session-message"));
   assert.ok(reframed.includes("<\\embassy-reply-hint"));
   assert.ok(reframed.includes("<\\/cross-session-message>"));
-});
-
-test("keeps broker-owned marker retries deterministic and single-framed", () => {
-  const input = { queuedAhead: 2 };
-  const first = compose(input);
-  assert.equal(compose(input), first);
-  assert.equal(
-    first.match(/<embassy-queued-ahead(?:\s|>)/giu)?.length,
-    1,
-  );
-
-  const reframed = compose({ ...input, body: first });
-  assert.equal(
-    reframed.match(/<embassy-queued-ahead(?:\s|>)/giu)?.length,
-    1,
-  );
-  assert.ok(reframed.includes("<\\embassy-queued-ahead"));
-  assert.ok(reframed.includes("<\\/embassy-queued-ahead>"));
 });
 
 test("shortens a long Claude display alias without losing its exact identity", () => {
@@ -320,24 +286,6 @@ test("rejects invalid providers, aliases, conversation tokens, and body types", 
   for (const input of invalidInputs) {
     assertBridgeError(
       () => composeProvenanceEnvelope(input),
-      "PROVENANCE_ENVELOPE_INVALID",
-    );
-  }
-
-  for (const queuedAhead of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
-    assertBridgeError(
-      () => compose({ queuedAhead }),
-      "PROVENANCE_ENVELOPE_INVALID",
-    );
-  }
-  for (const recipientProvider of ["claude", "peer"] as const) {
-    assertBridgeError(
-      () =>
-        compose({
-          sourceProvider: "codex",
-          recipientProvider,
-          queuedAhead: 1,
-        }),
       "PROVENANCE_ENVELOPE_INVALID",
     );
   }

@@ -1,86 +1,125 @@
 # Delivery semantics
 
-Embassy tracks every accepted message from CLI acceptance through terminal
-settlement. This document collects the delivery model in one place: queue
-behavior, evidence states, failure handling, retry policy, and the delivery
-tokens that let a sender follow a message to settlement. The material is the
-authoritative reference for what "delivered" does and does not mean inside
-Embassy.
+Embassy gives a sender a durable broker receipt. It does not claim that a model
+understood or acted on the message.
 
----
+## Identity and admission
 
-- **Timing is directional.** After routing and pre-write checks, a Claude-bound body is written immediately to Claude's native mailbox regardless of its observed busy or idle state. Claude being busy is never a reason to hold that write in Embassy's queue. A Codex-bound ordinary body instead waits for the task to become available. An exact leading `STEER:` body from Claude to Codex may be admitted to the active turn at its next tool-call boundary. Embassy never interrupts or injects text mid-generation; a cleanly unavailable boundary falls back to the normal queue. At most three steering messages remain queued per route, with the oldest settled as `cancelled/STEER_QUEUE_SUPERSEDED` when a fourth is accepted.
+An endpoint is identified by the tuple `(opaque endpoint ID, host, provider)`.
+Its `name@host` alias is a lookup index and display label. A send by name
+resolves once, before admission. Every later transition and reply uses the
+endpoint tuple; a rename or replacement cannot retarget old work.
 
-- **Acceptance is not completion.** Initial CLI acceptance returns a conversation token and a delivery token. For Claude-bound delivery, `transport_written` means the native mailbox write completed and is the terminal `delivered` boundary; Embassy does not wait for evidence that Claude later read or consumed the body. Toward Codex, `delivered` means the App Server accepted the turn. Neither boundary means a model read, understood, or completed the work.
+Codex callers must already be registered. A Claude caller is derived from its
+inherited native socket and recorded under the exact discovered session UUID.
+The caller never supplies `--from`. A remote source is attested by its owning
+SSH-authenticated gateway and admitted directly; the destination does not wait
+for a catalog poll before accepting first contact.
 
-- **Shell peers acknowledge stdout.** A `peer-*` delivery requires a live `embassy await` waiter. With none, dispatch defers cleanly as `PEER_NOT_AWAITING`. Embassy arms the exact prepared frame, hands it to the waiter, and settles `delivered` only after the CLI has flushed that complete frame to stdout and returned the private receipt. A lost receipt is `unconfirmed`; uncertainty after arming is `ambiguous`. One waiter is allowed per registration and 16 globally; waiter, receipt, and duplicate-ack tombstone state is memory-only.
+Admission validates the body, deadline, route capacity, byte capacity, rate
+limit, and exact local endpoint identities in one state transaction. It returns
+a private delivery token and a conversation reference. A repeated federated
+message ID is idempotent only when every identity and message field matches;
+two deliberate sends with equal bodies remain two messages.
 
-- **Recipients get provenance and a reply path.** Immediately before the provider write, Embassy puts every routed body inside one broker-owned `<cross-session-message>` textual frame. Its first element is an `<embassy-reply-hint>` with the full conversation token, the recipient's exact alias, and the corresponding `embassy send --conversation` command. A recipient may continue with that exact token, but caller identity, conversation membership, and current route policy are rechecked at reply time.
+## One wake, several messages
 
-- **Evidence has three shapes.** `delivered` means the direction's terminal provider boundary was observed. A confirmed Claude mailbox write reaches that boundary immediately. `unconfirmed` means Embassy cannot prove the required terminal boundary despite partial dispatch evidence; it is not a later downgrade from a confirmed Claude mailbox write. `ambiguous` means the write outcome itself is unknown. All three are terminal, and neither `unconfirmed` nor `ambiguous` is a retry authorization — inspect the recipient instead, because a resend can duplicate the message.
+For one exact destination and delivery class, the coordinator freezes the
+oldest bounded FIFO prefix into one native wake. Each enclosed message keeps a
+separate provenance envelope, conversation, deadline, and terminal result. A
+busy endpoint therefore catches up in one wake instead of requiring one agent
+turn per queued message.
 
-- **Native failures.** A Claude-originated route or delivery failure settles as native `expired`; its native acknowledgement always retains the normalized safe code in the reason field. The default `merged` notice mode keeps the early stall frame but suppresses the duplicate terminal `<gateway-delivery-diagnostic>` user frame. `verbose` restores that readable diagnostic frame; `quiet` suppresses all gateway-authored user-frame notices, including stalls, while native status remains truthful. No notice contains a path, native identifier, exception, or message body. `denied` is reserved for a real user or policy refusal and is not authored by Embassy. `held` and transport-written are progress, never success.
-- **Native held is attempt-then-ack.** For Claude→Codex ingress, Embassy first attempts the exact immediate dispatch. A terminal result observed before the one-second prompt boundary produces only its terminal acknowledgement. Native `held` is sent only when the body actually remains queued (including a busy route or clean provider deferral) or dispatch is still nonterminal at that boundary; the terminal acknowledgement follows later. Claude's rendered “approved and released” notice means only that the gateway accepted and released the body to the recipient queue. It does not mean a model read it, and it does not imply human approval.
+The batch is bounded by message count, raw queue bytes, framed wake bytes, and
+the adapter's operation limit. A message that expires or cannot fit reports its
+own result; it does not erase or silently merge another message.
 
-- **Retries are conservative.** Undispatched Codex-bound messages remain queued while the task is busy or temporarily unavailable. Each attempt opens a fresh App Server transport; registration and connector observation never certify reachability. A clean pre-write deferral may return reserved work to the queue. Once the body write is armed, uncertainty is terminal and never replayed. A Claude-bound body may remain queued only for a pre-write route failure or temporary unavailability, never merely because Claude is observed busy. A confirmed delivery failure settles; an ambiguous write is never retried automatically.
+## Durable phases
 
-- **Bounded by design.** Bodies, queues, rate windows, deduplication tables, deadlines, and transient conversations all have fixed limits.
+Each delivery has exactly one of these phases:
 
-- **A displaced route's work settles `cancelled` with `ENDPOINT_RETIRED`.** A Claude session's route is installed on first use and belongs to one (host, session UUID) identity. When a different session claims a name that a route already holds, the broker retires the displaced route: its queued and reserved work settles `cancelled` with the safe code `ENDPOINT_RETIRED`, armed work settles `ambiguous`, and provider-accepted work settles `unconfirmed`. Nothing is replayed against the new session, and the retirement is journaled so `embassy status` shows it.
-- **Restarts keep clean work only.** Queued and reserved bodies persist under bounded retention and may resume once against the same logical route. Armed or accepted work at crash settles ambiguous or unconfirmed and is never replayed. Each retained message keeps its opaque delivery token and status in the private v5 state, so the sender can continue checking that exact attempt after restart. No pending waiter, shell receipt, reply, or conversation capability survives.
+1. `queued` — durably admitted, no operation owns it.
+2. `reserved` — a specific attempt owns a fixed batch, but no write is
+   authorized.
+3. `armed` — the exact prepared bytes and identities were revalidated and the
+   provider may be written.
+4. `accepted` — the provider accepted the operation; Embassy continues to
+   track its lifetime.
+5. `terminal` — `delivered`, `failed`, `cancelled`, `expired`, `ambiguous`, or
+   `unconfirmed` with a safe code.
 
-Accepted messages are tracked toward terminal delivery while the broker and provider connections remain healthy. `embassy status` distinguishes acceptance, progress, delivery, expiry, failure, ambiguity, and abandonment.
+Only an adapter's positive proof that it wrote nothing may return reserved or
+armed work to `queued`. Loss before authorization may retry within the deadline
+and attempt budget. Loss after an armed write is `ambiguous`; loss after
+provider acceptance is the adapter's recorded `ambiguous` or `unconfirmed`
+outcome. Neither is replayed.
 
-## Provenance framing and recipient replies
+On broker restart, queued work remains eligible, reserved work returns to the
+queue, armed work becomes `ambiguous`, and accepted work becomes its stored
+uncertain outcome. A terminal result is first-wins, including late or duplicate
+provider callbacks.
 
-The store, queue, classification, deduplication, rate limiting, and 16 KiB
-acceptance limit all operate on the raw body. At the last provider
-boundary, Embassy deterministically composes exactly one authoritative textual
-frame:
+## Native adapters
 
-- Toward Codex, the outer `cross-session-message` carries the exact verified
-  source alias in `from-name` and the full token in `conversation`.
-- Toward Claude, the outer frame uses only Claude Code's canonical bounded
-  `from-name`. A source alias longer than 64 characters gets a deterministic
-  64-character display label; the first reply hint retains the exact alias in
-  `from-alias`. Claude's outer frame does not carry `conversation` because that
-  attribute is not part of its canonical parser.
-- In both directions, the first `embassy-reply-hint` carries `conversation`,
-  `reply-as`, and the exact stdin-based reply command. `reply-as` is the
-  recipient's alias, never the sender's. The hint states that caller,
-  conversation, and route policy are rechecked.
+### Claude destination
 
-The full `conv_` conversation token is a transient participant-scoped locator,
-not enough authority by itself. The recipient can use the delivered full token, while the
-broker still validates inherited caller identity, current conversation
-membership, and current route policy. Never reconstruct a token from
-the suffix exposed by metadata-only views.
+The broker discovers the exact compatible live session, verifies its private
+socket and workspace boundary, composes the complete bounded provenance batch,
+then revalidates the same endpoint immediately before the peer-protocol write.
+The receiving Claude session wakes through its native socket.
 
-This is Claude-compatible textual framing, not general XML, a cryptographic
-signature, or proof that the body is safe. Embassy composes the genuine outer
-frame and hint from validated broker metadata. In the untrusted raw body only,
-it case-insensitively neutralizes boundary-shaped opening or closing occurrences
-of all three reserved tags — `cross-session-message`, `embassy-reply-hint`, and
-`embassy-queued-ahead` — by inserting `\` immediately
-after their leading `<`. The rest of the body remains byte-for-byte text.
-Native Claude wrappers received inside a body are therefore untrusted nested
-text beneath Embassy's single authoritative outer frame.
+### Codex destination
 
-The full conversation token travels only in the accepted control result and
-transient provider payload; the composed envelope itself is payload-only.
-Aliases retain their existing sanitized public-metadata behavior. The full
-token is never persisted, journaled, logged, snapshotted, or placed in a
-receipt. A framing, metadata, or size failure happens
-before the provider write and settles as a clean failure; it is never
-classified as an ambiguous write or replayed.
+The broker creates a fresh bounded App Server operation, resumes the exact
+registered task without retaining returned history, prepares the input, then
+revalidates the registration and operation immediately before the write. The
+accepted operation remains attached until its terminal lifetime event so an
+active-turn STEER has a valid target.
 
-## Delivery tokens
+An exact leading `STEER:` is special only from Claude to Codex. It is delivered
+through that exact accepted operation's `turn/steer` capability at the next
+safe tool-call boundary. It never invokes `turn/interrupt` or injects during a
+generation. A cleanly unavailable boundary returns the message to the ordinary
+bounded queue. At most three queued STEER messages target one route.
 
-Every accepted `send`, whether addressed by route or by conversation, returns a delivery token: `dlv_` followed by exactly 24 base64url characters. It addresses one bounded private v5 message/status row and is not a provider receipt handle. The token is persisted only in the mode-0600 broker state; it never enters a public snapshot, normal log, or provider receipt.
+### SSH destination
 
-```bash
-embassy delivery-status --token dlv_<token>
-embassy wait-delivery --token dlv_<token>
+The source gateway resolves the exact endpoint at its owner, prepares one
+bounded handoff, and writes it once through the authenticated SSH peer. The
+destination verifies the peer host and source attestation, persists its queue,
+then returns acceptance. A proven pre-enqueue refusal is
+reported precisely; process loss, malformed response, or failure after the
+commit boundary is uncertain and never retried automatically.
+
+## Provenance and replies
+
+Every native wake contains one `<cross-session-message>` envelope per message.
+Reserved tag prefixes in user text are neutralized before framing. Public
+metadata contains aliases, providers, and a conversation reference, never a
+native session/task ID or socket path.
+
+The enclosed reply hint is:
+
+```sh
+embassy send --conversation <reference>
 ```
 
-`delivery-status` reads the retained status once. `wait-delivery` polls until the message is terminal or the delivery deadline passes. It exits `0` only for `delivered`, `6` for any other terminal state (`unconfirmed`, `expired`, `failed`, `ambiguous`, or `cancelled`), `3` for an unknown token, and `4` for a local wait timeout — which is not a terminal state and does not authorize a resend. A retained pre-restart token continues to resolve after restart; `found: false` means that exact token is not present in the bounded state, for example after terminal retention eviction.
+The caller is inferred again. The ledger accepts the reply only from one exact
+participant and targets the other exact participant. A reference can survive a
+broker restart while its bounded retained row and both endpoint identities are
+still valid. Retirement, replacement, retention expiry, eviction, or state
+reset makes it unavailable. Conversation references are intentionally not
+stable across a reset.
+
+## Receipts and retirement
+
+`embassy delivery-status --token <token>` is a one-shot read.
+`embassy wait-delivery --token <token>` polls the private broker control socket
+until that delivery becomes terminal or its bounded wait ends. Delivery tokens
+are opaque capabilities and must not be put in logs or provider messages.
+
+`embassy retire --alias <local-name>` removes the resolved local endpoint in
+one transaction. Incident queued/reserved work becomes `cancelled`; armed work
+becomes `ambiguous`; accepted work becomes `unconfirmed`. Recent retirement
+evidence remains bounded. Remote routes are read-only and must be retired on
+their owner. No pending message is moved to another identity.

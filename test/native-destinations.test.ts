@@ -7,7 +7,7 @@ import test from "node:test";
 
 import { BridgeError } from "../src/errors.js";
 import { ClaudePeerAdapter } from "../src/gateway/claude-peer.js";
-import type { WakeInput } from "../src/gateway/coordinator.js";
+import type { WakeInput, WakeResult } from "../src/gateway/coordinator.js";
 import type { Endpoint } from "../src/gateway/ledger.js";
 import { ClaudeDestination, CodexDestination } from "../src/gateway/native-destinations.js";
 import type {
@@ -39,6 +39,7 @@ function wake(target: Endpoint, overrides: Partial<WakeInput> = {}): WakeInput {
     text: "<cross-session-message>one\n<cross-session-message>two",
     deadline: Date.now() + 60_000,
     steer: false,
+    messages: [],
     authorize: async () => true,
     accepted: async () => undefined,
     ...overrides,
@@ -75,8 +76,10 @@ test("Claude destination re-discovers exact identity and performs only after aut
           frameBytes: 81,
           sha256: "a".repeat(64),
           cancel: () => events.push("cancel"),
-          perform: async () => {
-            events.push("perform");
+          perform: async (authorize: () => Promise<boolean>) => {
+            events.push("reattest");
+            assert.equal(await authorize(), true);
+            events.push("write");
             return { messageId: "00000000-0000-4000-8000-000000000001",
               transportStatus: "transport_written" };
           },
@@ -93,7 +96,7 @@ test("Claude destination re-discovers exact identity and performs only after aut
     },
   }));
   assert.deepEqual(result, { outcome: "delivered", code: "DELIVERED" });
-  assert.deepEqual(events, ["workspace", "prepare", "authorize", "perform"]);
+  assert.deepEqual(events, ["workspace", "prepare", "reattest", "authorize", "write"]);
   assert.deepEqual(Object.keys(optionsSeen as object), ["deadlineAt"]);
 });
 
@@ -187,7 +190,7 @@ test("Claude destination wakes a real test-owned native socket without reply art
 });
 
 test("Claude destination preserves clean refusal and authorization uncertainty", async () => {
-  let performed = 0;
+  let writes = 0;
   let cancelled = 0;
   const peer = {
     discover: async () => ({ peers: [{ targetId: claude.handle, alias: "advisor", kind: "bg" as const,
@@ -196,8 +199,20 @@ test("Claude destination preserves clean refusal and authorization uncertainty",
     assertTargetWorkspaceDisjoint: async () => undefined,
     prepareSend: async () => ({ messageId: "00000000-0000-4000-8000-000000000001",
       frameBytes: 5, sha256: "b".repeat(64), cancel: () => { cancelled += 1; },
-      perform: async () => { performed += 1; return { messageId: "00000000-0000-4000-8000-000000000001" as const,
-        transportStatus: "transport_written" as const }; } }),
+      perform: async (authorize: () => Promise<boolean>) => {
+        let authorized: boolean;
+        try {
+          authorized = await authorize();
+        } catch {
+          throw new BridgeError("WRITE_AUTHORIZATION_UNCERTAIN", "uncertain");
+        }
+        if (!authorized) {
+          throw new BridgeError("WRITE_AUTHORIZATION_DENIED", "denied", true);
+        }
+        writes += 1;
+        return { messageId: "00000000-0000-4000-8000-000000000001" as const,
+          transportStatus: "transport_written" as const };
+      } }),
     close: async () => undefined,
   };
   const denied = new ClaudeDestination({ host: "m5dev", stateRoot: "/state", peer });
@@ -207,7 +222,7 @@ test("Claude destination preserves clean refusal and authorization uncertainty",
   assert.deepEqual(await uncertain.deliver(wake(claude, { authorize: async () => {
     throw new Error("lost authorization reply");
   } })), { outcome: "ambiguous", code: "WRITE_AUTHORIZATION_UNCERTAIN" });
-  assert.deepEqual([performed, cancelled], [0, 2]);
+  assert.deepEqual([writes, cancelled], [0, 0]);
 
   const missing = new ClaudeDestination({ host: "m5dev", stateRoot: "/state", peer: {
     ...peer,
@@ -226,10 +241,65 @@ test("Claude destination preserves clean refusal and authorization uncertainty",
       ...peer,
       prepareSend: async () => ({ messageId: "00000000-0000-4000-8000-000000000001",
         frameBytes: 5, sha256: "b".repeat(64), cancel: () => undefined,
-        perform: async () => { throw error; } }),
+        perform: async (authorize: () => Promise<boolean>) => {
+          assert.equal(await authorize(), true);
+          throw error;
+        } }),
     } });
     assert.deepEqual(await postAuthorization.deliver(wake(claude)), expected);
   }
+});
+
+test("Claude destination authorizes only after asynchronous final re-attestation", async () => {
+  const reattestation = deferred<void>();
+  const release = deferred<void>();
+  let retired = false;
+  let writes = 0;
+  let authorizationCalls = 0;
+  const destination = new ClaudeDestination({
+    host: "m5dev",
+    stateRoot: "/state",
+    peer: {
+      discover: async () => ({ peers: [{ targetId: claude.handle, alias: "advisor",
+        kind: "interactive" as const, status: "idle" as const,
+        compatibility: "compatible" as const }], rejected: {}, truncated: false,
+      entriesScanned: 1, parseableRecords: 1 }),
+      assertTargetWorkspaceDisjoint: async () => undefined,
+      prepareSend: async () => ({
+        messageId: "00000000-0000-4000-8000-000000000001",
+        frameBytes: 5,
+        sha256: "e".repeat(64),
+        cancel: () => undefined,
+        perform: async (authorize: () => Promise<boolean>) => {
+          reattestation.resolve();
+          await release.promise;
+          if (!await authorize()) {
+            throw new BridgeError("WRITE_AUTHORIZATION_DENIED", "retired", true);
+          }
+          writes += 1;
+          return { messageId: "00000000-0000-4000-8000-000000000001",
+            transportStatus: "transport_written" as const };
+        },
+      }),
+      close: async () => undefined,
+    },
+  });
+  const delivery = destination.deliver(wake(claude, {
+    authorize: async () => {
+      authorizationCalls += 1;
+      return !retired;
+    },
+  }));
+  await reattestation.promise;
+  retired = true;
+  release.resolve();
+
+  assert.deepEqual(await delivery, {
+    outcome: "deferred",
+    code: "WRITE_AUTHORIZATION_DENIED",
+  });
+  assert.equal(authorizationCalls, 1);
+  assert.equal(writes, 0);
 });
 
 function transport(
@@ -239,32 +309,118 @@ function transport(
 }
 
 test("Codex destination maps every operation phase without forwarding output", async () => {
-  const cases: Array<[StatelessCodexOperationResult, Readonly<{ outcome: string; code: string }>]> = [
+  const cases: Array<[StatelessCodexOperationResult, WakeResult]> = [
     [{ attemptId: "attempt-1", cleanupConfirmed: true, phase: "clean", state: "deferred",
       safeErrorCode: "ROUTE_BUSY" }, { outcome: "deferred", code: "ROUTE_BUSY" }],
     [{ attemptId: "attempt-1", cleanupConfirmed: true, phase: "clean", state: "failed",
       safeErrorCode: "INPUT_INVALID" }, { outcome: "failed", code: "INPUT_INVALID" }],
     [{ attemptId: "attempt-1", cleanupConfirmed: true, phase: "clean", state: "failed",
-      safeErrorCode: "MESSAGE_EXPIRED" }, { outcome: "expired", code: "MESSAGE_EXPIRED" }],
+      safeErrorCode: "MESSAGE_EXPIRED" }, { outcome: "expired", code: "MESSAGE_EXPIRED", unwritten: true }],
     [{ attemptId: "attempt-1", cleanupConfirmed: true, phase: "armed", state: "ambiguous",
       safeErrorCode: "TRANSPORT_WRITE_FAILED" },
     { outcome: "ambiguous", code: "TRANSPORT_WRITE_FAILED" }],
     [{ attemptId: "attempt-1", cleanupConfirmed: true, phase: "accepted", state: "unconfirmed",
       safeErrorCode: "REQUEST_TIMEOUT" }, { outcome: "unconfirmed", code: "REQUEST_TIMEOUT" }],
     [{ attemptId: "attempt-1", cleanupConfirmed: true, phase: "terminal", state: "terminal",
-      outcome: "completed", replyCode: null, replyText: "must not be forwarded" },
+      outcome: "completed" },
     { outcome: "delivered", code: "DELIVERED" }],
     [{ attemptId: "attempt-1", cleanupConfirmed: true, phase: "terminal", state: "terminal",
-      outcome: "failed", replyCode: null, replyText: null },
+      outcome: "failed" },
     { outcome: "failed", code: "CODEX_TURN_FAILED" }],
     [{ attemptId: "attempt-1", cleanupConfirmed: true, phase: "terminal", state: "terminal",
-      outcome: "interrupted", replyCode: null, replyText: null },
+      outcome: "interrupted" },
     { outcome: "cancelled", code: "CODEX_TURN_INTERRUPTED" }],
   ];
   for (const [native, expected] of cases) {
     const destination = new CodexDestination({ host: "m5dev", operation: transport(async () => native) });
     assert.deepEqual(await destination.deliver(wake(codex)), expected);
   }
+});
+
+test("Codex destination starts a normal turn when STEER has no accepted operation", async () => {
+  let executions = 0;
+  const destination = new CodexDestination({ host: "m5dev", operation: transport(async (input) => {
+    executions += 1;
+    assert.equal(input.kind, "start");
+    assert.equal(input.text, "STEER: begin instead");
+    return { attemptId: input.attemptId, cleanupConfirmed: true,
+      phase: "terminal", state: "terminal", outcome: "completed" };
+  }) });
+
+  assert.deepEqual(await destination.deliver(wake(codex, {
+    attempt: "attempt-steer-fallback",
+    steer: true,
+    text: "STEER: begin instead",
+  })), { outcome: "delivered", code: "DELIVERED" });
+  assert.equal(executions, 1);
+});
+
+test("Codex destination reserves one exact-target start before provider setup", async () => {
+  const entered = deferred<void>();
+  const release = deferred<void>();
+  let executions = 0;
+  const destination = new CodexDestination({ host: "m5dev", operation: transport(async (input) => {
+    executions += 1;
+    entered.resolve();
+    await release.promise;
+    return { attemptId: input.attemptId, cleanupConfirmed: true,
+      phase: "terminal", state: "terminal", outcome: "completed" };
+  }) });
+
+  const first = destination.deliver(wake(codex, { attempt: "attempt-normal" }));
+  await entered.promise;
+  assert.deepEqual(await destination.deliver(wake(codex, {
+    attempt: "attempt-racing-steer",
+    steer: true,
+    text: "STEER: racing start",
+  })), { outcome: "deferred", code: "ROUTE_BUSY" });
+  assert.equal(executions, 1);
+  release.resolve();
+  assert.deepEqual(await first, { outcome: "delivered", code: "DELIVERED" });
+});
+
+test("queued STEER falls back to a new turn after the accepted operation completes", async () => {
+  const acceptedReady = deferred<void>();
+  const completeFirst = deferred<void>();
+  let executions = 0;
+  let activeSteers = 0;
+  const destination = new CodexDestination({ host: "m5dev", operation: transport(async (input) => {
+    executions += 1;
+    if (executions === 1) {
+      await input.onAccepted({
+        attemptId: input.attemptId,
+        turnId: "turn-active",
+        steer: async (steer) => {
+          activeSteers += 1;
+          return { attemptId: steer.attemptId, phase: "clean", state: "deferred",
+            safeErrorCode: "ROUTE_BUSY" };
+        },
+      });
+      acceptedReady.resolve();
+      await completeFirst.promise;
+    } else {
+      assert.equal(input.text, "STEER: retry after completion");
+    }
+    return { attemptId: input.attemptId, cleanupConfirmed: true,
+      phase: "terminal", state: "terminal", outcome: "completed" };
+  }) });
+
+  const first = destination.deliver(wake(codex, { attempt: "attempt-active" }));
+  await acceptedReady.promise;
+  const steer = wake(codex, {
+    attempt: "attempt-queued-steer",
+    steer: true,
+    text: "STEER: retry after completion",
+  });
+  assert.deepEqual(await destination.deliver(steer),
+    { outcome: "deferred", code: "ROUTE_BUSY" });
+  assert.deepEqual([executions, activeSteers], [1, 1]);
+
+  completeFirst.resolve();
+  assert.deepEqual(await first, { outcome: "delivered", code: "DELIVERED" });
+  assert.deepEqual(await destination.deliver(steer),
+    { outcome: "delivered", code: "DELIVERED" });
+  assert.deepEqual([executions, activeSteers], [2, 1]);
 });
 
 test("Codex accepted handle admits exact STEER and lives until completion", async () => {
@@ -281,7 +437,7 @@ test("Codex accepted handle admits exact STEER and lives until completion", asyn
         kind: "codex_turn_steer", bodyBytes: 5, frameBytes: 17,
         sha256: "c".repeat(64) }), true);
       return { attemptId: input.attemptId, phase: "terminal", state: "terminal",
-        outcome: "delivered", replyCode: "REPLY_UNAVAILABLE", replyText: null };
+        outcome: "delivered" };
     },
   };
   const destination = new CodexDestination({ host: "m5dev", operation: transport(async (input) => {
@@ -320,8 +476,7 @@ test("Codex accepted handle admits exact STEER and lives until completion", asyn
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(closed, false);
   completed.resolve({ attemptId: "attempt-1", cleanupConfirmed: true,
-    phase: "terminal", state: "terminal", outcome: "completed",
-    replyCode: null, replyText: "ignored" });
+    phase: "terminal", state: "terminal", outcome: "completed" });
   assert.deepEqual(await start, { outcome: "delivered", code: "DELIVERED" });
   await closing;
   assert.deepEqual(events, ["authorize:61", "accepted:unconfirmed",

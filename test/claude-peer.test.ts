@@ -7,9 +7,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
-  readdir,
   realpath,
-  rename,
   rm,
   symlink,
   unlink,
@@ -25,9 +23,6 @@ import {
   encodeClaudePeerUserFrame,
   type ClaudePeerAdapterOptions,
   type ClaudePeerAdapterTestOverrides,
-  type ClaudePeerInboundMessage,
-  type ClaudePeerListener,
-  type ClaudePeerProtocolNotice,
   type ClaudeProcessIdentity,
 } from "../src/gateway/claude-peer.js";
 
@@ -37,7 +32,6 @@ const SESSION_ONE = "00000000-0000-4000-8000-000000000001";
 const SESSION_TWO = "00000000-0000-4000-8000-000000000002";
 const SESSION_THREE = "00000000-0000-4000-8000-000000000003";
 const MESSAGE_ONE = "00000000-0000-4000-8000-000000000101";
-const MESSAGE_TWO = "00000000-0000-4000-8000-000000000102";
 
 type Fixture = {
   root: string;
@@ -94,11 +88,7 @@ async function fixture(
     connect,
     now,
     createId,
-    createArtifactToken,
     expectedUid,
-    registryRename,
-    registryOperationHook,
-    postBindHook,
     ...productionOverrides
   } = overrides;
   const adapter = new ClaudePeerAdapter(
@@ -106,7 +96,6 @@ async function fixture(
       sessionsDir,
       socketDir,
       connectTimeoutMs: 500,
-      connectionIdleMs: 500,
       ...productionOverrides,
     },
     {
@@ -115,12 +104,6 @@ async function fixture(
       ...(connect === undefined ? {} : { connect }),
       ...(now === undefined ? {} : { now }),
       ...(createId === undefined ? {} : { createId }),
-      ...(createArtifactToken === undefined ? {} : { createArtifactToken }),
-      ...(registryRename === undefined ? {} : { registryRename }),
-      ...(registryOperationHook === undefined
-        ? {}
-        : { registryOperationHook }),
-      ...(postBindHook === undefined ? {} : { postBindHook }),
       userHome: home,
       tempRoots: [systemTemp],
     },
@@ -233,7 +216,7 @@ async function prepareAndPerform(
   const prepared = await current.adapter.prepareSend(targetId, content, {
     deadlineAt: Date.now() + 30_000,
   });
-  return await prepared.perform();
+  return await prepared.perform(async () => true);
 }
 
 async function sendLines(
@@ -764,7 +747,7 @@ test("discovery rejects unsupported peer protocols per record", async (t) => {
   assert.equal(result.parseableRecords, 0);
 });
 
-test("absent and bounded Claude versions remain metadata through delivery", async (t) => {
+test("Claude version metadata never fences discovery or delivery", async (t) => {
   const current = await fixture(t);
   let connections = 0;
   await addPeer(current, {
@@ -797,13 +780,17 @@ test("absent and bounded Claude versions remain metadata through delivery", asyn
     pid: 42_116,
     sessionId: "00000000-0000-4000-8000-000000000004",
     version: "x".repeat(65),
+    handler: (socket) => {
+      connections += 1;
+      socket.resume();
+    },
   });
 
   const result = await current.adapter.discover();
-  assert.equal(result.peers.length, 3);
-  assert.deepEqual(result.rejected, { REGISTRY_INVALID_SCHEMA: 1 });
+  assert.equal(result.peers.length, 4);
+  assert.deepEqual(result.rejected, {});
   assert.equal(result.entriesScanned, 4);
-  assert.equal(result.parseableRecords, 3);
+  assert.equal(result.parseableRecords, 4);
   for (const target of result.peers) {
     await current.adapter.assertTargetWorkspaceDisjoint(
       target.targetId,
@@ -816,29 +803,10 @@ test("absent and bounded Claude versions remain metadata through delivery", asyn
     );
     assert.equal(sent.transportStatus, "transport_written");
   }
-  assert.equal(connections, 3);
+  assert.equal(connections, 4);
 });
 
-test("discovery excludes a marked Embassy helper advertisement before peer accounting", async (t) => {
-  const current = await fixture(t);
-  const helper = await addPeer(current, {
-    pid: 42_116,
-    name: "codex-helper",
-  });
-  const record = JSON.parse(
-    await readFile(helper.registryPath, "utf8"),
-  ) as Record<string, unknown>;
-  record.embassyAdvertisementVersion = 1;
-  await writeFile(helper.registryPath, JSON.stringify(record), { mode: 0o600 });
-
-  const result = await current.adapter.discover();
-  assert.deepEqual(result.peers, []);
-  assert.deepEqual(result.rejected, {});
-  assert.equal(result.entriesScanned, 1);
-  assert.equal(result.parseableRecords, 0);
-});
-
-test("discovery does not mistake an unmarked Claude codex-* name for an Embassy advertisement", async (t) => {
+test("discovery treats names as metadata regardless of provider-like spelling", async (t) => {
   const current = await fixture(t);
   await addPeer(current, { pid: 42_117, name: "codex-cli" });
 
@@ -915,7 +883,6 @@ test("frame codec emits canonical v1 NDJSON and rejects smuggling", () => {
   const encoded = encodeClaudePeerUserFrame({
     messageId: MESSAGE_ONE,
     content: "hello",
-    from: "uds:/synthetic/sockets/123.sock",
   });
   assert.equal(encoded.at(-1), 0x0a);
   assert.deepEqual(JSON.parse(encoded.toString("utf8")), {
@@ -924,17 +891,35 @@ test("frame codec emits canonical v1 NDJSON and rejects smuggling", () => {
     type: "user",
     message: { role: "user", content: "hello" },
     priority: "next",
-    from: "uds:/synthetic/sockets/123.sock",
   });
   assert.throws(() =>
     encodeClaudePeerUserFrame({ messageId: MESSAGE_ONE, content: "" }),
   );
-  assert.throws(() =>
-    encodeClaudePeerUserFrame({
+  assert.throws(
+    () => encodeClaudePeerUserFrame({
       messageId: MESSAGE_ONE,
-      content: "hello",
-      from: "https://example.invalid",
+      content: "é".repeat(129),
+      maxFrameBytes: 256,
     }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "INVALID_PEER_CONTENT",
+  );
+  assert.throws(
+    () => encodeClaudePeerUserFrame({
+      messageId: MESSAGE_ONE,
+      content: "contains\0nul",
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "INVALID_PEER_CONTENT",
+  );
+  assert.throws(
+    () => encodeClaudePeerUserFrame({
+      messageId: MESSAGE_ONE,
+      content: "é".repeat(120),
+      maxFrameBytes: 256,
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError && error.code === "PEER_FRAME_TOO_LARGE",
   );
   assert.throws(() =>
     encodeClaudePeerUserFrame({
@@ -967,6 +952,82 @@ test("preparation revalidates the exact target generation and never retries a ch
       error instanceof BridgeError &&
       error.code === "CLAUDE_PEER_TARGET_UNKNOWN",
   );
+});
+
+test("prepared send refuses a replaced socket generation before connecting", async (t) => {
+  let replacementBytes = 0;
+  const current = await fixture(t, { createId: () => MESSAGE_ONE });
+  const original = await addPeer(current, { pid: 43_151 });
+  const target = await selectFirstPeer(current);
+  const prepared = await current.adapter.prepareSend(
+    target.targetId,
+    "must stay on the prepared socket",
+    { deadlineAt: Date.now() + 30_000 },
+  );
+
+  await new Promise<void>((resolve, reject) =>
+    original.server.close((error) => error ? reject(error) : resolve()),
+  );
+  current.servers.splice(current.servers.indexOf(original.server), 1);
+  const replacement = net.createServer((socket) => {
+    socket.on("data", (chunk) => {
+      replacementBytes += chunk.length;
+    });
+  });
+  await listen(replacement, original.socketPath);
+  current.servers.push(replacement);
+
+  await assert.rejects(
+    prepared.perform(async () => true),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_PEER_TARGET_CHANGED" &&
+      error.recoverable,
+  );
+  assert.equal(replacementBytes, 0);
+});
+
+test("a process change after connect is re-attested before the first byte", async (t) => {
+  const pid = 43_152;
+  let receivedBytes = 0;
+  let current: Fixture;
+  current = await fixture(t, {
+    createId: () => MESSAGE_ONE,
+    connect: (socketPath) => {
+      const socket = net.createConnection({ path: socketPath });
+      socket.once("connect", () => {
+        current.processes.set(pid, {
+          uid: UID,
+          generation: "replacement-after-connect",
+        });
+      });
+      return socket;
+    },
+  });
+  await addPeer(current, {
+    pid,
+    handler: (socket) => {
+      socket.on("data", (chunk) => {
+        receivedBytes += chunk.length;
+      });
+    },
+  });
+  const target = await selectFirstPeer(current);
+  const prepared = await current.adapter.prepareSend(
+    target.targetId,
+    "never write after generation replacement",
+    { deadlineAt: Date.now() + 30_000 },
+  );
+
+  await assert.rejects(
+    prepared.perform(async () => true),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_PEER_TARGET_CHANGED" &&
+      error.recoverable,
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(receivedBytes, 0);
 });
 
 test("preparation follows a session UUID across process and socket rotation", async (t) => {
@@ -1023,19 +1084,15 @@ test("prepared send exposes exact immutable evidence and opens no socket before 
     },
   });
   const target = await selectFirstPeer(current);
-  const replyListener = await current.adapter.listen({
-    onMessage: () => undefined,
-  });
   const prepared = await current.adapter.prepareSend(
     target.targetId,
     "authorized exact frame",
-    { deadlineAt: Date.now() + 30_000, replyListener },
+    { deadlineAt: Date.now() + 30_000 },
   );
   assert.equal(connections, 0);
   const exactFrame = encodeClaudePeerUserFrame({
     messageId: MESSAGE_ONE,
     content: "authorized exact frame",
-    from: replyListener.address,
   });
   assert.equal(prepared.frameBytes, exactFrame.length);
   assert.equal(
@@ -1043,7 +1100,7 @@ test("prepared send exposes exact immutable evidence and opens no socket before 
     createHash("sha256").update(exactFrame).digest("hex"),
   );
 
-  assert.deepEqual(await prepared.perform(), {
+  assert.deepEqual(await prepared.perform(async () => true), {
     messageId: MESSAGE_ONE,
     transportStatus: "transport_written",
   });
@@ -1051,12 +1108,57 @@ test("prepared send exposes exact immutable evidence and opens no socket before 
   assert.equal(connections, 1);
   assert.deepEqual(wire, exactFrame);
   await assert.rejects(
-    prepared.perform(),
+    prepared.perform(async () => true),
     (error: unknown) =>
       error instanceof BridgeError &&
       error.code === "CLAUDE_PEER_PREPARATION_CONSUMED",
   );
   assert.equal(connections, 1);
+});
+
+test("final authorization denial or uncertainty writes no Claude bytes", async (t) => {
+  let connections = 0;
+  let receivedBytes = 0;
+  const current = await fixture(t);
+  await addPeer(current, {
+    pid: 44_153,
+    handler: (socket) => {
+      connections += 1;
+      socket.on("data", (chunk) => {
+        receivedBytes += chunk.length;
+      });
+    },
+  });
+  const target = await selectFirstPeer(current);
+  const denied = await current.adapter.prepareSend(
+    target.targetId,
+    "denied at the final boundary",
+    { deadlineAt: Date.now() + 30_000 },
+  );
+  await assert.rejects(
+    denied.perform(async () => false),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "WRITE_AUTHORIZATION_DENIED" &&
+      error.recoverable,
+  );
+  const uncertain = await current.adapter.prepareSend(
+    target.targetId,
+    "uncertain at the final boundary",
+    { deadlineAt: Date.now() + 30_000 },
+  );
+  await assert.rejects(
+    uncertain.perform(async () => {
+      throw new Error("commit reply lost");
+    }),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "WRITE_AUTHORIZATION_UNCERTAIN" &&
+      !error.recoverable,
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(connections, 2);
+  assert.equal(receivedBytes, 0);
 });
 
 test("cancel and deadline consume prepared sends without opening a socket", async (t) => {
@@ -1081,7 +1183,7 @@ test("cancel and deadline consume prepared sends without opening a socket", asyn
   );
   cancelled.cancel();
   await assert.rejects(
-    cancelled.perform(),
+    cancelled.perform(async () => true),
     (error: unknown) =>
       error instanceof BridgeError &&
       error.code === "CLAUDE_PEER_PREPARATION_CONSUMED",
@@ -1094,7 +1196,7 @@ test("cancel and deadline consume prepared sends without opening a socket", asyn
   );
   now += 1;
   await assert.rejects(
-    expired.perform(),
+    expired.perform(async () => true),
     (error: unknown) =>
       error instanceof BridgeError &&
       error.code === "CLAUDE_PEER_MESSAGE_EXPIRED" &&
@@ -1128,7 +1230,7 @@ test("a prepared post-connect error is ambiguous and non-retryable", async (t) =
     { deadlineAt: Date.now() + 30_000 },
   );
   await assert.rejects(
-    prepared.perform(),
+    prepared.perform(async () => true),
     (error: unknown) =>
       error instanceof BridgeError &&
       error.code === "CLAUDE_PEER_WRITE_AMBIGUOUS" &&
@@ -1156,7 +1258,7 @@ test("a post-connect timeout is ambiguous rather than not-written", async (t) =>
     { deadlineAt: Date.now() + 30_000 },
   );
   await assert.rejects(
-    prepared.perform(),
+    prepared.perform(async () => true),
     (error: unknown) =>
       error instanceof BridgeError &&
       error.code === "CLAUDE_PEER_WRITE_AMBIGUOUS" &&
@@ -1184,1316 +1286,10 @@ test("a write that hangs across the canonical deadline is ambiguous, not expired
     { deadlineAt: Date.now() + 200 },
   );
   await assert.rejects(
-    prepared.perform(),
+    prepared.perform(async () => true),
     (error: unknown) =>
       error instanceof BridgeError &&
       error.code === "CLAUDE_PEER_WRITE_AMBIGUOUS" &&
       !error.recoverable,
   );
-});
-
-test("anonymous callback listener bounds NDJSON and marks registered peers untrusted", async (t) => {
-  const current = await fixture(t);
-  const peer = await addPeer(current, { pid: 45_101, name: "advisor" });
-  const messages: ClaudePeerInboundMessage[] = [];
-  const notices: ClaudePeerProtocolNotice[] = [];
-  const listener = await current.adapter.listen({
-    onMessage: (message) => {
-      messages.push(message);
-    },
-    onProtocolNotice: (notice) => {
-      notices.push(notice);
-    },
-  });
-  const canonical = encodeClaudePeerUserFrame({
-    messageId: MESSAGE_TWO,
-    content: "reply from Claude",
-    from: `uds:${peer.socketPath}`,
-  });
-  await sendLines(listener.address.slice(4), [
-    canonical.subarray(0, 7),
-    canonical.subarray(7),
-  ]);
-  await eventually(() => messages.length === 1);
-  assert.equal(messages[0]?.content, "reply from Claude");
-  assert.equal(messages[0]?.sourceAlias, "advisor");
-  assert.equal(messages[0]?.replySupported, true);
-  assert.equal(messages[0]?.trust, "untrusted_same_uid_peer");
-
-  await sendLines(listener.address.slice(4), [
-    '{"type":"rename","name":"takeover"}\n',
-  ]);
-  await eventually(() => notices.length > 0);
-  assert.ok(notices.some((notice) => notice.code === "UNSUPPORTED_FRAME"));
-  assert.equal(messages.length, 1);
-});
-
-test("callback refuses connect-back addresses without a live exact registry", async (t) => {
-  const current = await fixture(t);
-  const messages: ClaudePeerInboundMessage[] = [];
-  const notices: ClaudePeerProtocolNotice[] = [];
-  const listener = await current.adapter.listen({
-    onMessage: (message) => {
-      messages.push(message);
-    },
-    onProtocolNotice: (notice) => {
-      notices.push(notice);
-    },
-  });
-  const frame = encodeClaudePeerUserFrame({
-    messageId: MESSAGE_ONE,
-    content: "spoofed callback",
-    from: `uds:${path.join(current.socketDir, "49999.sock")}`,
-  });
-  await sendLines(listener.address.slice(4), [frame]);
-  await eventually(() => notices.length === 1);
-  assert.equal(notices[0]?.code, "UNREGISTERED_REPLY_ADDRESS");
-  assert.equal(messages.length, 0);
-});
-
-test("transient reply addresses resolve only to the exact logical session UUID", async (t) => {
-  const current = await fixture(t);
-  const peer = await addPeer(current, { pid: 45_201, name: "reviewer" });
-  const resolved = await current.adapter.resolveReplyAddress(
-    `uds:${peer.socketPath}`,
-  );
-  assert.deepEqual(Object.keys(resolved).sort(), [
-    "alias",
-    "compatibility",
-    "kind",
-    "status",
-    "targetId",
-  ]);
-  assert.equal(resolved.alias, "reviewer");
-  assert.ok(!JSON.stringify(resolved).includes(peer.socketPath));
-  assert.ok(!JSON.stringify(resolved).includes("45201"));
-  await assert.rejects(
-    current.adapter.resolveReplyAddress(
-      `uds:${path.join(current.root, "outside.sock")}`,
-    ),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "UNREGISTERED_REPLY_ADDRESS",
-  );
-});
-
-test("listener advertises one native codex peer and removes it on close", async (t) => {
-  const current = await fixture(t, { createId: () => SESSION_ONE });
-  const listener = await current.adapter.listen({ onMessage: () => undefined });
-  const registryPath = path.join(current.sessionsDir, `${process.pid}.json`);
-
-  await listener.advertise("codex-isolated-test", current.workspace);
-  const record = JSON.parse(await readFile(registryPath, "utf8")) as Record<
-    string,
-    unknown
-  >;
-  assert.equal(record.pid, process.pid);
-  assert.equal(record.name, "codex-isolated-test");
-  assert.equal(record.embassyAdvertisementVersion, 1);
-  assert.equal(record.kind, "interactive");
-  assert.equal(record.messagingSocketPath, listener.address.slice(4));
-
-  await listener.updateAdvertisedStatus("waiting");
-  const waiting = JSON.parse(
-    await readFile(registryPath, "utf8"),
-  ) as Record<string, unknown>;
-  assert.equal(waiting.status, "waiting");
-  assert.equal(typeof waiting.statusUpdatedAt, "number");
-
-  await listener.close();
-  await assert.rejects(lstat(registryPath), { code: "ENOENT" });
-});
-
-test("listener advertises bounded unknown Claude version evidence", async (t) => {
-  const current = await fixture(t, {
-    createId: () => SESSION_ONE,
-  });
-  const listener = await current.adapter.listen({ onMessage: () => undefined });
-  const registryPath = path.join(current.sessionsDir, `${process.pid}.json`);
-
-  await listener.advertise("codex-unknown-version", current.workspace);
-  const record = JSON.parse(await readFile(registryPath, "utf8")) as Record<
-    string,
-    unknown
-  >;
-  assert.equal(record.version, "unknown");
-
-  const discovery = await current.adapter.discover();
-  assert.deepEqual(discovery.peers, []);
-  assert.deepEqual(discovery.rejected, {});
-  assert.equal(discovery.entriesScanned, 1);
-  assert.equal(discovery.parseableRecords, 0);
-
-  await listener.close();
-});
-
-test("post-bind registry quarantine confirms exact callback closure", async (t) => {
-  let socketPath: string | undefined;
-  const current = await fixture(t, {
-    postBindHook: async (boundPath) => {
-      socketPath = boundPath;
-      await chmod(current.sessionsDir, 0o755);
-    },
-  });
-
-  await assert.rejects(
-    current.adapter.listen({ onMessage: () => undefined }),
-    (error: unknown) =>
-      error instanceof BridgeError && error.code === "UNSAFE_PEER_DIRECTORY",
-  );
-  assert.ok(socketPath !== undefined);
-  await assert.rejects(lstat(socketPath), { code: "ENOENT" });
-  await chmod(current.sessionsDir, 0o700);
-});
-
-test("post-bind registry quarantine stays fatal after callback replacement", async (t) => {
-  let socketPath: string | undefined;
-  const current = await fixture(t, {
-    postBindHook: async (boundPath) => {
-      socketPath = boundPath;
-      await chmod(current.sessionsDir, 0o755);
-      await rename(boundPath, `${boundPath}.displaced`);
-      await writeFile(boundPath, "foreign callback path", { mode: 0o600 });
-    },
-  });
-
-  await assert.rejects(
-    current.adapter.listen({ onMessage: () => undefined }),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "CLAUDE_PEER_CALLBACK_UNSAFE",
-  );
-  assert.ok(socketPath !== undefined);
-  assert.equal((await lstat(socketPath)).isFile(), true);
-  await chmod(current.sessionsDir, 0o700);
-});
-
-test("listener artifact tokens are fresh across process replacements", async (t) => {
-  const current = await fixture(t, {
-    createArtifactToken: () => "ordinary_old_01",
-  });
-  const oldListener = await current.adapter.listen({
-    onMessage: () => undefined,
-  });
-  const oldArtifactToken = oldListener.generation;
-  assert.equal(oldArtifactToken, "ordinary_old_01");
-  await oldListener.close();
-  await current.adapter.close();
-
-  const replacementAdapter = new ClaudePeerAdapter(
-    {
-      sessionsDir: current.sessionsDir,
-      socketDir: current.socketDir,
-    },
-    {
-      createArtifactToken: () => "ordinary_new_02",
-      userHome: current.home,
-      tempRoots: [current.systemTemp],
-    },
-  );
-  try {
-    const replacement = await replacementAdapter.listen({
-      onMessage: () => undefined,
-    });
-    assert.equal(replacement.generation, "ordinary_new_02");
-    assert.notEqual(replacement.generation, oldArtifactToken);
-    await replacement.close();
-  } finally {
-    await replacementAdapter.close();
-  }
-});
-
-test("listener artifact token factories fail closed on invalid output", async (t) => {
-  const current = await fixture(t, {
-    createArtifactToken: () => "invalid.generation",
-  });
-  await assert.rejects(
-    current.adapter.listen({ onMessage: () => undefined }),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "INVALID_CODEX_PEER_GENERATION",
-  );
-});
-
-test("listener returns native held and delivered statuses to the sending peer", async (t) => {
-  let receiptHandle: string | undefined;
-  const statuses: Array<Record<string, unknown>> = [];
-  const current = await fixture(t);
-  const peer = await addPeer(current, {
-    pid: 47_151,
-    handler: (socket) => {
-      let data = "";
-      socket.setEncoding("utf8");
-      socket.on("data", (chunk) => {
-        data += chunk;
-      });
-      socket.on("end", () => {
-        for (const line of data.split("\n")) {
-          if (line.length > 0) {
-            statuses.push(JSON.parse(line) as Record<string, unknown>);
-          }
-        }
-      });
-    },
-  });
-  await selectFirstPeer(current);
-  const listener = await current.adapter.listen({
-    onMessage: (message) => {
-      receiptHandle = message.receiptHandle;
-    },
-  });
-  await sendLines(listener.address.slice(4), [
-    `${JSON.stringify({
-      type: "user",
-      message: { role: "user", content: "native inbound" },
-      msgV: 1,
-      msg_id: MESSAGE_ONE,
-      priority: "next",
-      from: `uds:${peer.socketPath}`,
-    })}\n`,
-  ]);
-  await eventually(() => receiptHandle !== undefined);
-  await listener.acknowledge(receiptHandle as string, "held");
-  await listener.acknowledge(receiptHandle as string, "delivered");
-  await eventually(() => statuses.length === 2);
-  assert.deepEqual(
-    statuses.map((status) => status.status),
-    ["held", "delivered"],
-  );
-  assert.equal(statuses[0]?.orig_msg_id, MESSAGE_ONE);
-});
-
-test("native acknowledgements follow a session UUID across socket rotation", async (t) => {
-  let now = 10_000;
-  let receiptHandle: string | undefined;
-  const originalStatuses: Array<Record<string, unknown>> = [];
-  const replacementStatuses: Array<Record<string, unknown>> = [];
-  const current = await fixture(t, {
-    now: () => now,
-  });
-  const original = await addPeer(current, {
-    pid: 47_153,
-    sessionId: SESSION_ONE,
-    name: "before-rotation",
-    handler: (socket) => {
-      let data = "";
-      socket.setEncoding("utf8");
-      socket.on("data", (chunk) => {
-        data += chunk;
-      });
-      socket.on("end", () => {
-        originalStatuses.push(JSON.parse(data) as Record<string, unknown>);
-      });
-    },
-  });
-  await selectFirstPeer(current);
-  const listener = await current.adapter.listen({
-    onMessage: (message) => {
-      receiptHandle = message.receiptHandle;
-    },
-  });
-  await sendLines(listener.address.slice(4), [
-    `${JSON.stringify({
-      type: "user",
-      message: { role: "user", content: "survive peer rotation" },
-      msgV: 1,
-      msg_id: MESSAGE_ONE,
-      priority: "next",
-      from: `uds:${original.socketPath}`,
-    })}\n`,
-  ]);
-  await eventually(() => receiptHandle !== undefined);
-
-  now += 101;
-  await unlink(original.registryPath);
-  await addPeer(current, {
-    pid: 47_154,
-    sessionId: SESSION_ONE,
-    name: "after-rotation",
-    handler: (socket) => {
-      let data = "";
-      socket.setEncoding("utf8");
-      socket.on("data", (chunk) => {
-        data += chunk;
-      });
-      socket.on("end", () => {
-        replacementStatuses.push(
-          JSON.parse(data) as Record<string, unknown>,
-        );
-      });
-    },
-  });
-
-  const result = await listener.acknowledge(
-    receiptHandle as string,
-    "delivered",
-  );
-  assert.deepEqual(result, { transportStatus: "transport_written" });
-  await eventually(() => replacementStatuses.length === 1);
-  assert.equal(replacementStatuses[0]?.status, "delivered");
-  assert.equal(replacementStatuses[0]?.orig_msg_id, MESSAGE_ONE);
-  assert.equal(originalStatuses.length, 0);
-  await assert.rejects(
-    listener.acknowledge(receiptHandle as string, "delivered"),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "CLAUDE_PEER_RECEIPT_UNKNOWN",
-  );
-});
-
-test("native ingress quiescence joins admitted hooks, rejects new messages, and preserves receipt writes", async (t) => {
-  let receiptHandle: string | undefined;
-  let messageCount = 0;
-  let releaseHook!: () => void;
-  let markHookStarted!: () => void;
-  const hookStarted = new Promise<void>((resolve) => {
-    markHookStarted = resolve;
-  });
-  const hookGate = new Promise<void>((resolve) => {
-    releaseHook = resolve;
-  });
-  const statuses: Array<Record<string, unknown>> = [];
-  const current = await fixture(t);
-  const peer = await addPeer(current, {
-    pid: 47_152,
-    handler: (socket) => {
-      let data = "";
-      socket.setEncoding("utf8");
-      socket.on("data", (chunk) => {
-        data += chunk;
-      });
-      socket.on("end", () => {
-        for (const line of data.split("\n")) {
-          if (line.length > 0) {
-            statuses.push(JSON.parse(line) as Record<string, unknown>);
-          }
-        }
-      });
-    },
-  });
-  await selectFirstPeer(current);
-  const listener = await current.adapter.listen({
-    onMessage: async (message) => {
-      messageCount += 1;
-      receiptHandle = message.receiptHandle;
-      markHookStarted();
-      await hookGate;
-    },
-  });
-  await sendLines(listener.address.slice(4), [
-    `${JSON.stringify({
-      type: "user",
-      message: { role: "user", content: "admitted before quiesce" },
-      msgV: 1,
-      msg_id: MESSAGE_ONE,
-      priority: "next",
-      from: `uds:${peer.socketPath}`,
-    })}\n`,
-  ]);
-  await hookStarted;
-
-  let quiesced = false;
-  const quiesce = listener.quiesceInbound().then(() => {
-    quiesced = true;
-  });
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.equal(quiesced, false);
-  releaseHook();
-  await quiesce;
-  assert.equal(quiesced, true);
-
-  await listener.acknowledge(receiptHandle as string, "expired", {
-    code: "GATEWAY_SHUTDOWN",
-  });
-  await eventually(() => statuses.length === 1);
-  assert.equal(statuses[0]?.status, "expired");
-
-  await sendLines(listener.address.slice(4), [
-    `${JSON.stringify({
-      type: "user",
-      message: { role: "user", content: "new after quiesce" },
-      msgV: 1,
-      msg_id: MESSAGE_TWO,
-      priority: "next",
-      from: `uds:${peer.socketPath}`,
-    })}\n`,
-  ]).catch(() => undefined);
-  await new Promise<void>((resolve) => setTimeout(resolve, 10));
-  assert.equal(messageCount, 1);
-});
-
-test("native acknowledgements reject a truncated UUID re-resolution before writing and remain retryable", async (t) => {
-  let receiptHandle: string | undefined;
-  const statuses: Array<Record<string, unknown>> = [];
-  const current = await fixture(t, { maxRegistryEntries: 1 });
-  const peer = await addPeer(current, {
-    pid: 47_160,
-    handler: (socket) => {
-      let data = "";
-      socket.setEncoding("utf8");
-      socket.on("data", (chunk) => {
-        data += chunk;
-      });
-      socket.on("end", () => {
-        statuses.push(JSON.parse(data) as Record<string, unknown>);
-      });
-    },
-  });
-  await selectFirstPeer(current);
-  const listener = await current.adapter.listen({
-    onMessage: (message) => {
-      receiptHandle = message.receiptHandle;
-    },
-  });
-  await sendLines(listener.address.slice(4), [
-    `${JSON.stringify({
-      type: "user",
-      message: { role: "user", content: "require a complete receipt scan" },
-      msgV: 1,
-      msg_id: MESSAGE_ONE,
-      priority: "next",
-      from: `uds:${peer.socketPath}`,
-    })}\n`,
-  ]);
-  await eventually(() => receiptHandle !== undefined);
-
-  const extra = await addPeer(current, {
-    pid: 47_161,
-    sessionId: SESSION_TWO,
-  });
-  await assert.rejects(
-    listener.notifyInboundProgress(receiptHandle as string, {
-      kind: "stall",
-      reason: "AWAITING_EXTERNAL_APPROVAL",
-      queuedForMs: 100,
-    }),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "CLAUDE_PEER_RECEIPT_NOT_WRITTEN" &&
-      error.recoverable,
-  );
-  await assert.rejects(
-    listener.acknowledge(receiptHandle as string, "delivered"),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "CLAUDE_PEER_RECEIPT_NOT_WRITTEN" &&
-      error.recoverable,
-  );
-  assert.equal(statuses.length, 0);
-
-  await unlink(extra.registryPath);
-  const result = await listener.acknowledge(
-    receiptHandle as string,
-    "delivered",
-  );
-  assert.deepEqual(result, { transportStatus: "transport_written" });
-  await eventually(() => statuses.length === 1);
-  assert.equal(statuses[0]?.status, "delivered");
-});
-
-test("one bounded native stall frame follows UUID rotation without consuming its receipt", async (t) => {
-  let now = 20_000;
-  let receiptHandle: string | undefined;
-  const originalPayloads: string[] = [];
-  const replacementPayloads: string[] = [];
-  const current = await fixture(t, {
-    now: () => now,
-    maxFrameBytes: 512,
-  });
-  const original = await addPeer(current, {
-    pid: 47_158,
-    sessionId: SESSION_ONE,
-    name: "stall-before-rotation",
-    handler: (socket) => {
-      let data = "";
-      socket.setEncoding("utf8");
-      socket.on("data", (chunk) => {
-        data += chunk;
-      });
-      socket.on("end", () => originalPayloads.push(data));
-    },
-  });
-  await selectFirstPeer(current);
-  const listener = await current.adapter.listen({
-    onMessage: (message) => {
-      receiptHandle = message.receiptHandle;
-    },
-  });
-  await sendLines(listener.address.slice(4), [
-    `${JSON.stringify({
-      type: "user",
-      message: { role: "user", content: "wait through a route stall" },
-      msgV: 1,
-      msg_id: MESSAGE_ONE,
-      priority: "next",
-      from: `uds:${original.socketPath}`,
-    })}\n`,
-  ]);
-  await eventually(() => receiptHandle !== undefined);
-
-  await assert.rejects(
-    listener.notifyInboundProgress(receiptHandle as string, {
-      kind: "stall",
-      reason: "UNSAFE_FREE_FORM_REASON",
-      queuedForMs: 100,
-    } as never),
-    (error: unknown) =>
-      error instanceof BridgeError && error.code === "INVALID_PEER_PROGRESS",
-  );
-
-  now += 101;
-  await unlink(original.registryPath);
-  const replacement = await addPeer(current, {
-    pid: 47_159,
-    sessionId: SESSION_ONE,
-    name: "stall-after-rotation",
-    handler: (socket) => {
-      let data = "";
-      socket.setEncoding("utf8");
-      socket.on("data", (chunk) => {
-        data += chunk;
-      });
-      socket.on("end", () => replacementPayloads.push(data));
-    },
-  });
-
-  const progressResult = await listener.notifyInboundProgress(
-    receiptHandle as string,
-    {
-      kind: "stall",
-      reason: "AWAITING_EXTERNAL_APPROVAL",
-      queuedForMs: Number.POSITIVE_INFINITY,
-    },
-  );
-  assert.deepEqual(progressResult, { transportStatus: "transport_written" });
-  await eventually(() => replacementPayloads.length === 1);
-  assert.equal(originalPayloads.length, 0);
-  assert.ok(Buffer.byteLength(replacementPayloads[0]!, "utf8") <= 513);
-  const progressFrame = JSON.parse(
-    replacementPayloads[0]!.trim(),
-  ) as Record<string, unknown>;
-  assert.equal(progressFrame.type, "user");
-  assert.equal(progressFrame.action, undefined);
-  assert.equal(progressFrame.status, undefined);
-  assert.equal(progressFrame.from, undefined);
-  const progressContent = String(
-    (progressFrame.message as Record<string, unknown>)?.content,
-  );
-  assert.match(progressContent, /^<gateway-delivery-stall /);
-  assert.match(progressContent, /terminal="false"/);
-  assert.match(progressContent, /reason="AWAITING_EXTERNAL_APPROVAL"/);
-  assert.match(progressContent, /queued-for-ms="3600000"/);
-  // Wire contract: the framing tag and its attributes are byte-exact; the
-  // sentence points at `embassy status` and never at a dashboard.
-  assert.equal(progressContent, [
-    '<gateway-delivery-stall terminal="false" reason="AWAITING_EXTERNAL_APPROVAL" queued-for-ms="3600000">',
-    "The local gateway is still waiting to deliver the preceding message. Run `embassy status` for details. Queued mail reaches a busy recipient when its turn ends.",
-    "</gateway-delivery-stall>",
-  ].join("\n"));
-  assert.match(progressContent, /Run `embassy status`/);
-  assert.doesNotMatch(progressContent, /dashboard/i);
-  assert.equal(progressContent.includes("peer_message_status"), false);
-
-  await assert.rejects(
-    listener.notifyInboundProgress(receiptHandle as string, {
-      kind: "stall",
-      reason: "ROUTE_BUSY",
-      queuedForMs: 200,
-    }),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "CLAUDE_PEER_PROGRESS_ALREADY_NOTIFIED",
-  );
-  assert.equal(replacementPayloads.length, 1);
-
-  const terminalResult = await listener.acknowledge(
-    receiptHandle as string,
-    "delivered",
-  );
-  assert.deepEqual(terminalResult, { transportStatus: "transport_written" });
-  await eventually(() => replacementPayloads.length === 2);
-  const terminalFrame = JSON.parse(
-    replacementPayloads[1]!.trim(),
-  ) as Record<string, unknown>;
-  assert.equal(terminalFrame.action, "peer_message_status");
-  assert.equal(terminalFrame.status, "delivered");
-  assert.equal(terminalFrame.orig_msg_id, MESSAGE_ONE);
-  assert.equal(replacement.socketPath.endsWith("47159.sock"), true);
-});
-
-test("a pre-write acknowledgement failure is recoverable and retains its handle", async (t) => {
-  let failBeforeConnect = true;
-  let receiptHandle: string | undefined;
-  const statuses: Array<Record<string, unknown>> = [];
-  const current = await fixture(t, {
-    connect: (socketPath) => {
-      if (!failBeforeConnect) return net.createConnection({ path: socketPath });
-      failBeforeConnect = false;
-      const socket = new EventEmitter() as net.Socket;
-      socket.destroy = (() => socket) as net.Socket["destroy"];
-      socket.setTimeout = (() => socket) as net.Socket["setTimeout"];
-      queueMicrotask(() => socket.emit("error", new Error("pre-connect")));
-      return socket;
-    },
-  });
-  const peer = await addPeer(current, {
-    pid: 47_155,
-    handler: (socket) => {
-      let data = "";
-      socket.setEncoding("utf8");
-      socket.on("data", (chunk) => {
-        data += chunk;
-      });
-      socket.on("end", () => {
-        statuses.push(JSON.parse(data) as Record<string, unknown>);
-      });
-    },
-  });
-  await selectFirstPeer(current);
-  const listener = await current.adapter.listen({
-    onMessage: (message) => {
-      receiptHandle = message.receiptHandle;
-    },
-  });
-  await sendLines(listener.address.slice(4), [
-    `${JSON.stringify({
-      type: "user",
-      message: { role: "user", content: "retry clean pre-write" },
-      msgV: 1,
-      msg_id: MESSAGE_ONE,
-      priority: "next",
-      from: `uds:${peer.socketPath}`,
-    })}\n`,
-  ]);
-  await eventually(() => receiptHandle !== undefined);
-
-  await assert.rejects(
-    listener.acknowledge(receiptHandle as string, "expired", {
-      code: "ROUTE_UNAVAILABLE",
-    }),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "CLAUDE_PEER_RECEIPT_NOT_WRITTEN" &&
-      error.recoverable,
-  );
-  const result = await listener.acknowledge(
-    receiptHandle as string,
-    "delivered",
-  );
-  assert.deepEqual(result, { transportStatus: "transport_written" });
-  await eventually(() => statuses.length === 1);
-  assert.equal(statuses[0]?.status, "delivered");
-});
-
-test("releasing an inbound receipt frees it exactly once without writing", async (t) => {
-  let receiptHandle: string | undefined;
-  let statusConnections = 0;
-  const current = await fixture(t);
-  const peer = await addPeer(current, {
-    pid: 47_157,
-    handler: (socket) => {
-      statusConnections += 1;
-      socket.resume();
-    },
-  });
-  await selectFirstPeer(current);
-  const listener = await current.adapter.listen({
-    onMessage: (message) => {
-      receiptHandle = message.receiptHandle;
-    },
-  });
-  await sendLines(listener.address.slice(4), [
-    `${JSON.stringify({
-      type: "user",
-      message: { role: "user", content: "release without a write" },
-      msgV: 1,
-      msg_id: MESSAGE_ONE,
-      priority: "next",
-      from: `uds:${peer.socketPath}`,
-    })}\n`,
-  ]);
-  await eventually(() => receiptHandle !== undefined);
-
-  assert.equal(
-    listener.releaseInboundReceipt(receiptHandle as string),
-    true,
-  );
-  assert.equal(
-    listener.releaseInboundReceipt(receiptHandle as string),
-    false,
-  );
-  assert.equal(listener.releaseInboundReceipt("unknown-receipt"), false);
-  assert.equal(statusConnections, 0);
-  await assert.rejects(
-    listener.acknowledge(receiptHandle as string, "delivered"),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "CLAUDE_PEER_RECEIPT_UNKNOWN",
-  );
-  assert.equal(statusConnections, 0);
-});
-
-test("receipt capacity explicitly expires rather than forwarding an untracked message", async (t) => {
-  const messages: ClaudePeerInboundMessage[] = [];
-  const notices: ClaudePeerProtocolNotice[] = [];
-  const peerFrames: Array<Record<string, unknown>> = [];
-  const current = await fixture(t, { maxPendingReceipts: 1 });
-  const peer = await addPeer(current, {
-    pid: 47_156,
-    handler: (socket) => {
-      let data = "";
-      socket.setEncoding("utf8");
-      socket.on("data", (chunk) => {
-        data += chunk;
-      });
-      socket.on("end", () => {
-        for (const line of data.trim().split("\n")) {
-          peerFrames.push(JSON.parse(line) as Record<string, unknown>);
-        }
-      });
-    },
-  });
-  await selectFirstPeer(current);
-  const listener = await current.adapter.listen({
-    onMessage: (message) => {
-      messages.push(message);
-    },
-    onProtocolNotice: (notice) => {
-      notices.push(notice);
-    },
-  });
-  const frame = (messageId: string, content: string) =>
-    `${JSON.stringify({
-      type: "user",
-      message: { role: "user", content },
-      msgV: 1,
-      msg_id: messageId,
-      priority: "next",
-      from: `uds:${peer.socketPath}`,
-    })}\n`;
-
-  await sendLines(listener.address.slice(4), [
-    frame(MESSAGE_ONE, "occupy receipt capacity"),
-  ]);
-  await eventually(() => messages.length === 1);
-  await sendLines(listener.address.slice(4), [
-    frame(MESSAGE_TWO, "must be refused explicitly"),
-  ]);
-  await eventually(() => peerFrames.length === 1);
-  assert.equal(messages.length, 1);
-  assert.ok(notices.some((notice) => notice.code === "RECEIPT_LIMIT"));
-  assert.equal(peerFrames[0]?.status, "expired");
-  assert.equal(peerFrames[0]?.orig_msg_id, MESSAGE_TWO);
-  assert.equal(peerFrames[0]?.reason, "GATEWAY_RECEIPT_CAPACITY");
-
-  await listener.acknowledge(
-    messages[0]?.receiptHandle as string,
-    "delivered",
-  );
-  await eventually(() => peerFrames.length === 2);
-  await sendLines(listener.address.slice(4), [
-    frame(
-      "00000000-0000-4000-8000-000000000103",
-      "capacity is available again",
-    ),
-  ]);
-  await eventually(() => messages.length === 2);
-});
-
-test("capacity expiry retains one bounded retry after a clean pre-write failure", async (t) => {
-  const messages: ClaudePeerInboundMessage[] = [];
-  const notices: ClaudePeerProtocolNotice[] = [];
-  const peerFrames: Array<Record<string, unknown>> = [];
-  let connectAttempts = 0;
-  const current = await fixture(t, {
-    maxPendingReceipts: 1,
-    connect: (socketPath) => {
-      connectAttempts += 1;
-      if (connectAttempts !== 1) {
-        return net.createConnection({ path: socketPath });
-      }
-      const socket = new EventEmitter() as net.Socket;
-      socket.destroy = (() => socket) as net.Socket["destroy"];
-      socket.setTimeout = (() => socket) as net.Socket["setTimeout"];
-      queueMicrotask(() => socket.emit("error", new Error("pre-connect")));
-      return socket;
-    },
-  });
-  const peer = await addPeer(current, {
-    pid: 47_162,
-    handler: (socket) => {
-      let data = "";
-      socket.setEncoding("utf8");
-      socket.on("data", (chunk) => {
-        data += chunk;
-      });
-      socket.on("end", () => {
-        for (const line of data.trim().split("\n")) {
-          peerFrames.push(JSON.parse(line) as Record<string, unknown>);
-        }
-      });
-    },
-  });
-  await selectFirstPeer(current);
-  const listener = await current.adapter.listen({
-    onMessage: (message) => {
-      messages.push(message);
-    },
-    onProtocolNotice: (notice) => {
-      notices.push(notice);
-    },
-  });
-  const frame = (messageId: string, content: string) =>
-    `${JSON.stringify({
-      type: "user",
-      message: { role: "user", content },
-      msgV: 1,
-      msg_id: messageId,
-      priority: "next",
-      from: `uds:${peer.socketPath}`,
-    })}\n`;
-
-  await sendLines(listener.address.slice(4), [
-    frame(MESSAGE_ONE, "occupy capacity"),
-  ]);
-  await eventually(() => messages.length === 1);
-  await sendLines(listener.address.slice(4), [
-    frame(MESSAGE_TWO, "retry capacity expiry"),
-  ]);
-
-  await eventually(() => peerFrames.length === 1);
-  assert.equal(connectAttempts, 2);
-  assert.equal(messages.length, 1);
-  assert.ok(notices.some((notice) => notice.code === "RECEIPT_LIMIT"));
-  assert.equal(
-    notices.some((notice) => notice.code === "CALLBACK_ERROR"),
-    false,
-  );
-  assert.equal(peerFrames[0]?.status, "expired");
-  assert.equal(peerFrames[0]?.orig_msg_id, MESSAGE_TWO);
-  assert.equal(peerFrames[0]?.reason, "GATEWAY_RECEIPT_CAPACITY");
-});
-
-test("capacity expiry never replays an ambiguous write and releases its overflow slot", async (t) => {
-  const messages: ClaudePeerInboundMessage[] = [];
-  const notices: ClaudePeerProtocolNotice[] = [];
-  let connectAttempts = 0;
-  const current = await fixture(t, {
-    maxPendingReceipts: 1,
-    connect: () => {
-      connectAttempts += 1;
-      const socket = new EventEmitter() as net.Socket;
-      socket.destroy = (() => socket) as net.Socket["destroy"];
-      socket.setTimeout = (() => socket) as net.Socket["setTimeout"];
-      socket.end = ((
-        _payload: Buffer,
-        _callback: () => void,
-      ) => {
-        queueMicrotask(() => socket.emit("error", new Error("reset")));
-        return socket;
-      }) as net.Socket["end"];
-      queueMicrotask(() => socket.emit("connect"));
-      return socket;
-    },
-  });
-  const peer = await addPeer(current, { pid: 47_163 });
-  await selectFirstPeer(current);
-  const listener = await current.adapter.listen({
-    onMessage: (message) => {
-      messages.push(message);
-    },
-    onProtocolNotice: (notice) => {
-      notices.push(notice);
-    },
-  });
-  const frame = (messageId: string) =>
-    `${JSON.stringify({
-      type: "user",
-      message: { role: "user", content: "capacity ambiguity" },
-      msgV: 1,
-      msg_id: messageId,
-      priority: "next",
-      from: `uds:${peer.socketPath}`,
-    })}\n`;
-
-  await sendLines(listener.address.slice(4), [frame(MESSAGE_ONE)]);
-  await eventually(() => messages.length === 1);
-  await sendLines(listener.address.slice(4), [frame(MESSAGE_TWO)]);
-  await eventually(
-    () =>
-      connectAttempts === 1 &&
-      notices.some((notice) => notice.code === "CALLBACK_ERROR"),
-  );
-  await new Promise((resolve) => setTimeout(resolve, 75));
-  assert.equal(connectAttempts, 1);
-
-  await sendLines(listener.address.slice(4), [
-    frame("00000000-0000-4000-8000-000000000104"),
-  ]);
-  await eventually(() => connectAttempts === 2);
-  assert.equal(messages.length, 1);
-});
-
-test("a second overflow frame is transport-rejected while the bounded capacity slot is occupied", async (t) => {
-  const messages: ClaudePeerInboundMessage[] = [];
-  let connectAttempts = 0;
-  const current = await fixture(t, {
-    maxPendingReceipts: 1,
-    connect: () => {
-      connectAttempts += 1;
-      const socket = new EventEmitter() as net.Socket;
-      socket.destroy = (() => socket) as net.Socket["destroy"];
-      socket.setTimeout = (() => socket) as net.Socket["setTimeout"];
-      queueMicrotask(() => socket.emit("error", new Error("pre-connect")));
-      return socket;
-    },
-  });
-  const peer = await addPeer(current, { pid: 47_164 });
-  await selectFirstPeer(current);
-  const listener = await current.adapter.listen({
-    onMessage: (message) => {
-      messages.push(message);
-    },
-  });
-  const frame = (messageId: string) =>
-    `${JSON.stringify({
-      type: "user",
-      message: { role: "user", content: "bounded overflow" },
-      msgV: 1,
-      msg_id: messageId,
-      priority: "next",
-      from: `uds:${peer.socketPath}`,
-    })}\n`;
-
-  await sendLines(listener.address.slice(4), [frame(MESSAGE_ONE)]);
-  await eventually(() => messages.length === 1);
-  await sendLines(listener.address.slice(4), [frame(MESSAGE_TWO)]);
-  await eventually(() => connectAttempts === 1);
-
-  const transportClosed = new Promise<void>((resolve, reject) => {
-    const socket = net.createConnection({ path: listener.address.slice(4) });
-    const timer = setTimeout(() => {
-      socket.destroy();
-      reject(new Error("overflow transport remained open"));
-    }, 500);
-    socket.on("error", () => undefined);
-    socket.on("close", () => {
-      clearTimeout(timer);
-      resolve();
-    });
-    socket.on("connect", () => {
-      socket.write(frame("00000000-0000-4000-8000-000000000105"));
-    });
-  });
-  await transportClosed;
-  assert.equal(messages.length, 1);
-});
-
-test("capacity clean-write retries release on exhaustion and stop on listener close", async (t) => {
-  const messages: ClaudePeerInboundMessage[] = [];
-  const notices: ClaudePeerProtocolNotice[] = [];
-  let connectAttempts = 0;
-  const current = await fixture(t, {
-    maxPendingReceipts: 1,
-    connect: () => {
-      connectAttempts += 1;
-      const socket = new EventEmitter() as net.Socket;
-      socket.destroy = (() => socket) as net.Socket["destroy"];
-      socket.setTimeout = (() => socket) as net.Socket["setTimeout"];
-      queueMicrotask(() => socket.emit("error", new Error("pre-connect")));
-      return socket;
-    },
-  });
-  const peer = await addPeer(current, { pid: 47_165 });
-  await selectFirstPeer(current);
-  const listener = await current.adapter.listen({
-    onMessage: (message) => {
-      messages.push(message);
-    },
-    onProtocolNotice: (notice) => {
-      notices.push(notice);
-    },
-  });
-  const frame = (messageId: string) =>
-    `${JSON.stringify({
-      type: "user",
-      message: { role: "user", content: "bounded clean failure" },
-      msgV: 1,
-      msg_id: messageId,
-      priority: "next",
-      from: `uds:${peer.socketPath}`,
-    })}\n`;
-
-  await sendLines(listener.address.slice(4), [frame(MESSAGE_ONE)]);
-  await eventually(() => messages.length === 1);
-  await sendLines(listener.address.slice(4), [frame(MESSAGE_TWO)]);
-  await eventually(
-    () =>
-      connectAttempts === 3 &&
-      notices.some((notice) => notice.code === "CALLBACK_ERROR"),
-  );
-
-  await sendLines(listener.address.slice(4), [
-    frame("00000000-0000-4000-8000-000000000106"),
-  ]);
-  await eventually(() => connectAttempts === 4);
-  await listener.close();
-  await new Promise((resolve) => setTimeout(resolve, 75));
-  assert.equal(connectAttempts, 4);
-  assert.equal(messages.length, 1);
-});
-
-test("verbose notices preserve the expired diagnostic frame", async (t) => {
-  let receiptHandle: string | undefined;
-  const frames: Array<Record<string, unknown>> = [];
-  const current = await fixture(t, {
-    deliveryNotices: "verbose",
-  });
-  const peer = await addPeer(current, {
-    pid: 47_152,
-    handler: (socket) => {
-      let data = "";
-      socket.setEncoding("utf8");
-      socket.on("data", (chunk) => {
-        data += chunk;
-      });
-      socket.on("end", () => {
-        for (const line of data.trim().split("\n")) {
-          frames.push(JSON.parse(line) as Record<string, unknown>);
-        }
-      });
-    },
-  });
-  await selectFirstPeer(current);
-  const listener = await current.adapter.listen({
-    onMessage: (message) => {
-      receiptHandle = message.receiptHandle;
-    },
-  });
-  await sendLines(listener.address.slice(4), [
-    `${JSON.stringify({
-      type: "user",
-      message: { role: "user", content: "native inbound failure" },
-      msgV: 1,
-      msg_id: MESSAGE_ONE,
-      priority: "next",
-      from: `uds:${peer.socketPath}`,
-    })}\n`,
-  ]);
-  await eventually(() => receiptHandle !== undefined);
-  await listener.acknowledge(receiptHandle as string, "expired", {
-    code: "ROUTE_UNAVAILABLE",
-  });
-  await eventually(() => frames.length === 2);
-  assert.equal(frames[0]?.status, "expired");
-  assert.equal(frames[0]?.reason, "ROUTE_UNAVAILABLE");
-  assert.equal(frames[1]?.type, "user");
-  const diagnosticContent = String(
-    (frames[1]?.message as Record<string, unknown>)?.content,
-  );
-  assert.match(
-    diagnosticContent,
-    /gateway-delivery-diagnostic status="expired" code="ROUTE_UNAVAILABLE"/,
-  );
-  assert.equal(diagnosticContent, [
-    '<gateway-delivery-diagnostic status="expired" code="ROUTE_UNAVAILABLE">',
-    "The local gateway could not deliver the preceding message. Run `embassy status` for details. Queued mail reaches a busy recipient when its turn ends.",
-    "</gateway-delivery-diagnostic>",
-  ].join("\n"));
-  assert.match(diagnosticContent, /Run `embassy status`/);
-  assert.doesNotMatch(diagnosticContent, /dashboard/i);
-  assert.equal(frames[1]?.from, undefined);
-});
-
-test("merged notices keep stalls but fold expiry diagnostics into native status", async (t) => {
-  let receiptHandle: string | undefined;
-  const frames: Array<Record<string, unknown>> = [];
-  const current = await fixture(t, { deliveryNotices: "merged" });
-  const peer = await addPeer(current, {
-    pid: 47_153,
-    handler: (socket) => {
-      let data = "";
-      socket.setEncoding("utf8");
-      socket.on("data", (chunk) => {
-        data += chunk;
-      });
-      socket.on("end", () => {
-        for (const line of data.trim().split("\n").filter(Boolean)) {
-          frames.push(JSON.parse(line) as Record<string, unknown>);
-        }
-      });
-    },
-  });
-  await selectFirstPeer(current);
-  const listener = await current.adapter.listen({
-    onMessage: (message) => {
-      receiptHandle = message.receiptHandle;
-    },
-  });
-  await sendLines(listener.address.slice(4), [
-    `${JSON.stringify({
-      type: "user",
-      message: { role: "user", content: "merged native inbound failure" },
-      msgV: 1,
-      msg_id: MESSAGE_ONE,
-      priority: "next",
-      from: `uds:${peer.socketPath}`,
-    })}\n`,
-  ]);
-  await eventually(() => receiptHandle !== undefined);
-  assert.deepEqual(
-    await listener.notifyInboundProgress(receiptHandle as string, {
-      kind: "stall",
-      reason: "ROUTE_BUSY",
-      queuedForMs: 150_000,
-    }),
-    { transportStatus: "transport_written" },
-  );
-  await eventually(() => frames.length === 1);
-  assert.equal(frames[0]?.type, "user");
-  assert.match(
-    String((frames[0]?.message as Record<string, unknown>)?.content),
-    /gateway-delivery-stall/,
-  );
-  assert.match(
-    String((frames[0]?.message as Record<string, unknown>)?.content),
-    /Queued mail reaches a busy recipient when its turn ends/,
-  );
-
-  await listener.acknowledge(receiptHandle as string, "expired", {
-    code: "ROUTE_UNAVAILABLE",
-  });
-  await eventually(() => frames.length === 2);
-  assert.equal(frames[1]?.action, "peer_message_status");
-  assert.equal(frames[1]?.status, "expired");
-  assert.equal(frames[1]?.reason, "ROUTE_UNAVAILABLE");
-  assert.equal(
-    frames.some((frame) =>
-      String((frame.message as Record<string, unknown> | undefined)?.content)
-        .includes("gateway-delivery-diagnostic"),
-    ),
-    false,
-  );
-});
-
-test("quiet notices suppress gateway user frames while preserving native expiry truth", async (t) => {
-  let receiptHandle: string | undefined;
-  const frames: Array<Record<string, unknown>> = [];
-  const current = await fixture(t, { deliveryNotices: "quiet" });
-  const peer = await addPeer(current, {
-    pid: 47_154,
-    handler: (socket) => {
-      let data = "";
-      socket.setEncoding("utf8");
-      socket.on("data", (chunk) => {
-        data += chunk;
-      });
-      socket.on("end", () => {
-        for (const line of data.trim().split("\n").filter(Boolean)) {
-          frames.push(JSON.parse(line) as Record<string, unknown>);
-        }
-      });
-    },
-  });
-  await selectFirstPeer(current);
-  const listener = await current.adapter.listen({
-    onMessage: (message) => {
-      receiptHandle = message.receiptHandle;
-    },
-  });
-  await sendLines(listener.address.slice(4), [
-    `${JSON.stringify({
-      type: "user",
-      message: { role: "user", content: "quiet native inbound failure" },
-      msgV: 1,
-      msg_id: MESSAGE_ONE,
-      priority: "next",
-      from: `uds:${peer.socketPath}`,
-    })}\n`,
-  ]);
-  await eventually(() => receiptHandle !== undefined);
-  assert.deepEqual(
-    await listener.notifyInboundProgress(receiptHandle as string, {
-      kind: "stall",
-      reason: "ROUTE_BUSY",
-      queuedForMs: 150_000,
-    }),
-    { transportStatus: "suppressed" },
-  );
-  assert.equal(frames.length, 0);
-
-  await listener.acknowledge(receiptHandle as string, "expired", {
-    code: "ROUTE_UNAVAILABLE",
-  });
-  await eventually(() => frames.length === 1);
-  assert.equal(frames[0]?.action, "peer_message_status");
-  assert.equal(frames[0]?.status, "expired");
-  assert.equal(frames[0]?.reason, "ROUTE_UNAVAILABLE");
-  assert.equal(frames[0]?.type, "control");
-});
-
-test("close is single-flight and shuts the socket after registry cleanup failure", async (t) => {
-  let failUnadvertise = true;
-  let received = 0;
-  const current = await fixture(t, {
-    registryOperationHook: (event) => {
-      if (
-        failUnadvertise &&
-        event.operation === "unadvertise" &&
-        event.phase === "entered"
-      ) {
-        failUnadvertise = false;
-        throw new Error("synthetic unadvertise failure");
-      }
-    },
-  });
-  const listener = await current.adapter.listen({
-    onMessage: () => {
-      received += 1;
-    },
-  });
-  await listener.advertise("codex-close-failure", current.workspace);
-  const callbackPath = listener.address.slice(4);
-  const registryPath = path.join(current.sessionsDir, `${process.pid}.json`);
-
-  const firstClose = listener.close();
-  const concurrentClose = listener.close();
-  assert.strictEqual(concurrentClose, firstClose);
-  await assert.rejects(firstClose, /synthetic unadvertise failure/);
-  assert.equal(listener.closed, true);
-  await assert.rejects(lstat(callbackPath), { code: "ENOENT" });
-  assert.equal(
-    (JSON.parse(await readFile(registryPath, "utf8")) as Record<string, unknown>)
-      .name,
-    "codex-close-failure",
-  );
-  await sendLines(callbackPath, [
-    `${JSON.stringify({
-      type: "user",
-      message: { role: "user", content: "must not arrive" },
-      msgV: 1,
-      msg_id: MESSAGE_ONE,
-      priority: "next",
-    })}\n`,
-  ]).catch(() => undefined);
-  assert.equal(received, 0);
-
-  const retryClose = listener.close();
-  assert.strictEqual(retryClose, firstClose);
-  await assert.rejects(retryClose, /synthetic unadvertise failure/);
-});
-
-test("callback cleanup preserves an observed foreign path replacement", async (t) => {
-  const current = await fixture(t);
-  const listener = await current.adapter.listen({ onMessage: () => undefined });
-  const callbackPath = listener.address.slice(4);
-  await unlink(callbackPath);
-  await writeFile(callbackPath, "foreign replacement", { mode: 0o600 });
-  await assert.rejects(
-    listener.close(),
-    (error: unknown) =>
-      error instanceof BridgeError &&
-      error.code === "CLAUDE_PEER_CALLBACK_CHANGED",
-  );
-  assert.equal(await readFile(callbackPath, "utf8"), "foreign replacement");
 });

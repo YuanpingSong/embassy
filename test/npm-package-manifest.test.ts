@@ -127,14 +127,14 @@ test("package checker rejects missing and regex-shaped extra files", async (t) =
     JSON.stringify([{
       ...report,
       files: report.files.filter(
-        ({ path: packagePath }) => packagePath !== "dist/src/gateway/store.js",
+        ({ path: packagePath }) => packagePath !== "dist/src/gateway/owned-state.js",
       ),
     }]),
     "utf8",
   );
   const missing = runChecker(["--report", reportPath]);
   assert.equal(missing.status, 1);
-  assert.match(missing.stderr, /missing: .*store\.js/);
+  assert.match(missing.stderr, /missing: .*owned-state\.js/);
 
   await writeFile(
     reportPath,

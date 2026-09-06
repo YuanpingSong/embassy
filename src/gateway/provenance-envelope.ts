@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 
 import { BridgeError } from "../errors.js";
-import type { GatewayProvider } from "./types.js";
+import type { EndpointRef } from "./ledger.js";
+type GatewayProvider = EndpointRef["provider"];
 
 export const PROVENANCE_RAW_BODY_MAX_BYTES = 16 * 1024;
 export const PROVENANCE_ENVELOPE_MAX_BYTES = 64 * 1024;
@@ -17,22 +18,15 @@ const LONG_ALIAS_HASH_HEX_LENGTH = 16;
 type ProvenanceRecipientProfile = Readonly<{
   fromNameMaxCodepoints?: number;
   emitConversationAttribute: boolean;
-  allowQueuedAhead: boolean;
 }>;
 
 const PROVENANCE_RECIPIENT_PROFILE_VALUES = {
   claude: Object.freeze({
     fromNameMaxCodepoints: CLAUDE_FROM_NAME_MAX_CODEPOINTS,
     emitConversationAttribute: false,
-    allowQueuedAhead: false,
   }),
   codex: Object.freeze({
     emitConversationAttribute: true,
-    allowQueuedAhead: true,
-  }),
-  peer: Object.freeze({
-    emitConversationAttribute: true,
-    allowQueuedAhead: false,
   }),
 } satisfies Record<GatewayProvider, ProvenanceRecipientProfile>;
 
@@ -47,8 +41,6 @@ export type ComposeProvenanceEnvelopeInput = Readonly<{
   targetAlias: string;
   conversationId: string;
   body: string;
-  /** Older accepted rows on this exact route when a STEER is injected. */
-  queuedAhead?: number;
 }>;
 
 function invalidEnvelope(): never {
@@ -84,12 +76,7 @@ function validateInput(input: ComposeProvenanceEnvelopeInput): void {
     !ALIAS_PATTERN.test(input.targetAlias) ||
     typeof input.conversationId !== "string" ||
     !CONVERSATION_ID_PATTERN.test(input.conversationId) ||
-    typeof input.body !== "string" ||
-    (input.queuedAhead !== undefined &&
-      (!PROVENANCE_RECIPIENT_PROFILES[input.recipientProvider]
-        .allowQueuedAhead ||
-        !Number.isSafeInteger(input.queuedAhead) ||
-        input.queuedAhead < 1))
+    typeof input.body !== "string"
   ) {
     invalidEnvelope();
   }
@@ -154,26 +141,17 @@ export function composeProvenanceEnvelope(
     profile.fromNameMaxCodepoints !== undefined && display.shortened
       ? ` from-alias="${input.sourceAlias}"`
       : "";
-  const replyCommand =
-    `embassy send --conversation ${input.conversationId}` +
-    ` --from ${input.targetAlias}`;
+  const replyCommand = `embassy send --conversation ${input.conversationId}`;
   const hint =
     `<embassy-reply-hint conversation="${input.conversationId}"` +
     ` reply-as="${input.targetAlias}"${exactSourceAttribute}` +
     ` from-provider="${input.sourceProvider}">` +
     `Reply by running \`${replyCommand}\` with the reply body on stdin. ` +
     "Caller, conversation, and route policy are rechecked.</embassy-reply-hint>";
-  const queuedAheadMarker =
-    input.queuedAhead === undefined
-      ? ""
-      : `\n<embassy-queued-ahead count="${input.queuedAhead}">` +
-        `${input.queuedAhead} earlier ${input.queuedAhead === 1 ? "message is" : "messages are"} ` +
-        "queued for this route and will arrive at your next turn " +
-        "boundaries.</embassy-queued-ahead>";
   const body = neutralizeReservedTags(input.body);
   const envelope =
     `<cross-session-message from-name="${fromName}"${conversationAttribute}>\n` +
-    `${hint}${queuedAheadMarker}\n${body}\n</cross-session-message>`;
+    `${hint}\n${body}\n</cross-session-message>`;
 
   if (
     Buffer.byteLength(envelope, "utf8") > PROVENANCE_ENVELOPE_MAX_BYTES

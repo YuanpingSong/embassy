@@ -16,7 +16,6 @@ const DEFAULT_MAX_DEADLINE_MS = 24 * 60 * 60 * 1_000;
 const DEFAULT_MAX_FRAME_BYTES = 1024 * 1024;
 const DEFAULT_MAX_INPUT_BYTES = 64 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
-const DEFAULT_TURN_TIMEOUT_MS = 2 * 60_000;
 const MAX_FAST_TERMINAL_CANDIDATES = 4;
 const SETUP_ABORTED = Symbol("setup-aborted");
 const OUTPUT_NOTIFICATION_OPT_OUTS = [
@@ -323,10 +322,11 @@ function normalizeOptions(
       options.requestTimeoutMs,
       DEFAULT_REQUEST_TIMEOUT_MS,
     ),
-    turnTimeoutMs: positiveInteger(
-      options.turnTimeoutMs,
-      DEFAULT_TURN_TIMEOUT_MS,
-    ),
+    // Accepted operations remain attached through their already-bounded
+    // delivery deadline. Tests may still provide a shorter lifecycle bound.
+    turnTimeoutMs: options.turnTimeoutMs === undefined
+      ? Number.POSITIVE_INFINITY
+      : positiveInteger(options.turnTimeoutMs, DEFAULT_MAX_DEADLINE_MS),
   };
 }
 

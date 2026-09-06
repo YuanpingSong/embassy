@@ -24,9 +24,10 @@ import { test, type TestContext } from "node:test";
 import { pathToFileURL } from "node:url";
 
 import { BridgeError } from "../src/errors.js";
-import { loadGatewayConfig } from "../src/gateway/config.js";
 import { acquireGatewayInstanceLease } from "../src/gateway/instance-lease.js";
-import { GatewayStore } from "../src/gateway/store.js";
+import { createLedgerCodec } from "../src/gateway/ledger-codec.js";
+import { ledgerDefaults } from "../src/gateway/ledger.js";
+import { OwnedStateFile } from "../src/gateway/owned-state.js";
 
 const HOST_LOCK = path.join(
   ".local",
@@ -276,8 +277,10 @@ test(
     const home = await shortHomeFixture(t);
     const stateDir = path.join(home, HOST_ROOT);
     const lease = await acquireGatewayInstanceLease(home);
-    const config = loadGatewayConfig({ EMBASSY_STATE_DIR: stateDir }, { host: "this-mac", nodes: [] });
-    const store = new GatewayStore(config);
+    const store = new OwnedStateFile(
+      stateDir,
+      createLedgerCodec("this-mac", ledgerDefaults),
+    );
 
     await store.initialize();
     assert.equal(

@@ -1,214 +1,145 @@
 # Repository guidance
 
-This repository contains Embassy, a personal, same-user gateway between live
-Claude Code sessions and Codex CLI tasks. Treat process control, state
-ownership, permission behavior, native protocol parsing, provider adapters,
-routing, and delivery settlement as security-sensitive boundaries.
-
-## Required checks
-
-Run `npm run check` after source or test changes. Routine validation must use
-test-owned temporary directories, fake peer sockets, and fake App Server
-transports. It must not enumerate the live Claude registry, connect a real
-Claude peer, attach to a live App Server or SSH host, or make a model request.
-
-A live provider read, connection, or message requires the user's explicit
-authorization for that exact operation. A previous authorization does not make
-live sends routine. Never enable a real provider message in CI.
+Embassy is a personal, same-user gateway between live Claude Code sessions and
+Codex CLI tasks, locally and across user-owned Macs over SSH. Treat identity,
+process control, private state, native protocol parsing, provider writes,
+federation, and delivery settlement as security-sensitive boundaries.
 
 ## Working style
 
-- Prefer the smallest implementation that solves the approved product problem.
-  Avoid speculative abstractions, process ceremony, and extra gates that do not
-  improve the shipped result.
-- Optimize for concrete progress while preserving the security boundaries and
-  required verification in this file. Stop expanding scope once the requested
-  outcome is complete.
-- Use subagents as leverage for substantial independent work or genuinely hard
-  review, not for minute searches or edits. Give each one a clear, non-overlapping
-  result and coordinate shared files explicitly.
-- Keep progress updates concise and outcome-oriented. Spend effort on working
-  code, focused evidence, and user-visible value rather than elaborate planning
-  artifacts.
-- Use Embassy as the exclusive PM coordination channel. Close every
-  PM-initiated task with one reply on its originating conversation when it is
-  ready, blocked, or complete. Do not add new coordination entries to legacy
-  dead-drop files or create another out-of-band channel; treat existing files
-  as read-only archives. If Embassy cannot accept a reply, report the exact
-  failure to the user in the current task and stop unless the sender explicitly
-  authorizes a bounded retry.
+- Prefer the smallest direct implementation of the signed product contract.
+  Remove responsibilities the product no longer owns; do not preserve an old
+  abstraction merely because tests exist for it.
+- Optimize for concrete progress and maintainable code. Avoid ticket ceremony,
+  per-commit accounting, freeze rituals, status reports, and extra gates that
+  do not improve the release candidate.
+- The v4 implementation is engineer-led. Contact the PM only for a decision
+  that changes the signed contract, a blocker only the PM/founder can clear, or
+  the final release-candidate handoff. Use Embassy as the exclusive PM channel.
+- Use subagents for substantial independent work or hard review, with explicit
+  non-overlapping file ownership. Do not delegate minute searches.
+- Preserve unrelated user changes in a dirty worktree. Never write to public
+  main, force-push, move tags, install global packages, or change live service,
+  provider, skill, or sandbox configuration unless explicitly instructed.
 
-### Tickets and budgets
+## Required verification
 
-Every task arrives from the PM pre-priced on two independent axes. The rating
-is part of the spec: it tells you what level of implementation to build, which
-is a product decision, not an engineering one.
+Run `TMPDIR=/tmp npm run check` after source or test changes and before the RC.
+Use the soak suite for scheduling, restart, native transport, or settlement
+changes. Keep CI green when practical during development; CI must be green at
+the RC.
 
-**Effort (E)** is the size budget:
+Routine tests use test-owned temporary directories, fake Claude sockets, fake
+App Server transports, and fake SSH processes. They must not inspect the live
+Claude registry, connect a live provider or SSH host, install a service, or
+make a model request.
 
-| Rating | Line budget | What it buys |
-|---|---|---|
-| E1 | ≤50 changed lines | Happy path only. No new concepts, no recovery machinery. A documented limitation beats an engineered edge. |
-| E2 | ≤200 | Happy path + failure modes users have actually hit. A loud error with an exact safe code IS the handling. At most one new concept. |
-| E3 | ≤500 | Every stated promise tested. Known failures get honest errors; everything beyond gets an assertion, not machinery. |
-| E5 | negotiated in the ticket | Subsystem or redesign scope. |
-| E8 | negotiated | Go all out. Rare, and says so explicitly. |
+A live provider read, connection, message, SSH drill, service mutation, or
+global install requires the user's explicit authorization for that exact
+operation. Previous authorization does not make later live operations routine.
+Never enable live provider activity in CI.
 
-**Blast radius (R)** is the verification depth, and it is a property of the
-code region, not the diff size—one wrong line in settlement outweighs five
-hundred wrong lines of copy:
+## Core architecture
 
-| Rating | Meaning | Verification |
-|---|---|---|
-| R1 | Cosmetic: copy, docs, site. Wrong = someone reads a bad sentence. | Proofread; gate compiles. |
-| R2 | Misleading but harmless: view derivations, CLI hints. Wrong = user misinformed until next release; nothing lost. | Targeted tests + gate. |
-| R3 | Recoverable behavior: dispatch scheduling, discovery, fencing, transports, boot, control plane. Wrong = delay or misroute; settlement stays honest; a restart recovers. | Full gate + soak + one adversarial review. |
-| R4 | Trust and data: store settlement/persistence/migrations, provenance envelope, instance lease, runtime attestation, release pipeline. Wrong = silent loss or false green. | Multi-round adversarial review + live proof. |
+- `ledger.ts` is the pure synchronous transition core. It owns endpoint,
+  delivery, rate, and retirement state but no filesystem, provider, callback,
+  or timer work.
+- `owned-state.ts` owns the single private schema-6 atomic JSON document.
+- `endpoint-directory.ts` owns current alias lookup and exact endpoint
+  resolution.
+- `coordinator.ts` owns batching, scheduling, authorization, and phase-derived
+  loss handling.
+- `native-destinations.ts` provides the Claude-socket and Codex-operation write
+  adapters. `federation.ts` provides the direct SSH adapter and protocol 3.
+- `broker.ts` composes application operations. `broker-control.ts`,
+  `local-control.ts`, and `core-cli.ts` are the closed private control and CLI
+  surfaces. `runtime.ts` owns startup and shutdown ordering.
 
-**Region defaults** (apply mechanically; the ticket may override):
+Do not add another delivery state machine, store, provider-independent engine,
+catalog authority, callback service, activity journal, migration layer, or
+generic provider RPC without an explicit contract change.
 
-- R4: `store.ts` settlement/persistence/migration paths,
-  `provenance-envelope.ts`, `instance-lease.ts`, current-user Claude root
-  derivation in `claude-runtime.ts`, `.github/workflows/release.yml`, package
-  manifest.
-- R3: `service.ts` dispatch/scheduling, `claude-peer.ts`,
-  `codex-app-server.ts`, `codex-local-transport.ts`, `server.ts` boot,
-  `control.ts`, `config.ts`.
-- R2: CLI argument surfaces.
-- R1: `docs/`, README, site, help text.
+## Product and safety invariants
 
-### Hard rules (no judgment required)
+The governing doctrine is
+[What Embassy defends, and what it deliberately does not](SECURITY.md#what-embassy-defends-and-what-it-deliberately-does-not).
+A new audit check must cite a current doctrine sentence. If none applies,
+propose a contract change rather than expanding the boundary through a test.
 
-1. Never guard a case that requires corruption, hand-edited state, or an
-   astronomical event count to reach. Validation rejects it; an assertion
-   documents it.
-2. A failure that settles loudly with an exact safe code is handled. Recovery
-   machinery costs budget the ticket must grant explicitly.
-3. New concepts—a state, an error code, a journal kind, an env var, a config
-   knob—exist only if the ticket's budget names them.
-4. Verify at the ticket's R depth, no deeper. An audit finding that proposes a
-   NEW check must cite the boundary doctrine in SECURITY.md or go to the PM as
-   a queue item—never into the slice.
-5. When the budget and thoroughness conflict, the budget wins. Escalate; don't
-   gold-plate.
-6. **Contest channel:** if a budget is wrong—the E is unachievable for the
-   promises, or the R understates a real consequence—say so with reasons
-   BEFORE building. The channel is expected to be used. What is never
-   acceptable is silently exceeding the budget.
-7. SLICE READY reports: exact file list, src-vs-test diffstat, actual lines vs
-   budget, and any concept added under the budget's allowance.
+- Support Claude→Claude, Claude→Codex, Codex→Claude, and Codex→Codex locally
+  and across directly configured SSH gateways. Sending is one CLI command;
+  receiving wakes the agent natively and never requires polling.
+- Endpoint `(opaque ID, host, provider)` is identity. An alias is current lookup
+  and display data. Resolve a name once; never silently retarget admitted work
+  after rename, replacement, retirement, or catalog change.
+- A Codex task self-registers from inherited `CODEX_THREAD_ID`. Never accept,
+  print, or guess it. A Claude caller is derived from its inherited absolute
+  `CLAUDE_CODE_MESSAGING_SOCKET`; never accept, print, or persist that path.
+  Native IDs may exist only in closed private route state.
+- Every provider write revalidates the exact current local endpoint and exact
+  prepared bytes after preparation. Provider I/O never runs inside an
+  owned-state transaction.
+- Keep delivery phases `queued`, `reserved`, `armed`, `accepted`, and
+  `terminal` distinct. Only positive no-write evidence may requeue work.
+  Reserved work may recover after restart; armed and accepted uncertainty is
+  terminal and is never replayed. Late callbacks cannot downgrade a terminal
+  result.
+- Keep bodies, queues, batches, deadlines, rates, retained rows, protocol
+  frames, and concurrent operations bounded. One wake may carry a bounded FIFO
+  batch, but every message retains its own identity, provenance, receipt, and
+  result.
+- Classify only an exact leading Claude-to-Codex `STEER:`. Use the exact
+  accepted operation's `turn/steer` capability at a safe tool-call boundary;
+  never inject mid-generation or call `turn/interrupt`. A cleanly unavailable
+  boundary returns to the normal bounded queue.
+- Embassy never changes a Codex approval or sandbox policy and never answers
+  an approval. Keep `experimentalApi: true` limited to
+  `thread/resume.excludeTurns: true`; require empty returned turns and never
+  retain provider history or model output.
+- Direct SSH is authenticated by the user's configured `/usr/bin/ssh` process.
+  The destination owns the queue. The source owner attests first contact. Only
+  a protocol-proven pre-enqueue refusal is definite; transport or post-commit
+  uncertainty is never automatically retried.
+- Remote catalogs are bounded memory-only observations. `refresh` may update
+  them; `status` reads them without provider I/O. Exact and named routing always
+  asks the owner. A stale or failed catalog is never routing authority.
+- Public output is a closed projection. Never expose message bodies, native
+  IDs/handles, socket paths, credentials, provider histories, exceptions, or
+  raw frames. Never write protocol diagnostics to stdout.
+- `health` describes local control. `check` proves only the broker's loopback
+  ledger/coordinator/receipt path. Neither proves provider readiness, model
+  comprehension, or cross-machine delivery.
+- State schema 6 and private control protocol 5 are reset-only. Old or unknown
+  state refuses without mutation. There is no converter or compatibility
+  reader. A reset invalidates routes, receipts, and conversations; rollback
+  requires the untouched old state and matching old binary.
+- Preserve exact current-user ownership, modes, symlink, inode, lease, and
+  used-artifact generation checks for every owned/executed path. Unsafe Claude
+  registry evidence may quarantine Claude; unsafe broker-owned authority may
+  refuse startup.
 
-### Send-failure policy
+## Removed responsibilities
 
-A send or reply whose command result is an error, truncation, or ambiguity is
-not a delivery—it is a failed attempt to create one. Verify with read-only
-`status`/`delivery-status`; if no acceptance is confirmed, resend without
-asking, up to three attempts. Escalate to the PM only when a recipient
-explicitly denied the message or three resends have failed. A duplicated
-coordination message is a nuisance; a lost one deadlocks the pipeline, so
-deliverability beats ceremony. Never auto-retry a delivery the recipient's
-user denied: that is consent, not transport.
+Do not reintroduce native Claude sending advertisements/helpers, shell-peer
+registration/token/mailbox/await, automatic Codex-output forwarding, synthetic
+reply callbacks, persisted remote mirrors, pair/selection graphs,
+dashboard/watch streams, delivery-notice modes, general counters/journals, or
+old-state conversion. The broker-only loopback check is not a user endpoint.
 
-For long messages, write the body to a file and pipe it
-(`embassy send --conversation ... < body.md`); never inline `printf` for prose.
+## PM communication failures
 
-## Product invariants
+For a failed Embassy coordination send, inspect read-only status and the exact
+delivery token when one exists. If acceptance is not confirmed, resend the
+same coordination body up to three times. Never retry an ambiguous or
+unconfirmed write, and never retry a send the recipient's user denied. Report
+the exact safe code to the user if the channel still cannot accept the reply.
 
-The governing boundary doctrine is
-[“What Embassy defends, and what it deliberately does not”](SECURITY.md#what-embassy-defends-and-what-it-deliberately-does-not).
-Every new audit check must cite the doctrine sentence it enforces. If no current
-sentence supports it, escalate an explicit doctrine-change proposal rather than
-silently expanding the boundary through a test or hardening patch.
-
-- Keep the shipped launcher macOS-only, foreground, same-machine, and
-  local-host-only. `embassy serve` must not daemonize or listen on TCP or HTTP,
-  and Embassy creates no network listener at all.
-- Keep the control plane on one private Unix-domain socket inside the
-  controller-owned mode-0700 state directory. Controller files are mode 0600.
-- A Codex task self-registers using its inherited `CODEX_THREAD_ID` and a
-  `codex-*` alias. Never accept, print, or guess its thread ID. Registration
-  changes only the durable logical route record; it performs no provider or
-  App Server I/O. Best-effort observation is bounded and display-only, never
-  routing authority or a dispatch gate. Each Codex operation independently
-  attests the current interface and resumes the exact registered task before
-  final write authorization.
-- `register-codex --succeeds` is one atomic logical replacement. It settles
-  queued/reserved work `cancelled`, armed work `ambiguous`, and accepted work
-  `unconfirmed`; removes every incident conversation, reply,
-  or native capability; and installs only the successor. Never add a
-  succession journal, prepared generation, activation, re-anchoring, or
-  recovery choreography.
-- Codex-to-Claude delivery installs the addressed session's route on first
-  use. A send must never resolve an ambiguous name: a current-name collision is
-  a hard `PEER_ALIAS_COLLISION` refusal, never a pick-first delivery.
-- Any exact compatible live same-UID Claude session may reach any registered
-  local `codex-*` or `peer-*` peer, and its own route is installed by that first
-  native send, so the Codex task can reply and address it afterwards. That is
-  the model, not a leak: the OS boundary is the permission and the provenance
-  envelope names the sender, so reachability inbound and outbound are the same
-  fact.
-- Claude's native session UUID is the logical route identity. Current names are
-  mutable lookup aliases; historical names do not resolve. A user-supplied UUID
-  may be accepted as a CLI selector, but Embassy must never print or discover
-  one through public output.
-- Publish at most one marked registry record for a local route (`codex-*` or `peer-*`) per supervised
-  advertisement process. Remove only the exact-owned record and callback socket
-  during graceful shutdown; never modify another process's artifacts.
-- Persist message bodies, opaque delivery tokens, and delivery status only in
-  the bounded mode-0600 broker state needed for the private ledger and
-  queued-delivery recovery. A queued or reserved body may
-  resume once within its deadline and attempt budget after restart. An armed
-  or accepted message settles `ambiguous` or `unconfirmed` and is never
-  replayed. Keep conversations, reply and native capabilities, raw provider
-  frames, callback addresses, socket paths, credentials, provider histories,
-  and tool data memory-only.
-- Closed private route state may retain the Codex thread ID and Claude session
-  UUID needed for logical ownership and per-operation attestation. Native IDs
-  are forbidden from public snapshots, normalized events, aliases, logs,
-  errors, and CLI output.
-- Treat inherited `CLAUDE_CODE_MESSAGING_SOCKET` as a raw absolute path. It may
-  become an in-memory `uds:` capability only; never accept it from an argument,
-  print it, persist it, or instruct the user to prefix it.
-- Classify only an exact leading `STEER:` body in the Claude-to-Codex direction.
-  Deliver it through the exact accepted operation's same-session
-  `turn/steer` capability at the next tool-call boundary; never interrupt or
-  inject mid-generation. A cleanly unavailable boundary falls back to the
-  normal bounded queue. Keep the global kill switch, three-steer cap, and
-  normal receipts. Expose no generic provider RPC escape hatch or
-  approval-response method. Embassy never calls `turn/interrupt`.
-- Embassy never mutates a Codex task's persistent approval or sandbox policy
-  and never answers approvals. Registration—not a read-only-policy classifier—
-  is the gateway reachability boundary.
-- Keep `experimentalApi: true` hard-coded solely for
-  `thread/resume.excludeTurns: true`. Require an empty `thread.turns` response
-  and never retain returned history.
-- Keep runtime routing authority independent of provider version and build
-  metadata. The OS boundary plus the exact owned route and session identity
-  authorizes an attempt; current per-operation transport, strict wire, and
-  correlated-operation facts decide its result.
-- Validate exact OS ownership, path, symlink, lease, state, and used-artifact
-  generation boundaries for Embassy-owned or executed artifacts. Unsafe
-  evidence there, or for Embassy callback, control, or state paths, may refuse
-  broker startup.
-  Unsafe UID or mode evidence for the Claude-owned external sessions registry root
-  quarantines only Claude while the broker and other providers stay available.
-  Require Claude peer protocol 1 per session record; reject another value in
-  isolation and count it loudly. Ignore unknown top-level registry fields while
-  keeping every required and consumed field strict, and expose bounded
-  rejection and observed-empty facts.
-- Treat interface drift and missing optional providers as provider-local
-  degradation. Surface bounded observation freshness, connector health, and
-  the last safe code; do not turn observation or version metadata into routing
-  authority. Fail an unattested operation closed on its responsible route, and
-  never replay an ambiguous write.
-- Preserve bounded queues, messages, callbacks, deadlines, deduplication, rate
-  limits, and conversation tables. Never retry an ambiguous write.
-- Never read, print, copy, accept, persist, or forward credentials, OAuth
-  material, Keychain data, transcripts, provider histories, tool data, or raw
-  diagnostics. Never write protocol diagnostics to stdout.
+Pipe long prose from a temporary file into `embassy send --conversation`; do
+not inline it in a shell argument. Never persist credentials or provider data
+in a coordination artifact.
 
 ## Repository hygiene
 
 Do not commit `node_modules`, `dist`, package archives, local state, logs,
-environment files, Claude configuration, credentials, or live-validation
+environment files, provider/Claude configuration, credentials, or live-drill
 artifacts. Keep public documentation free of personal absolute paths.

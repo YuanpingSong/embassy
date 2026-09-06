@@ -19,7 +19,7 @@ const deferred = <T>() => {
 
 async function fixture(t: TestContext, deliver: (input: WakeInput) => Promise<WakeResult>) {
   const root = await mkdtemp(path.join(await realpath(os.tmpdir()), "emb-v4-coordinator-"));
-  const now = 1_000;
+  let now = 1_000;
   const store = new OwnedStateFile(path.join(root, "state"), createLedgerCodec("local", ledgerDefaults), { now: () => new Date(now) });
   await store.initialize();
   const change = <R>(fn: (ledger: Ledger) => R) => store.transact((state) => fn(new Ledger(state, "local", ledgerDefaults, now)));
@@ -33,9 +33,10 @@ async function fixture(t: TestContext, deliver: (input: WakeInput) => Promise<Wa
   const admit = (body: string, from = source, to = target, steer = false) => change((ledger) => ledger.admit({
     id: `msg_${randomUUID()}`, token: `dlv_${randomBytes(18).toString("base64url")}`, reply: `conv_${randomBytes(24).toString("base64url")}`,
     source: from, target: to, body, deadline: now + 10_000, steer,
+    ...(from.host === "local" ? {} : { sourceAlias: from.alias }),
   }).delivery);
   t.after(async () => { await coordinator.close(); await store.close(); await rm(root, { recursive: true, force: true }); });
-  return { store, coordinator, change, source, target, admit, remote, resolve, root };
+  return { store, coordinator, change, source, target, admit, remote, resolve, root, advance: (ms: number) => { now += ms; } };
 }
 
 const evidence = (input: WakeInput) => ({ bytes: Buffer.byteLength(input.text) + 100, sha256: bodyHash(input.text) });
@@ -137,6 +138,7 @@ test("rename during preparation refuses the old envelope and a later clean attem
   await f.admit("rename me");
   await f.coordinator.wake(f.target);
   assert.equal((await f.store.snapshot()).deliveries[0]?.state.phase, "queued");
+  f.advance(500);
   await f.coordinator.wake(f.target);
   assert.equal(calls, 2);
 });
@@ -159,4 +161,86 @@ test("STEER shares the coordinator but may run while an accepted ordinary turn r
   assert.equal(calls[1]?.steer, true);
   finish.resolve(); await running;
   assert.equal((await f.store.snapshot()).deliveries.filter((d) => d.state.phase === "terminal").length, 2);
+});
+
+test("arrivals during an active wake are not lost to wake coalescing", async (t) => {
+  const entered = deferred<void>(), release = deferred<void>();
+  let calls = 0;
+  const f = await fixture(t, async (input) => {
+    calls++;
+    assert.equal(await input.authorize(evidence(input)), true);
+    if (calls === 1) { entered.resolve(); await release.promise; }
+    return { outcome: "delivered", code: "TRANSPORT_WRITTEN" };
+  });
+  await f.admit("first");
+  const running = f.coordinator.wake(f.target);
+  await entered.promise;
+  await f.admit("later");
+  assert.equal(f.coordinator.wake(f.target), running);
+  release.resolve();
+  await running;
+  assert.equal(calls, 2);
+  assert.equal((await f.store.snapshot()).deliveries.filter((d) => d.state.phase === "terminal").length, 2);
+});
+
+test("clean busy refusals have a real retry cadence, not a caller-speed attempt budget", async (t) => {
+  let calls = 0;
+  const f = await fixture(t, async () => { calls++; return { outcome: "deferred", code: "ROUTE_BUSY" }; });
+  await f.admit("wait");
+  for (let i = 0; i < 100; i++) await f.coordinator.wake(f.target);
+  assert.equal(calls, 1);
+  assert.deepEqual((await f.store.snapshot()).deliveries[0]?.state, { phase: "queued", tries: 1, readyAt: 1_500 });
+  f.advance(500);
+  await f.coordinator.wake(f.target);
+  assert.equal(calls, 2);
+});
+
+test("queued remote provenance survives restart with no remote catalog row", async (t) => {
+  let sent = "";
+  const f = await fixture(t, async (input) => {
+    sent = input.text;
+    assert.equal(await input.authorize(evidence(input)), true);
+    return { outcome: "delivered", code: "TRANSPORT_WRITTEN" };
+  });
+  const source = endpoint("remote-sender", "claude", "remote");
+  await f.admit("first contact", source, f.target);
+  await f.store.close(); await f.store.initialize();
+  await f.change((ledger) => ledger.restart());
+  assert.equal(await f.resolve(source), undefined);
+  await f.coordinator.wake(f.target);
+  assert.match(sent, /from-name="remote-sender@remote"/);
+  assert.match(sent, /first contact/);
+  assert.equal((await f.store.snapshot()).endpoints.some((e) => e.host === "remote"), false);
+});
+
+test("a short batch deadline cannot fail or strand a later valid message", async (t) => {
+  for (const expiry of ["before-authorization", "proven-no-write"] as const) await t.test(expiry, async (t) => {
+    let advance!: () => void, calls = 0;
+    const f = await fixture(t, async (input) => {
+      calls++;
+      if (calls === 1) {
+        if (expiry === "proven-no-write") assert.equal(await input.authorize(evidence(input)), true);
+        advance();
+        if (expiry === "before-authorization") {
+          assert.equal(await input.authorize(evidence(input)), false);
+          return { outcome: "deferred", code: "WRITE_AUTHORIZATION_DENIED" };
+        }
+        return { outcome: "expired", code: "MESSAGE_EXPIRED", unwritten: true };
+      }
+      assert.doesNotMatch(input.text, /short-lived/);
+      assert.match(input.text, /still-valid/);
+      assert.equal(await input.authorize(evidence(input)), true);
+      return { outcome: "delivered", code: "TRANSPORT_WRITTEN" };
+    });
+    const short = await f.admit("short-lived");
+    f.advance(5_000);
+    const later = await f.admit("still-valid");
+    advance = () => f.advance(5_001);
+    await f.coordinator.wake(f.target);
+    const rows = (await f.store.snapshot()).deliveries;
+    assert.equal(rows.find((d) => d.id === short.id)?.state.phase, "terminal");
+    const result = rows.find((d) => d.id === later.id)!.state;
+    assert.equal(result.phase === "terminal" && result.outcome, "delivered");
+    assert.equal(calls, 2);
+  });
 });

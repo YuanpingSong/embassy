@@ -14,7 +14,7 @@ function fixture() {
   const admit = (body = `message ${++sequence}`, from = source, to = target, steer = false) => {
     const id = String(++sequence);
     return ledger().admit({ id, reply: `reply-${id}`, token: `token-${id}`, source: from, target: to,
-      body, deadline: now + 10_000, steer }).delivery;
+      body, deadline: now + 10_000, steer, ...(from.host === "local" ? {} : { sourceAlias: from.alias }) }).delivery;
   };
   const prepare = (bodies: string[]): PreparedWake => ({ bytes: bodies.join("\n").length + 100, sha256: bodyHash(bodies.join("\n")), bodies: bodies.map(bodyHash) });
   return { state, ledger, source, target, admit, prepare, advance: (ms: number) => { now += ms; } };
@@ -131,12 +131,14 @@ test("wrong attempt, wrong body evidence, removed identity and retired mirror re
   assert.equal(f.ledger().authorize([d.id], "a", f.prepare([d.body])), false);
 });
 
-test("bounded queues, duplicate admission and rates use endpoint identity rather than alias", () => {
+test("bounded queues and explicit duplicate requests use endpoint identity rather than alias or body", () => {
   const f = fixture(), first = f.admit("same body");
   f.ledger().register({ ...f.source, alias: "renamed@local" });
-  assert.equal(f.admit("same body").id, first.id);
-  assert.equal(f.state.rates[0]?.count, 1);
-  for (let i = 1; i < ledgerDefaults.perEndpoint; i++) f.admit();
+  const { state: _state, admittedAt: _at, ...retry } = first;
+  assert.equal(f.ledger().admit(retry).delivery.id, first.id);
+  assert.notEqual(f.admit("same body").id, first.id);
+  assert.equal(f.state.rates[0]?.count, 2);
+  for (let i = 2; i < ledgerDefaults.perEndpoint; i++) f.admit();
   const before = JSON.stringify(f.state);
   assert.throws(() => f.admit(), { code: "QUEUE_FULL" });
   assert.equal(JSON.stringify(f.state), before);
@@ -177,4 +179,15 @@ test("retained count and bytes never prevent settlement; queued STEER is capped 
   }
   for (let i = 0; i < 3; i++) f.admit(`STEER: ${i}`, f.source, f.target, true);
   assert.throws(() => f.admit("STEER: four", f.source, f.target, true), { code: "QUEUE_FULL" });
+});
+
+test("receipt retention ranks late completions by settlement, not admission", () => {
+  const f = fixture(), other = endpoint("other", "codex");
+  f.ledger().register(other);
+  const earlier = f.admit("slow"), later = f.admit("fast", f.source, other);
+  const ledger = () => new Ledger(f.state, "local", { ...ledgerDefaults, retained: 1 }, 1_000);
+  ledger().reserve(f.target, "slow"); ledger().reserve(other, "fast");
+  ledger().settle([later.id], "fast", "failed", "PREWRITE_REFUSED");
+  ledger().settle([earlier.id], "slow", "failed", "PREWRITE_REFUSED");
+  assert.deepEqual(f.state.deliveries.map((d) => d.id), [earlier.id]);
 });

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { createLedgerCodec } from "../src/gateway/ledger-codec.js";
-import { bodyHash, emptyLedger, ledgerDefaults, type Delivery, type Endpoint, type LedgerState } from "../src/gateway/ledger.js";
+import { emptyLedger, ledgerDefaults, type Delivery, type Endpoint, type LedgerState } from "../src/gateway/ledger.js";
 
 const host = "local";
 const codec = createLedgerCodec(host, ledgerDefaults);
@@ -10,14 +10,14 @@ const endpoint = (id: string, provider: "claude" | "codex", at = host): Endpoint
   id: `reg_${id}`, provider, host: at, alias: `${provider}-${id}@${at}`, handle: `handle-${id}`,
 });
 const ref = ({ id, host: at, provider }: Endpoint) => ({ id, host: at, provider });
-const delivery = (source: Endpoint, target: Endpoint, state: Delivery["state"] = { phase: "queued", tries: 0 }): Delivery => {
+const delivery = (source: Endpoint, target: Endpoint, state: Delivery["state"] = { phase: "queued", tries: 0, readyAt: 1_000 }): Delivery => {
   const body = "hello";
   return {
     id: "msg_00000000-0000-4000-8000-000000000001",
     reply: "conv_abcdefghijklmnop",
     token: "dlv_abcdefghijklmnopqrstuvwx",
     source: ref(source), target: ref(target), body, admittedAt: 1_000, deadline: 2_000,
-    steer: false, fingerprint: bodyHash(JSON.stringify([ref(source), ref(target), body, false])), state,
+    steer: false, state, ...(source.host === host ? {} : { sourceAlias: source.alias }),
   };
 };
 function valid(): LedgerState {
@@ -91,7 +91,6 @@ test("delivery phases are closed and prepared batch hashes are collective eviden
   second.reply = "conv_abcdefghijklmnopq";
   second.token = "dlv_bbcdefghijklmnopqrstuvwx";
   second.body = "second";
-  second.fingerprint = bodyHash(JSON.stringify([second.source, second.target, second.body, false]));
   state.deliveries[0]!.state = { phase: "armed", attempt: "attempt_one", tries: 1, prepared };
   state.deliveries.push(second);
   assert.equal(decode(state), true);
@@ -134,9 +133,6 @@ test("body bounds count UTF-8 bytes rather than JavaScript characters", () => {
   const state = valid();
   const narrow = createLedgerCodec(host, { ...ledgerDefaults, bodyBytes: 5 });
   state.deliveries[0]!.body = "€€";
-  state.deliveries[0]!.fingerprint = bodyHash(JSON.stringify([
-    state.deliveries[0]!.source, state.deliveries[0]!.target, state.deliveries[0]!.body, false,
-  ]));
   assert.equal(narrow.decode(state), undefined);
 });
 

@@ -31,37 +31,30 @@ const PUBLIC_PACKAGE_PATHS = [
 ];
 
 const GATEWAY_RUNTIME_MODULES = [
+  "broker",
+  "broker-check",
+  "broker-control",
   "claude-peer",
-  "claude-helper",
-  "claude-helper-protocol",
-  "claude-helper-supervisor",
   "claude-runtime",
-  "cli",
   "codex-app-server",
   "codex-local-transport",
-  "codex-socket-holder",
   "codex-stateless-transport",
   "config",
-  "control",
   "coordinator",
+  "core-cli",
+  "core-service-command",
+  "endpoint-directory",
   "federation-nodes",
+  "federation",
   "instance-lease",
   "ledger",
   "ledger-codec",
+  "local-control",
   "native-destinations",
   "owned-state",
-  "peer-client",
-  "peer-mailbox",
-  "peer-protocol",
-  "peer-stdio",
   "provenance-envelope",
-  "providers",
-  "server",
-  "service",
+  "runtime",
   "service-agent",
-  "status-view",
-  "store",
-  "types",
 ];
 
 const ROOT_RUNTIME_MODULES = ["errors", "mutex"];
@@ -82,10 +75,9 @@ export const EXPECTED_NPM_PACKAGE_PATHS = Object.freeze(
 );
 
 const REQUIRED_ESM_IMPORTS = [
-  "dist/src/gateway/cli.js",
-  "dist/src/gateway/claude-helper.js",
+  "dist/src/gateway/core-cli.js",
   "dist/src/gateway/codex-stateless-transport.js",
-  "dist/src/gateway/server.js",
+  "dist/src/gateway/runtime.js",
 ];
 
 function fail(message) {

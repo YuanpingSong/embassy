@@ -39,6 +39,7 @@ export type OwnedStateCodec<T extends OwnedStateDocument> = Readonly<{
 }>;
 
 export type OwnedStateDependencies = Readonly<{
+  assertWritable?: () => void;
   now?: () => Date;
   randomId?: () => string;
   renameStateFile?: (source: string, target: string) => Promise<void>;
@@ -124,6 +125,7 @@ export class OwnedStateFile<T extends OwnedStateDocument> {
   private readonly mutex = new KeyedMutex();
   private state: T | undefined;
   private poisoned = false;
+  private readonly assertWritable: () => void;
 
   constructor(
     stateDir: string,
@@ -141,6 +143,7 @@ export class OwnedStateFile<T extends OwnedStateDocument> {
       );
     }
     this.rootDir = path.resolve(stateDir);
+    this.assertWritable = dependencies.assertWritable ?? (() => {});
     this.codec = codec;
     this.now = dependencies.now ?? (() => new Date());
     this.randomId = dependencies.randomId ?? randomUUID;
@@ -179,6 +182,7 @@ export class OwnedStateFile<T extends OwnedStateDocument> {
   async transact<R>(operation: (draft: T, now: Date) => R): Promise<R> {
     return this.mutex.run("owned-state", async () => {
       const current = this.requireState();
+      this.assertWritable();
       const draft = structuredClone(current);
       const result = operation(draft, this.now());
       if (
@@ -417,6 +421,7 @@ export class OwnedStateFile<T extends OwnedStateDocument> {
   }
 
   private async persist(next: T, prior: T | undefined): Promise<void> {
+    this.assertWritable();
     const temporary = path.join(this.rootDir, `.gateway-state-${randomUUID()}.tmp`);
     const body = `${JSON.stringify(next, null, 2)}\n`;
     if (Buffer.byteLength(body, "utf8") > this.codec.maximumBytes) {
@@ -458,6 +463,7 @@ export class OwnedStateFile<T extends OwnedStateDocument> {
         } catch (error) {
           if (!isErrno(error, "ENOENT")) throw error;
         }
+        this.assertWritable();
         renameAttempted = true;
         await this.renameStateFile(temporary, this.stateFilePath);
         await this.afterStateFileRename?.();

@@ -44,7 +44,7 @@ function systemCode(error: unknown): string | undefined {
 
 function claudePrewrite(error: unknown): WakeResult {
   if (error instanceof BridgeError && error.code === "CLAUDE_PEER_MESSAGE_EXPIRED") {
-    return { outcome: "expired", code: "MESSAGE_EXPIRED" };
+    return { outcome: "expired", code: "MESSAGE_EXPIRED", unwritten: true };
   }
   if (error instanceof BridgeError && CLAUDE_CLEAN_RETRY_CODES.has(error.code)) {
     return { outcome: "deferred", code: "ROUTE_BUSY" };
@@ -61,7 +61,11 @@ function claudePrewrite(error: unknown): WakeResult {
 }
 
 function claudePostAuthorization(error: unknown): WakeResult {
+  if (error instanceof BridgeError && error.code === "WRITE_AUTHORIZATION_DENIED") {
+    return { outcome: "deferred", code: error.code };
+  }
   if (error instanceof BridgeError && error.recoverable) {
+    if (error.code === "CLAUDE_PEER_MESSAGE_EXPIRED") return { outcome: "expired", code: "MESSAGE_EXPIRED", unwritten: true };
     return {
       outcome: "failed",
       code: error.code === "CLAUDE_PEER_MESSAGE_EXPIRED" ? "MESSAGE_EXPIRED" : error.code,
@@ -72,14 +76,6 @@ function claudePostAuthorization(error: unknown): WakeResult {
     code: error instanceof BridgeError && /^[A-Z][A-Z0-9_]{0,95}$/.test(error.code)
       ? error.code : "CLAUDE_DISPATCH_OUTCOME_AMBIGUOUS",
   };
-}
-
-async function cancelPrepared(prepared: ClaudePeerPreparedSend): Promise<void> {
-  try {
-    prepared.cancel();
-  } catch {
-    // A failed no-write cleanup never grants permission to perform.
-  }
 }
 
 function localClaudeName(target: Endpoint, host: string): string | undefined {
@@ -139,23 +135,13 @@ export class ClaudeDestination implements Destination {
       return claudePrewrite(error);
     }
 
-    let authorized: boolean;
     try {
-      authorized = await input.authorize({
+      // Final attestation, authorization, and the exact prepared write share
+      // one continuation; retirement during preparation cannot leak a write.
+      const operation = prepared.perform(async () => await input.authorize({
         bytes: prepared.frameBytes,
         sha256: prepared.sha256,
-      });
-    } catch {
-      await cancelPrepared(prepared);
-      return { outcome: "ambiguous", code: "WRITE_AUTHORIZATION_UNCERTAIN" };
-    }
-    if (!authorized) {
-      await cancelPrepared(prepared);
-      return { outcome: "deferred", code: "WRITE_AUTHORIZATION_DENIED" };
-    }
-    try {
-      // Authorization and the exact prepared write share one continuation.
-      const operation = prepared.perform();
+      }));
       await operation;
       return { outcome: "delivered", code: "DELIVERED" };
     } catch (error) {
@@ -177,7 +163,7 @@ function mapCodexClean(
     | Extract<StatelessCodexActiveSteerResult, { phase: "clean" }>,
 ): WakeResult {
   if (result.safeErrorCode === "MESSAGE_EXPIRED") {
-    return { outcome: "expired", code: "MESSAGE_EXPIRED" };
+    return { outcome: "expired", code: "MESSAGE_EXPIRED", unwritten: true };
   }
   return CODEX_CLEAN_RETRY_CODES.has(result.safeErrorCode)
     ? { outcome: "deferred", code: result.safeErrorCode }
@@ -207,8 +193,14 @@ type ActiveCodexTurn = Readonly<{
   operation: StatelessCodexAcceptedOperation;
 }>;
 
+type StartingCodexTurn = Readonly<{
+  attempt: string;
+  target: Endpoint;
+}>;
+
 export class CodexDestination implements Destination {
   private readonly active = new Map<string, ActiveCodexTurn>();
+  private readonly starting = new Map<string, StartingCodexTurn>();
   private readonly controllers = new Set<AbortController>();
   private readonly inFlight = new Set<Promise<WakeResult>>();
   private closing = false;
@@ -236,8 +228,9 @@ export class CodexDestination implements Destination {
 
   private async deliverSteer(input: WakeInput): Promise<WakeResult> {
     const active = this.active.get(input.target.id);
+    if (active === undefined) return await this.deliverStart(input);
     if (
-      active === undefined || active.target.host !== input.target.host ||
+      active.target.host !== input.target.host ||
       active.target.handle !== input.target.handle || active.target.alias !== input.target.alias
     ) {
       return { outcome: "deferred", code: "ROUTE_BUSY" };
@@ -255,7 +248,14 @@ export class CodexDestination implements Destination {
   }
 
   private async deliverStart(input: WakeInput): Promise<WakeResult> {
-    if (this.active.has(input.target.id)) return { outcome: "deferred", code: "ROUTE_BUSY" };
+    if (this.active.has(input.target.id) || this.starting.has(input.target.id)) {
+      return { outcome: "deferred", code: "ROUTE_BUSY" };
+    }
+    const starting: StartingCodexTurn = {
+      attempt: input.attempt,
+      target: { ...input.target },
+    };
+    this.starting.set(input.target.id, starting);
     const controller = new AbortController();
     this.controllers.add(controller);
     let accepted: StatelessCodexAcceptedOperation | undefined;
@@ -298,6 +298,9 @@ export class CodexDestination implements Destination {
       return mapCodexStart(result);
     } finally {
       this.controllers.delete(controller);
+      if (this.starting.get(input.target.id) === starting) {
+        this.starting.delete(input.target.id);
+      }
       if (accepted !== undefined && this.active.get(input.target.id)?.attempt === input.attempt) {
         this.active.delete(input.target.id);
       }
@@ -310,6 +313,7 @@ export class CodexDestination implements Destination {
     for (const controller of this.controllers) controller.abort();
     await Promise.allSettled([...this.inFlight]);
     this.controllers.clear();
+    this.starting.clear();
     this.active.clear();
   }
 }

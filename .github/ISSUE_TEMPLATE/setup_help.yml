@@ -21,9 +21,12 @@ body:
         - "embassy service install / embassy serve (starting the broker)"
         - "embassy health / embassy status"
         - "embassy register-codex"
-        - "embassy send (to a Claude session)"
+        - "embassy send --to (sending by name)"
         - "embassy send --conversation (answering)"
-        - "Claude session messaging a codex-* or peer-* peer"
+        - "Native delivery waking Claude Code"
+        - "Native delivery waking a Codex task"
+        - "SSH federation / embassy peer-stdio"
+        - "embassy check (broker-only loopback)"
         - "Install (npm install -g / build from source)"
         - Other
     validations:
@@ -34,7 +37,8 @@ body:
     attributes:
       label: Exact fail-closed error line
       description: >-
-        Embassy fails closed on version mismatches and invalid state
+        Embassy fails closed on identity, protocol, ownership and invalid-state
+        boundaries
         rather than guessing. Paste the exact error text (this should not
         contain identifiers or bodies — if it does, redact them and note
         that you redacted).
