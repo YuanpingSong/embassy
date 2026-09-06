@@ -99,18 +99,16 @@ daemon already running under the same macOS login; merely having a `codex`
 executable on PATH is insufficient, and Embassy does not install, start or
 update that daemon.
 
-Embassy observes the daemon's bounded unarchived agent metadata and keeps it
+Embassy observes the daemon's recency-sorted top 20 unarchived root threads and keeps them
 current from lifecycle and name events. Native names become public lookup
 aliases; native task IDs remain only in the closed private endpoint binding,
-while previews, turns and item content are neither retained nor printed. When
-both rows are present, root agents and children retain their native grouping
-through opaque endpoint references. A dormant agent remains
-addressable: delivery resumes that exact agent without retaining history
-before starting its wake. A child that natively refuses direct input remains
-visible and refuses the write rather than disappearing.
-Embassy derives a safe alias from the native name (or nickname when unnamed): normalized
+while previews, turns and item content are neither retained nor printed.
+Sub-agents are not discovered or displayed. Busy roots queue ordinary messages;
+waiting means approval/user input, idle means ready, and dormant means unloaded.
+Delivery resumes the exact dormant root without retaining history.
+Embassy derives a safe alias from the native name: normalized
 lower-case ASCII tokens, a `codex-` prefix, at most 32 characters before
-`@host`. A missing or native-ID-revealing name instead gets a stable alias from
+`@host`. A missing, `Untitled task`, or native-ID-revealing name gets a stable alias from
 the opaque Embassy endpoint ID, never from the native task ID.
 
 Absence from the daemon's loaded list alone never marks an agent unreachable;
@@ -123,6 +121,12 @@ the ID is not a command argument or public output. A fallback registration is
 the same endpoint kind as discovery, and a matching native identity cannot
 create a duplicate. Each delivery independently attests the current App Server
 interface and exact task before authorization.
+Explicit registration sets a private retention marker, so older roots remain
+listed after restart even outside the discovery window. Window aging only hides
+an automatic row: no retirement, suppression or settlement occurs. Its identity
+remains for admitted work and is reused if it returns to the top 20. Identity
+records still share the existing 128-endpoint bound; retire unused endpoints
+to release capacity. No discovered/registered badge is exposed.
 A later native observation may replace a fallback alias with the current
 native-derived alias without moving the endpoint identity or its admitted work.
 The ellipsis in `--alias ...` is a substitution: use the task's chosen
@@ -228,9 +232,12 @@ before provider setup, so only one broker can run.
 
 ## Private state reset
 
-Version 4 accepts only schema-6 `gateway-state.json`. It deliberately contains
-no 3.x converter or compatibility reader. An older or unknown schema refuses
-with `GATEWAY_STATE_SCHEMA_UNSUPPORTED`; invalid schema-6 bytes refuse with
+This release reads valid schema-6 `gateway-state.json` forward, treating every
+existing row as retained; new writes use schema 7. The retention marker is the
+only added field. Back up state before upgrading 4.2.0; no reset is required,
+but 4.2.0 refuses schema 7 and rollback requires the pre-upgrade backup.
+There is no 3.x converter. Schema ≤5 or unknown schemas refuse with
+`GATEWAY_STATE_SCHEMA_UNSUPPORTED`; malformed accepted schemas refuse with
 `CORRUPT_GATEWAY_STATE`. Refusal does not mutate the installed file.
 
 Reset procedure:
@@ -243,7 +250,7 @@ Reset procedure:
    directory. Keep the valid `nodes.json`.
 4. Install the current discovery-enabled 4.x release, then run
    `embassy service install`.
-5. The v4 broker creates fresh schema-6 state.
+5. The broker creates fresh schema-7 state.
 6. Let current Codex agents be discovered. Use fallback registration only for
    non-native harnesses. Claude endpoints are recorded on discovery/use.
 

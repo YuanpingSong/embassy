@@ -125,7 +125,7 @@ test("protocol and reset documentation pins the v4-only boundary", async () => {
     read("README.md"), read("docs/CONFIGURATION.md"),
     read("docs/GATEWAY-ARCHITECTURE.md"), read("SECURITY.md"),
   ]);
-  assert.match(architecture, /Private state \(`gateway-state\.json`\) \| 6/);
+  assert.match(architecture, /Private state \(`gateway-state\.json`\) \| 7/);
   assert.match(architecture, /Private control \(CLI ↔ broker\) \| 6/);
   assert.match(architecture, /Federation \(`peer-stdio`\) \| 3/);
   assert.match(architecture, /Consumed Claude peer protocol \| 1/);

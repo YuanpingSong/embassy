@@ -93,7 +93,7 @@ test("broker results are bounded, disclosure-free and reject duplicate endpoint 
 });
 
 test("Codex metadata is closed, bounded and cannot expose native identities through status or federation", () => {
-  const codex = { state: "waitingOnApproval", canAcceptDirectInput: false, parentEndpoint: "reg_parent" };
+  const codex = { state: "waiting" };
   const observed = { complete: true, truncated: false, observedAt: now };
   const project = (metadata: unknown, observation: unknown = observed) => ({ ...snapshot, codex: observation,
     routes: [{ ...snapshot.routes[0], codex: metadata }] });

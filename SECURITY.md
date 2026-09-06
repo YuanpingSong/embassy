@@ -2,9 +2,9 @@
 
 ## Supported versions
 
-Security fixes are provided for the current release line. Version 4 uses a
-reset-only state boundary and does not run compatibility code for older private
-state or control protocols.
+Security fixes are provided for the current release line. Private schema 6 is
+read forward into 7; schema ≤5 still requires a reset. Private control peers
+must use the same protocol version.
 
 ## Reporting a vulnerability
 
@@ -91,8 +91,8 @@ Historical names never resolve, and queued work is never silently rebound.
 
 Codex agents are discovered from bounded same-user App Server metadata. Their
 immutable native thread IDs remain private identity and are never accepted as
-arguments, printed or guessed. Native names are mutable aliases; root/child
-grouping may be public only through opaque endpoint references. A task may
+arguments, printed or guessed. Native names are mutable aliases; only the
+recency top 20 roots are automatically listed. A task may
 self-register from inherited `CODEX_THREAD_ID` as a fallback; discovery and
 registration reconcile the same identity. Each operation resumes and attests
 that exact task immediately before write.
@@ -200,8 +200,8 @@ commit boundary remain uncertain and are never replayed automatically.
 Public JSON is a closed projection. It may contain opaque Embassy endpoint IDs,
 aliases, providers, hosts, queue depths, safe codes, phases/outcomes, ages,
 recent retirement times, and bounded remote catalog rows and observation times.
-Codex rows may additionally contain observed loaded/busy/approval state,
-direct-input capability and an opaque parent endpoint reference.
+Codex rows may additionally contain observed busy, waiting, idle, dormant or unknown state.
+The explicit-registration retention marker remains private.
 It must never contain native IDs or handles, socket paths, message bodies,
 delivery/conversation secrets, credentials, exceptions, raw diagnostics, or
 provider histories. Human output is derived from the same validated shape.
@@ -211,11 +211,12 @@ protocol channel. Operational hints use bounded safe codes and stderr.
 
 ## State reset and rollback
 
-Private state schema 6 and control protocol 6 are the only current v4 formats. Older or
-unknown state refuses before mutation. There is no converter, compatibility
-reader, or alias for removed commands. The operator must inspect and settle old
-work with the old binary, stop the broker, preserve the old state, and start v4
-with a fresh `gateway-state.json` while keeping `nodes.json`.
+Private state writes schema 7 and reads valid schema 6 forward, retaining its
+existing rows. Control protocol is 6. Schemas ≤5 and unknown state refuse before
+mutation; no 3.x converter or removed-command alias exists. Before upgrading
+4.2.0, stop the broker and back up its state; 4.2.0 refuses schema 7, so rollback
+requires that pre-upgrade backup. Upgrading from 3.x still requires inspecting
+unsettled work with the old binary and resetting state while keeping `nodes.json`.
 
 Reset invalidates all old routes, receipts, and conversation references. The
 only rollback is the preserved old binary with its untouched old state. Embassy

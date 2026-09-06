@@ -87,9 +87,7 @@ type Mode =
   | "failed" | "interrupted" | "duplicate" | "init-loss" | "resume-loss"
   | "nonempty" | "resume-drift" | "steer-loss" | "wrong-reply" | "malformed-output"
   | "accepted-timeout" | "accepted-close" | "steer-reject"
-  | "direct-input-denied" | "direct-input-malformed" | "loaded-success"
-  | "read-not-found" | "read-overloaded" | "resume-closing"
-  | "resume-direct-input-denied";
+  | "resume-overloaded" | "resume-closing";
 
 function statelessFixture(
   modes: Mode[],
@@ -115,29 +113,8 @@ function statelessFixture(
           if (mode === "init-loss") return Promise.reject(new Error("initialize loss"));
           peer.result(frame, {});
         }
-        else if (frame.method === "thread/read") {
-          if (mode === "read-not-found") {
-            return peer.reject(frame, `thread not found: ${THREAD}`);
-          }
-          if (mode === "read-overloaded") {
-            return peer.reject(frame, "Server overloaded; retry later.", -32001);
-          }
-          const status = mode === "busy"
-            ? { type: "active" }
-            : mode === "approval"
-              ? { activeFlags: ["waitingOnApproval"], type: "active" }
-              : mode === "loaded-success" ? { type: "idle" } : { type: "notLoaded" };
-          peer.result(frame, { thread: {
-            canAcceptDirectInput: status.type === "notLoaded" ? null : true,
-            id: THREAD, status, turns: [],
-          } });
-        } else if (frame.method === "thread/resume") {
-          if (mode === "resume-direct-input-denied") {
-            return peer.reject(
-              frame,
-              "cannot resume an unloaded multi-agent v2 sub-agent through its parent; resume the parent first, or use thread/read to inspect it",
-            );
-          }
+        else if (frame.method === "thread/resume") {
+          if (mode === "resume-overloaded") return peer.reject(frame, "Server overloaded; retry later.", -32001);
           if (mode === "resume-closing") {
             return peer.reject(
               frame,
@@ -151,9 +128,6 @@ function statelessFixture(
               ? { activeFlags: ["waitingOnApproval"], type: "active" }
               : { type: "idle" };
           peer.result(frame, { thread: {
-            canAcceptDirectInput: mode === "direct-input-denied"
-              ? false
-              : mode === "direct-input-malformed" ? "yes" : true,
             id: THREAD, status, turns: mode === "nonempty" ? [{ redacted: true }] : [],
           } });
           if (mode === "resume-drift") peer.emit({ method: "thread/status/changed",
@@ -389,8 +363,7 @@ test("stateless transport is inert until execute and opens one exact connection 
       },
     });
     assert.deepEqual(frames[1], { method: "initialized", params: {} });
-    assert.deepEqual(frames.find(({ method }) => method === "thread/read")?.params,
-      { includeTurns: false, threadId: THREAD });
+    assert.equal(frames.some(({ method }) => method === "thread/read"), false);
     assert.deepEqual(frames.find(({ method }) => method === "thread/resume")?.params,
       { excludeTurns: true, threadId: THREAD });
     assert.deepEqual(frames.find(({ method }) => method === "turn/start")?.params,
@@ -403,15 +376,11 @@ test("stateless transport is inert until execute and opens one exact connection 
     goldenClient.name = "embassy";
     goldenClient.version = PACKAGE_VERSION;
     assert.deepEqual(normalized.slice(0, 2), initializeGolden);
-    assert.deepEqual(normalized.find(({ method }) => method === "thread/read"), {
-      id: "$rpc2", method: "thread/read",
-      params: { includeTurns: false, threadId: "$thread1" },
-    });
     assert.deepEqual(normalized.find(({ method }) => method === "thread/resume"), {
-      ...manifest.wireGolden.resume, id: "$rpc3",
+      ...manifest.wireGolden.resume, id: "$rpc2",
     });
     assert.deepEqual(normalized.find(({ method }) => method === "turn/start"), {
-      ...manifest.wireGolden.start, id: "$rpc4",
+      ...manifest.wireGolden.start, id: "$rpc3",
       params: { ...(manifest.wireGolden.start.params as Frame), turnTrigger: "embassy" },
     });
     assert.equal(frames.some(({ method }) => ["thread/loaded/list", "thread/unsubscribe", "turn/interrupt"].includes(String(method))), false);
@@ -824,37 +793,8 @@ test("busy and approval observations are clean pre-write and never answer approv
   }
 });
 
-test("direct-input capability is enforced before authorization", async () => {
-  for (const [mode, code] of [
-    ["direct-input-denied", "CODEX_DIRECT_INPUT_UNAVAILABLE"],
-    ["resume-direct-input-denied", "CODEX_DIRECT_INPUT_UNAVAILABLE"],
-    ["direct-input-malformed", "RESULT_SCHEMA_MISMATCH"],
-  ] as const) {
-    const current = statelessFixture([mode]);
-    let authorizationCalls = 0;
-    const result = await current.operation.execute(input(async () => {
-      authorizationCalls += 1;
-      return true;
-    }));
-    assertState(result, "clean", "failed");
-    assertCode(result, code);
-    assert.equal(authorizationCalls, 0);
-    assert.equal(current.counts().semanticWrites, 0);
-  }
-});
-
-test("every operation resumes for subscription and a pre-read unload race remains recoverable", async () => {
-  for (const mode of ["loaded-success", "read-not-found"] as const) {
-    const current = statelessFixture([mode]);
-    const delivered = await current.operation.execute(input(async () => true));
-    assertState(delivered, "terminal", "terminal");
-    assert.equal(current.frames[0]?.filter(({ method }) => method === "thread/resume").length, 1);
-    assert.equal(current.counts().semanticWrites, 1);
-  }
-});
-
 test("pre-write overload and closing remain clean queueing evidence", async () => {
-  for (const mode of ["read-overloaded", "resume-closing"] as const) {
+  for (const mode of ["resume-overloaded", "resume-closing"] as const) {
     const current = statelessFixture([mode]);
     let authorizationCalls = 0;
     const result = await current.operation.execute(input(async () => {

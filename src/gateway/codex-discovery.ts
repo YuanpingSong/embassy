@@ -9,7 +9,7 @@ import {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SOURCE_KINDS = [
-  "cli", "vscode", "exec", "appServer", "subAgent", "subAgentThreadSpawn",
+  "cli", "vscode", "exec", "appServer",
 ] as const;
 const OPT_OUTS = [
   "item/started", "item/completed", "item/agentMessage/delta",
@@ -25,11 +25,7 @@ type Timer = ReturnType<typeof setTimeout>;
 export type CodexThread = Readonly<{
   id: string;
   name?: string;
-  agentNickname?: string;
-  parentThreadId?: string;
-  status: "notLoaded" | "idle" | "active" | "waitingOnApproval" |
-    "waitingOnUserInput" | "systemError" | "unknown";
-  canAcceptDirectInput?: boolean;
+  status: "dormant" | "idle" | "busy" | "waiting" | "systemError" | "unknown";
   loaded: boolean;
 }>;
 
@@ -79,18 +75,18 @@ const record = (value: unknown): value is JsonObject =>
 
 function status(value: unknown): CodexThread["status"] {
   if (!record(value) || typeof value.type !== "string") return "unknown";
-  if (value.type === "notLoaded" || value.type === "idle" || value.type === "systemError") {
+  if (value.type === "notLoaded") return "dormant";
+  if (value.type === "idle" || value.type === "systemError") {
     return value.type;
   }
   if (value.type !== "active") return "unknown";
-  if (value.activeFlags === undefined) return "active";
+  if (value.activeFlags === undefined) return "busy";
   if (!Array.isArray(value.activeFlags) || value.activeFlags.length > 32 ||
       !value.activeFlags.every((flag) => typeof flag === "string" && flag.length <= 128)) {
     throw new DiscoveryError("PROTOCOL_ERROR");
   }
-  if (value.activeFlags.includes("waitingOnApproval")) return "waitingOnApproval";
-  if (value.activeFlags.includes("waitingOnUserInput")) return "waitingOnUserInput";
-  return "active";
+  if (value.activeFlags.includes("waitingOnApproval") || value.activeFlags.includes("waitingOnUserInput")) return "waiting";
+  return "busy";
 }
 
 function optionalText(value: unknown): string | undefined {
@@ -105,26 +101,13 @@ function parseThread(value: unknown): CodexThread {
   if (!record(value) || typeof value.id !== "string" || !UUID.test(value.id)) {
     throw new DiscoveryError("PROTOCOL_ERROR");
   }
-  const parentThreadId = optionalText(value.parentThreadId);
-  if (parentThreadId !== undefined && !UUID.test(parentThreadId)) {
-    throw new DiscoveryError("PROTOCOL_ERROR");
-  }
-  if (value.canAcceptDirectInput !== undefined && value.canAcceptDirectInput !== null &&
-      typeof value.canAcceptDirectInput !== "boolean") {
-    throw new DiscoveryError("PROTOCOL_ERROR");
-  }
+  const observedStatus = status(value.status);
   const thread: {
-    id: string; name?: string; agentNickname?: string; parentThreadId?: string;
-    status: CodexThread["status"]; canAcceptDirectInput?: boolean; loaded: boolean;
-  } = { id: value.id.toLowerCase(), status: status(value.status), loaded: false };
+    id: string; name?: string;
+    status: CodexThread["status"]; loaded: boolean;
+  } = { id: value.id.toLowerCase(), status: observedStatus, loaded: observedStatus !== "dormant" && observedStatus !== "unknown" };
   const name = optionalText(value.name);
-  const agentNickname = optionalText(value.agentNickname);
   if (name !== undefined) thread.name = name;
-  if (agentNickname !== undefined) thread.agentNickname = agentNickname;
-  if (parentThreadId !== undefined) thread.parentThreadId = parentThreadId.toLowerCase();
-  if (typeof value.canAcceptDirectInput === "boolean") {
-    thread.canAcceptDirectInput = value.canAcceptDirectInput;
-  }
   return Object.freeze(thread);
 }
 
@@ -263,8 +246,7 @@ class Observer implements CodexDiscoveryObserver {
   #retry = 0;
 
   constructor(readonly options: CodexDiscoveryOptions, dependencies: CodexDiscoveryDependencies) {
-    this.#max = integer(options.maxEndpoints, 128);
-    if (this.#max > 128) throw new DiscoveryError("INVALID_CONFIGURATION");
+    this.#max = Math.min(integer(options.maxEndpoints, 20), 20);
     this.#refreshMs = integer(options.refreshIntervalMs, 5_000);
     this.#requestMs = integer(options.requestTimeoutMs, 15_000);
     this.#delays = options.reconnectDelaysMs ?? DEFAULT_RECONNECT_DELAYS;
@@ -352,73 +334,36 @@ class Observer implements CodexDiscoveryObserver {
   async #scan(session: RpcSession): Promise<void> {
     const startSequence = this.#sequence;
     const scanned = new Map<string, CodexThread>();
+    let cursor: string | undefined, truncated = false;
     const cursors = new Set<string>();
-    let cursor: string | null = null;
-    let truncated = false;
-    let pages = 0;
     do {
-      if (++pages > this.#max + 1) { truncated = true; break; }
-      const params: JsonObject = {
-        archived: false, limit: Math.min(this.#max + 1, 100),
-        sortKey: "recencyAt", sourceKinds: SOURCE_KINDS, useStateDbOnly: true,
-      };
-      if (cursor !== null) params.cursor = cursor;
-      const page = await this.#serialRequest(session, "thread/list", params);
+      const page = await this.#serialRequest(session, "thread/list", {
+        archived: false, limit: 20, sortKey: "recencyAt", sourceKinds: SOURCE_KINDS, useStateDbOnly: true,
+        ...(cursor === undefined ? {} : { cursor }),
+      });
       if (!record(page) || !Array.isArray(page.data)) throw new DiscoveryError("PROTOCOL_ERROR");
       for (const value of page.data) {
+        if (record(value) && value.parentThreadId != null) continue;
         const thread = parseThread(value);
-        if (scanned.has(thread.id)) scanned.delete(thread.id);
-        scanned.set(thread.id, thread);
-        if (scanned.size > this.#max) { truncated = true; break; }
+        if (!scanned.has(thread.id)) scanned.set(thread.id, thread);
+        if (scanned.size >= this.#max) { truncated = this.#max < 20; break; }
       }
-      if (truncated) break;
-      const next = page.nextCursor;
-      if (next === null || next === undefined) cursor = null;
-      else if (typeof next !== "string" || next.length === 0 || next.length > 256 || cursors.has(next)) {
+      if (scanned.size >= this.#max || page.nextCursor == null) break;
+      if (typeof page.nextCursor !== "string" || !page.nextCursor || page.nextCursor.length > 256 || cursors.has(page.nextCursor))
         throw new DiscoveryError("PROTOCOL_ERROR");
-      } else { cursors.add(next); cursor = next; }
-    } while (cursor !== null);
+      cursor = page.nextCursor; cursors.add(cursor);
+      if (cursors.size >= 21) { truncated = true; break; }
+    } while (true);
 
-    const loaded = new Set<string>();
-    const loadedCursors = new Set<string>();
-    let loadedCursor: string | null = null;
-    let loadedCount = 0;
-    let loadedComplete = true;
-    let loadedPages = 0;
-    do {
-      if (++loadedPages > this.#max + 1) { loadedComplete = false; break; }
-      const params: JsonObject = { limit: Math.min(this.#max + 1, 100) };
-      if (loadedCursor !== null) params.cursor = loadedCursor;
-      const page = await this.#serialRequest(session, "thread/loaded/list", params);
-      if (!record(page) || !Array.isArray(page.data) ||
-          !page.data.every((id) => typeof id === "string" && UUID.test(id))) {
-        throw new DiscoveryError("PROTOCOL_ERROR");
-      }
-      loadedCount += page.data.length;
-      for (const id of page.data) {
-        const normalized = id.toLowerCase();
-        if (scanned.has(normalized)) loaded.add(normalized);
-      }
-      if (loadedCount > this.#max * 8) {
-        loadedComplete = false;
-        break;
-      }
-      const next = page.nextCursor;
-      if (next === null || next === undefined) loadedCursor = null;
-      else if (typeof next !== "string" || next.length === 0 || next.length > 256 ||
-          loadedCursors.has(next)) throw new DiscoveryError("PROTOCOL_ERROR");
-      else { loadedCursors.add(next); loadedCursor = next; }
-    } while (loadedCursor !== null);
+    // Pinned thread/list enriches each row with live ThreadWatchManager status;
+    // no whole-daemon loaded-ID enumeration is needed for this root-only window.
     const firstEvent = this.#events[0]?.sequence ?? this.#sequence + 1;
     const eventOverflow = firstEvent > startSequence + 1;
     if (!eventOverflow) {
       const merged = new Map<string, CodexThread>();
       for (const thread of scanned.values()) {
         if (merged.size === this.#max) break;
-        merged.set(thread.id, Object.freeze({
-          ...thread,
-          loaded: loaded.has(thread.id) || !loadedComplete && thread.loaded,
-        }));
+        merged.set(thread.id, thread);
       }
       if (truncated) for (const thread of this.#threads.values()) {
         if (!merged.has(thread.id) && merged.size < this.#max)
@@ -431,14 +376,14 @@ class Observer implements CodexDiscoveryObserver {
     }
     await this.#setSnapshot({
       observedAt: this.#now().toISOString(),
-      truncated: truncated || eventOverflow || !loadedComplete,
-      complete: !truncated && !eventOverflow && loadedComplete,
+      truncated: truncated || eventOverflow,
+      complete: !truncated && !eventOverflow,
     });
   }
 
   #event(method: string, params: unknown): void {
     // Initialization subscribes us to every new thread, including internal
-    // sources outside thread/list's six filters. Release those subscriptions too.
+    // sources outside thread/list's root filters. Release those subscriptions too.
     if (method === "thread/started" && record(params) && record(params.thread) &&
       typeof params.thread.id === "string" && UUID.test(params.thread.id)) {
       const id = params.thread.id.toLowerCase();
@@ -471,8 +416,8 @@ class Observer implements CodexDiscoveryObserver {
       if (!record(params)) throw new DiscoveryError("PROTOCOL_ERROR");
       const thread = parseThread(params.thread);
       const source = (params.thread as JsonObject).source;
-      if (!["cli", "vscode", "exec", "mcp"].includes(String(source)) &&
-        !(record(source) && Object.hasOwn(source, "subagent"))) return undefined;
+      if (!["cli", "vscode", "exec", "mcp"].includes(String(source)) ||
+        (params.thread as JsonObject).parentThreadId != null) return undefined;
       return Object.freeze({
         kind: "upsert", sequence: ++this.#sequence,
         thread: Object.freeze({ ...thread, loaded: true }),
@@ -500,7 +445,8 @@ class Observer implements CodexDiscoveryObserver {
 
   #apply(event: Event, target: Map<string, CodexThread>): boolean {
     if (event.kind === "upsert") {
-      return this.#upsert(target, event.thread);
+      if (target.has(event.thread.id)) target.set(event.thread.id, event.thread);
+      return false; // Only the next recency query can admit a root to the window.
     }
     if (event.kind === "remove") {
       if (!this.#removals.has(event.id) && this.#removals.size >= this.#max * 4)
@@ -511,7 +457,7 @@ class Observer implements CodexDiscoveryObserver {
     const existing = target.get(event.id);
     if (existing === undefined) return false;
     if (event.kind === "closed") {
-      target.set(event.id, Object.freeze({ ...existing, status: "notLoaded", loaded: false }));
+      target.set(event.id, Object.freeze({ ...existing, status: "dormant", loaded: false }));
     } else if (event.kind === "status") {
       target.set(event.id, Object.freeze({ ...existing, status: event.status, loaded: true }));
     } else {
@@ -520,14 +466,6 @@ class Observer implements CodexDiscoveryObserver {
       target.set(event.id, Object.freeze(next));
     }
     return false;
-  }
-
-  #upsert(target: Map<string, CodexThread>, thread: CodexThread): boolean {
-    const overflow = !target.has(thread.id) && target.size >= this.#max;
-    if (overflow) target.delete(target.keys().next().value!);
-    target.delete(thread.id);
-    target.set(thread.id, Object.freeze(thread));
-    return overflow;
   }
 
   #serial = Promise.resolve<unknown>(undefined);

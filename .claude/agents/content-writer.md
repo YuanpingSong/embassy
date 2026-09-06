@@ -30,7 +30,7 @@ implementation detail into a product promise.
 - `status` reports ledger health and each endpoint's last native operation;
   `health` and the broker-only loopback `check` do not prove provider readiness
   or model comprehension.
-- Private state is schema 6, local control is protocol 5, federation is protocol
+- Private state writes schema 7 (schema 6 reads forward), local control is protocol 6, federation is protocol
   3, and consumed Claude peer records use protocol 1. Older state resets; it is
   not migrated.
 - Current commands are `register-codex`, `send`, `status`, `tui`, `refresh`,

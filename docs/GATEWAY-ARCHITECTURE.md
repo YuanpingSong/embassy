@@ -31,7 +31,7 @@ Claude/Codex CLI
                                       remote broker ledger
 ```
 
-There is one broker per login user and host. The broker owns one schema-6 JSON
+There is one broker per login user and host. The broker owns one schema-7 JSON
 document and one private control socket. It does not listen on a network port.
 launchd may supervise the same foreground `serve` entry point.
 
@@ -54,8 +54,8 @@ registration gets a new ID; old replies and remote references cannot revive.
 
 Codex endpoints are discovered as bounded metadata from the same-user App
 Server daemon. The immutable native thread UUID is their private identity;
-native names are mutable lookup aliases, and opaque parent references preserve
-root/child grouping when both rows are present without publishing native IDs. Explicit registration by a
+native names are mutable lookup aliases. Only the 20 most recent roots are
+automatically listed, without publishing native IDs. Explicit registration by a
 task that inherits the exact UUID remains a fallback and reconciles with the
 same endpoint row. Claude endpoints are discovered by exact session UUID and recorded
 when a Claude caller or target is resolved. A same-UUID rename updates one
@@ -138,8 +138,8 @@ guessing. The live host lease is checked before a transaction, before
 persistence, and immediately before rename.
 
 No-op transactions write nothing. Unsupported or corrupt state refuses before
-mutation. Schema 6 is reset-only; no older loader or converter is linked into
-the v4 binary.
+mutation. Valid schema 6 reads forward with all existing rows retained; writes use 7.
+The only added field is the private retention marker. Schema ≤5 still needs a reset.
 
 ## Coordinator
 
@@ -178,16 +178,18 @@ native socket is still used for receive and reply wake-up.
 
 ### Codex operation
 
-One bounded App Server observer enumerates unarchived root and child agents,
+One bounded App Server observer enumerates the recency top 20 unarchived root threads,
 combines loaded-state and lifecycle/name events, and retains only the metadata
 used by the endpoint directory. It drains unwanted notifications and
 unsubscribes from threads it is not actively brokering so observation does not
-pin them in memory. An incomplete scan cannot prove an endpoint disappeared;
-archive/delete evidence can. `thread/closed` marks an agent unloaded, not
-retired. Retirement evidence suppresses rediscovery.
+pin them in memory. Window aging hides automatic rows without deleting identities,
+settling admitted work or recording retirement. Explicit registrations remain
+retained across restart. `thread/closed` marks a root dormant, not retired.
+Archive/delete evidence and explicit retirement use existing settlement; operator
+retirement evidence suppresses rediscovery. Identity storage stays bounded.
 
 The Codex adapter creates a fresh App Server connection per operation, checks
-the current interface and direct-input capability, resumes the exact known
+the current interface, resumes the exact known
 thread with history excluded when needed, and starts one turn carrying the
 bounded batch only after an immediate idle-status check. Returned history and
 model output are not retained or forwarded. While active, ordinary messages
@@ -254,8 +256,8 @@ serve            service           peer-stdio
 `send` accepts exactly one of `--to` and `--conversation`; it has no `--from`.
 Human `status` is a rendering of the same closed body-free JSON shape. Its
 health word describes control/ledger health, local route rows expose their last
-native operation, and Codex rows may expose observed loaded/busy/approval state,
-direct-input capability and an opaque parent endpoint. The federation section
+native operation, and Codex rows expose busy, waiting, idle, dormant or unknown
+status, without parent references or registration-origin labels. The federation section
 exposes only the last bounded catalog observation. `health` is a control-path probe. `check` creates temporary
 private loopback endpoints and uses the real ledger/coordinator/receipt path,
 then retires them; no provider or model is contacted. It is not a
@@ -280,7 +282,7 @@ Startup order is ownership-sensitive:
 1. load the private node inventory, or derive a transient first-boot default,
    and load configuration;
 2. acquire the fixed host-wide kernel lease;
-3. open and validate schema-6 state without changing the inventory;
+3. open and validate schema-7 state without changing the inventory;
 4. atomically install and reload the default inventory when first boot needs
    one;
 5. construct native and SSH adapters;
@@ -301,7 +303,7 @@ model interrupt.
 
 | Surface | Version | Compatibility policy |
 |---|---:|---|
-| Private state (`gateway-state.json`) | 6 | Reset only; older and unknown schemas refuse without mutation |
+| Private state (`gateway-state.json`) | 7 | Reset only; older and unknown schemas refuse without mutation |
 | Private control (CLI ↔ broker) | 6 | CLI and broker must come from one installation |
 | Federation (`peer-stdio`) | 3 | Exact version and host handshake; no compatibility mode |
 | Consumed Claude peer protocol | 1 | Incompatible records are rejected in isolation |

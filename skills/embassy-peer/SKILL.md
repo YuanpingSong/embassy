@@ -15,7 +15,7 @@ Healthy means the Embassy control socket and ledger respond; a passing check exe
 
 A client reads the private state directory and optional `nodes.json`, then connects to its private Unix socket. A sandboxed task needs read/write access to that directory. Follow denied-access guidance; do not relocate state or start a second broker to bypass it. If access was expected, verify `EMBASSY_STATE_DIR` names this user's own directory.
 
-To receive in Codex, use its managed standalone installation with its App Server daemon already running under the same macOS login; merely having a `codex` executable on PATH is insufficient, and Embassy does not install or start that daemon. Current unarchived Codex agents appear automatically in `embassy status`, including dormant agents that can be resumed on delivery.
+To receive in Codex, use its managed standalone installation with its App Server daemon already running under the same macOS login; merely having a `codex` executable on PATH is insufficient, and Embassy does not install or start that daemon. The 20 most recent unarchived Codex roots appear automatically in `embassy status`, including dormant roots that resume on delivery. Sub-agents are excluded; explicit fallback registrations remain retained outside that window, including after a broker restart.
 
 For a harness without native daemon integration, ask the live Codex CLI task to execute this fallback registration through its shell tool; an ordinary terminal lacks that task's inherited identity:
 

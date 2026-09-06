@@ -41,7 +41,6 @@ type EndpointRow = Readonly<{
   observedAt?: string;
   safeErrorCode?: string;
   codex?: Obj;
-  depth?: number;
   placeholder?: boolean;
 }>;
 type DeliverySummary = Readonly<{ summary: true; rows: readonly Obj[] }>;
@@ -107,24 +106,6 @@ const loopback = (value: unknown): boolean => typeof value === "string" && /^loo
 const unsuccessful = new Set(["failed", "cancelled", "expired", "ambiguous", "unconfirmed"]);
 const deliveryToken = /^dlv_[A-Za-z0-9_-]{24}$/;
 
-export function groupCodexEndpoints<T extends Obj>(rows: readonly T[]): ReadonlyArray<Readonly<{ row: T; depth: number }>> {
-  const byId = new Map(rows.flatMap((row) => typeof row.id === "string" ? [[row.id, row] as const] : []));
-  const parent = (row: T): string | undefined => object(row.codex) && typeof row.codex.parentEndpoint === "string" ? row.codex.parentEndpoint : undefined;
-  const cyclic = new Set<string>();
-  for (const row of rows) { const path: string[] = []; let id = typeof row.id === "string" ? row.id : undefined;
-    while (id && byId.has(id)) { const seen = path.indexOf(id); if (seen >= 0) { path.slice(seen).forEach((item) => cyclic.add(item)); break; }
-      path.push(id); id = parent(byId.get(id)!); } }
-  const children = new Map<string, T[]>();
-  for (const row of rows) { const id = typeof row.id === "string" ? row.id : undefined, owner = parent(row);
-    if (id && owner && byId.has(owner) && !cyclic.has(id) && !cyclic.has(owner)) children.set(owner, [...children.get(owner) ?? [], row]); }
-  const emitted = new Set<T>(), result: Array<{ row: T; depth: number }> = [];
-  const emit = (row: T, depth: number) => { if (emitted.has(row)) return; emitted.add(row); result.push({ row, depth });
-    if (typeof row.id === "string") for (const child of children.get(row.id) ?? []) emit(child, depth + 1); };
-  for (const row of rows) { const owner = parent(row); if (!owner || !byId.has(owner) || cyclic.has(String(row.id))) emit(row, 0); }
-  for (const row of rows) emit(row, 0);
-  return result;
-}
-
 function tokenFeedback(token: string): string {
   if (deliveryToken.test(token)) return "format valid";
   if ("dlv_".startsWith(token) || /^dlv_[A-Za-z0-9_-]{0,23}$/.test(token)) return "format incomplete";
@@ -132,9 +113,9 @@ function tokenFeedback(token: string): string {
 }
 
 function endpointRows(snapshot?: Obj): EndpointRow[] {
-  const local = groupCodexEndpoints(list(snapshot?.routes)).map(({ row, depth }) => ({ id: text(row.id), alias: text(row.alias), provider: text(row.provider),
+  const local = list(snapshot?.routes).map((row) => ({ id: text(row.id), alias: text(row.alias), provider: text(row.provider),
     host: text(row.host), local: true, ...(typeof row.queueDepth === "number" ? { queueDepth: row.queueDepth } : {}),
-    ...(object(row.lastOperation) ? { lastOperation: row.lastOperation } : {}), ...(object(row.codex) ? { codex: row.codex, depth } : {}) }));
+    ...(object(row.lastOperation) ? { lastOperation: row.lastOperation } : {}), ...(object(row.codex) ? { codex: row.codex } : {}) }));
   const federation = object(snapshot?.federation) ? snapshot.federation : undefined;
   const remote = list(federation?.nodes).flatMap((node) => {
     const common = { host: text(node.host), local: false as const,
@@ -182,8 +163,8 @@ function lineFor(row: Obj | EndpointRow | DeliverySummary | string, section: Sec
   if ("summary" in row && row.summary === true) return summaryLine(row as DeliverySummary);
   if (section === "endpoints") { const endpoint = row as EndpointRow;
     const collision = collisions.has(endpoint.alias) ? ` [ambiguous; …${endpoint.id.slice(-8)}]` : "";
-    const codex = endpoint.codex ? `  ${text(endpoint.codex.state)} · direct input ${endpoint.codex.canAcceptDirectInput === false ? "refused" : endpoint.codex.canAcceptDirectInput === true ? "yes" : "unknown"}` : "";
-    return endpoint.local ? `${endpoint.depth ? "↳ " : ""}${endpoint.alias}${collision}  ${endpoint.provider}${codex}  queued ${endpoint.queueDepth ?? 0}  last ${operation(endpoint)}`
+    const codex = endpoint.codex ? `  ${text(endpoint.codex.state)}` : "";
+    return endpoint.local ? `${endpoint.alias}${collision}  ${endpoint.provider}${codex}  queued ${endpoint.queueDepth ?? 0}  last ${operation(endpoint)}`
       : `SSH ${endpoint.host} · catalog ${observedAge(endpoint.observedAt, now)}${endpoint.safeErrorCode ? ` / ${endpoint.safeErrorCode}` : ""}` +
         ` · ${endpoint.alias}${collision}  ${endpoint.provider}  queue/last not reported`;
   }

@@ -27,7 +27,7 @@ function valid(): LedgerState {
 }
 const decode = (state: unknown): boolean => codec.decode(structuredClone(state)) !== undefined;
 
-test("schema 6 round-trips exact local identities and permits a remote source without a local row", () => {
+test("schema 7 round-trips exact local identities and permits a remote source without a local row", () => {
   const state = valid();
   assert.equal(decode(state), true);
   const remote = endpoint("remote", "claude", "other-host");

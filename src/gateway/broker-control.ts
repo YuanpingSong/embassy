@@ -36,10 +36,8 @@ const rows = (x: unknown, maximum: number, accepts: (row: unknown) => boolean): 
   Array.isArray(x) && x.length <= maximum && x.every(accepts);
 const endpoints = (x: unknown, accepts = endpoint): boolean => rows(x, 128, accepts) &&
   new Set((x as Obj[]).map((row) => JSON.stringify([row.host, row.id]))).size === (x as Obj[]).length;
-const codexMetadata = (x: unknown): boolean => exact(x, ["state", "canAcceptDirectInput"], ["parentEndpoint"]) &&
-  ["notLoaded", "idle", "active", "waitingOnApproval", "waitingOnUserInput", "systemError", "unknown"].includes(String(x.state)) &&
-  (typeof x.canAcceptDirectInput === "boolean" || x.canAcceptDirectInput === "unknown") &&
-  (x.parentEndpoint === undefined || token(x.parentEndpoint, "reg_", "1,252"));
+const codexMetadata = (x: unknown): boolean => exact(x, ["state"]) &&
+  ["dormant", "idle", "busy", "waiting", "systemError", "unknown"].includes(String(x.state));
 
 /** One public projection contract, used before emission and after transport. Native
  * handles and arbitrary adapter fields can never hitchhike in a valid result. */

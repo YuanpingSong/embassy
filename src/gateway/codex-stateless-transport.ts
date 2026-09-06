@@ -93,7 +93,6 @@ export type StatelessCodexSafeErrorCode =
   | LocalCodexTransportErrorCode
   | "ACCEPTANCE_UNCONFIRMED"
   | "APPROVAL_REQUIRED"
-  | "CODEX_DIRECT_INPUT_UNAVAILABLE"
   | "INPUT_INVALID"
   | "MESSAGE_EXPIRED"
   | "PROTOCOL_ERROR"
@@ -179,10 +178,6 @@ type PreparedRequest = Readonly<{
 type FastCandidate = { terminal: TurnOutcome | null };
 
 type TerminalResult = Readonly<{ outcome: TurnOutcome }>;
-type ThreadObservation = Readonly<{
-  canAcceptDirectInput: boolean | null;
-  status: ReturnType<typeof parseRouteStatus>;
-}>;
 
 type AcceptedOperationKey = Readonly<{
   attemptId: string; registrationId: string; threadId: string; turnId: string;
@@ -205,7 +200,7 @@ class OperationError extends Error {
 
 class RpcRejectedError extends OperationError {
   constructor(
-    readonly reason: "closing" | "direct_input" | "not_found" | "overloaded" | "other",
+    readonly reason: "closing" | "not_found" | "overloaded" | "other",
   ) {
     super("RPC_REJECTED");
     this.name = "StatelessCodexRpcRejectedError";
@@ -449,20 +444,10 @@ class OperationSession {
       await this.initialize();
       this.awaitingAuthorization = true;
       this.prewriteProofValid = true;
-      const observed = await this.readThread();
-      if (observed?.canAcceptDirectInput === false) {
-        this.awaitingAuthorization = false;
-        return this.cleanFailure("CODEX_DIRECT_INPUT_UNAVAILABLE");
-      }
       // Resume also subscribes this exact operation connection. Even an
       // already-loaded thread needs that subscription for terminal and STEER
       // lifetime evidence; no history or configuration override is requested.
-      const thread = await this.resume();
-      if (thread.canAcceptDirectInput === false) {
-        this.awaitingAuthorization = false;
-        return this.cleanFailure("CODEX_DIRECT_INPUT_UNAVAILABLE");
-      }
-      const held = this.prewriteDisposition(thread.status);
+      const held = this.prewriteDisposition(await this.resume());
       if (held !== undefined) {
         this.awaitingAuthorization = false;
         return held;
@@ -745,44 +730,14 @@ class OperationSession {
     }
   }
 
-  private async readThread(): Promise<ThreadObservation | null> {
-    try {
-      return await this.observeThread(
-        "thread/read",
-        { includeTurns: false, threadId: this.input.route.threadId },
-        true,
-      );
-    } catch (error) {
-      if (error instanceof OperationError && error.code === "THREAD_NOT_OBSERVED") {
-        return null;
-      }
-      throw error;
-    }
-  }
-
-  private async resume(): Promise<ThreadObservation> {
-    return this.observeThread(
-      "thread/resume",
-      { excludeTurns: true, threadId: this.input.route.threadId },
-      true,
-    );
-  }
-
-  private async observeThread(
-    method: "thread/read" | "thread/resume",
-    params: JsonObject,
-    requireEmptyTurns: boolean,
-  ): Promise<ThreadObservation> {
+  private async resume(): Promise<ReturnType<typeof parseRouteStatus>> {
     let result: unknown;
     try {
-      result = await this.request(method, params);
+      result = await this.request("thread/resume", { excludeTurns: true, threadId: this.input.route.threadId });
     } catch (error) {
       if (error instanceof RpcRejectedError) {
         if (error.reason === "closing" || error.reason === "overloaded") {
           throw new CleanDeferredError("ROUTE_BUSY");
-        }
-        if (error.reason === "direct_input") {
-          throw new OperationError("CODEX_DIRECT_INPUT_UNAVAILABLE");
         }
         if (error.reason === "not_found") {
           throw new OperationError("THREAD_NOT_OBSERVED");
@@ -795,21 +750,13 @@ class OperationSession {
       !isRecord(result.thread) ||
       result.thread.id !== this.input.route.threadId ||
       !Array.isArray(result.thread.turns) ||
-      (requireEmptyTurns && result.thread.turns.length !== 0)
+      result.thread.turns.length !== 0
     ) {
       throw new OperationError("RESULT_SCHEMA_MISMATCH");
     }
     const status = parseRouteStatus(result.thread.status);
     if (status === null) throw new OperationError("RESULT_SCHEMA_MISMATCH");
-    const directInput = result.thread.canAcceptDirectInput;
-    if (
-      directInput !== undefined &&
-      directInput !== null &&
-      typeof directInput !== "boolean"
-    ) {
-      throw new OperationError("RESULT_SCHEMA_MISMATCH");
-    }
-    return { canAcceptDirectInput: directInput ?? null, status };
+    return status;
   }
 
   private prewriteDisposition(
@@ -840,7 +787,6 @@ class OperationSession {
   private prepareRequest(method: string, params: JsonObject): PreparedRequest {
     if (
       method !== "initialize" &&
-      method !== "thread/read" &&
       method !== "thread/resume" &&
       method !== "thread/unsubscribe" &&
       method !== "turn/start" &&
@@ -952,14 +898,6 @@ class OperationSession {
         ? "overloaded"
         : typeof message === "string" && message.includes(" is closing; retry thread/resume ")
           ? "closing"
-          : typeof message === "string" && message.startsWith(
-            "direct app-server input is not allowed for ",
-          )
-            ? "direct_input"
-            : typeof message === "string" && message.startsWith(
-              "cannot resume an unloaded multi-agent v2 sub-agent through its parent; ",
-            )
-              ? "direct_input"
           : typeof message === "string" && message.startsWith("thread not found: ")
             ? "not_found"
             : "other";

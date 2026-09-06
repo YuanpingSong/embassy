@@ -32,6 +32,7 @@ export type OwnedStateDocument = Readonly<{
 
 export type OwnedStateCodec<T extends OwnedStateDocument> = Readonly<{
   schemaVersion: number;
+  previousSchemaVersion?: number;
   maximumBytes: number;
   decode: (value: unknown) => T | undefined;
   create: (input: Readonly<{ now: Date; commit: OwnedStateCommit }>) => T;
@@ -412,7 +413,7 @@ export class OwnedStateFile<T extends OwnedStateDocument> {
     }
     if (
       isObject(parsed) && Object.hasOwn(parsed, "schemaVersion") &&
-      parsed.schemaVersion !== this.codec.schemaVersion
+      parsed.schemaVersion !== this.codec.schemaVersion && parsed.schemaVersion !== this.codec.previousSchemaVersion
     ) {
       throw new BridgeError(
         "GATEWAY_STATE_SCHEMA_UNSUPPORTED",

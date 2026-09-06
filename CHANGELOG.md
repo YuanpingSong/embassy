@@ -7,10 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
-- Native Codex App Server discovery presents current unarchived root and child agents as ordinary Codex endpoints without per-task registration. Dormant agents wake on delivery; `register-codex` remains the fallback for non-native harnesses, and retirement suppresses immediate rediscovery.
+- Native Codex App Server discovery lists the recency top 20 unarchived root threads as ordinary Codex endpoints without per-task registration; sub-agents are excluded. Dormant agents wake on delivery; `register-codex` remains the fallback for non-native harnesses, and retirement suppresses immediate rediscovery.
 
 ### Changed
-- Private control protocol 5 → 6 for the bounded Codex metadata projection. Private state remains schema 6 and federation remains protocol 3.
+- Private control protocol 5 → 6 for root status metadata. Private state 6 reads forward into 7 with one private retention marker; existing 4.2.0 rows remain retained. Window aging hides automatic rows without retiring them. Back up state before upgrading: 4.2.0 refuses schema 7, so rollback requires the pre-upgrade backup. Federation stays protocol 3.
 - Ordinary Codex delivery starts only after an immediate idle observation. A competing client can win the remaining check/write race; the App Server cannot distinguish that steer from a fresh turn, so receipts prove acceptance and lifetime rather than fresh-turn creation. Exact-turn `STEER:` remains explicit and unchanged.
 
 ## [4.2.0] - 2026-09-06

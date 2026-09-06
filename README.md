@@ -17,7 +17,7 @@ identity, so a rename or replacement never silently retargets queued work.
 - Claude Code installed for the Claude sessions you use.
 - To receive in Codex, use its managed standalone installation with its App
   Server daemon already running under the same macOS login. Embassy discovers
-  its current unarchived agents automatically, but does not install, start or
+  its 20 most recent unarchived root agents automatically, but does not install, start or
   update that daemon; merely having a `codex` executable on PATH is
   insufficient.
 - A private `nodes.json` when choosing an explicit host name or federating;
@@ -85,7 +85,7 @@ Read `host` from the `nodes.json` that first boot created and use it as every
 local `@host` suffix; the examples use `@studio` only when you explicitly chose
 `host: studio`, not as a universal alias suffix.
 
-Codex agents appear automatically from the same-user App Server daemon. Run
+The 20 most recent Codex root agents appear automatically from the same-user App Server daemon. Run
 `embassy status` to see their current public names; dormant agents remain
 addressable and wake on delivery. Native task IDs, previews and history never
 appear in Embassy output.
@@ -287,9 +287,11 @@ See [Security](SECURITY.md), [Configuration](docs/CONFIGURATION.md), and
 
 ## Upgrading to 4.x
 
-Version 4 accepts only fresh private state schema 6. Codex discovery changes
-the private control protocol from 5 to 6; CLI and broker must come from one
-installation. It does not migrate or read 3.x state.
+Codex discovery reads valid schema 6 forward and writes schema 7, adding only a
+private retention marker; existing 4.2.0 endpoints stay retained. No reset is
+needed for 4.2.0. Back up `gateway-state.json` before upgrading: 4.2.0 refuses
+schema 7, so rollback requires that pre-upgrade backup. Private control changes
+5→6; upgrade CLI and broker together. There is no 3.x migration.
 
 Before replacing a 3.x installation, use its matching CLI to inspect and
 settle or explicitly abandon pending work; stop a launchd broker with
@@ -305,7 +307,7 @@ old binary as well as its old state if rollback may be needed, and never run
 the old and new brokers together. See the [reset procedure](docs/CONFIGURATION.md#private-state-reset).
 
 The rollback boundary is the preserved old state plus its matching old binary.
-Do not point an old binary at schema-6 state or a v4 binary at old state.
+Do not point 4.2.0 at schema-7 state or this release at schema ≤5.
 
 ## Development
 

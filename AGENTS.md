@@ -44,7 +44,7 @@ Never enable live provider activity in CI.
 - `ledger.ts` is the pure synchronous transition core. It owns endpoint,
   delivery, rate, and retirement state but no filesystem, provider, callback,
   or timer work.
-- `owned-state.ts` owns the single private schema-6 atomic JSON document.
+- `owned-state.ts` owns the single private schema-7 atomic JSON document.
 - `endpoint-directory.ts` owns current alias lookup and exact endpoint
   resolution.
 - `coordinator.ts` owns batching, scheduling, authorization, and phase-derived
@@ -73,7 +73,7 @@ propose a contract change rather than expanding the boundary through a test.
   and display data. Resolve a name once; never silently retarget admitted work
   after rename, replacement, retirement, or catalog change.
 - Discover Codex agents from bounded same-user App Server metadata. Keep the
-  immutable native ID private, preserve opaque root/child grouping, and treat
+  immutable native ID private, list only the recency top 20 roots, and treat
   native names as mutable aliases. `register-codex` remains a fallback using
   inherited `CODEX_THREAD_ID`; discovery and registration must reconcile one
   endpoint identity. Never accept, print, or guess the native ID. A Claude
@@ -121,9 +121,9 @@ propose a contract change rather than expanding the boundary through a test.
 - `health` describes local control. `check` proves only the broker's loopback
   ledger/coordinator/receipt path. Neither proves provider readiness, model
   comprehension, or cross-machine delivery.
-- State schema 6 is reset-only; private control protocol 6 requires a matching
-  CLI and broker. Old or unknown state refuses without mutation. There is no
-  converter or compatibility reader. A reset invalidates routes, receipts,
+- State schema 7 adds only a private retained-registration marker. Valid schema 6
+  reads forward with existing rows retained; writes use 7. Schemas ≤5 and
+  unknown state refuse without mutation. Private control 6 needs a matching CLI/broker. A reset invalidates routes, receipts,
   and conversations; rollback requires the untouched old state and matching
   old binary.
 - Preserve exact current-user ownership, modes, symlink, inode, lease, and

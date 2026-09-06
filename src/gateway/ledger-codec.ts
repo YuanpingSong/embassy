@@ -30,8 +30,9 @@ function endpointRef(value: unknown): value is EndpointRef {
     typeof value.provider === "string" && PROVIDERS.has(value.provider);
 }
 
-function endpoint(value: unknown, host: string): boolean {
-  return exact(value, ["id", "host", "provider", "alias", "handle"]) &&
+function endpoint(value: unknown, host: string, previous: boolean): boolean {
+  return exact(value, ["id", "host", "provider", "alias", "handle"], previous ? [] : ["retained"]) &&
+    (value.retained === undefined || value.retained === true) &&
     typeof value.id === "string" && REGISTRATION.test(value.id) && value.host === host &&
     typeof value.provider === "string" && PROVIDERS.has(value.provider) &&
     typeof value.alias === "string" && ALIAS.test(value.alias) && value.alias.endsWith(`@${host}`) &&
@@ -91,8 +92,8 @@ export function createLedgerCodec(host: string, limits: LedgerLimits): OwnedStat
   }
   const decode = (value: unknown): LedgerState | undefined => {
     if (!exact(value, ["schemaVersion", "commit", "endpoints", "deliveries", "retirements", "rates"]) ||
-      value.schemaVersion !== 6 || !exact(value.commit, ["sequence", "id"]) || !natural(value.commit.sequence) ||
-      !bounded(value.commit.id, 128) || !list(value.endpoints, (row) => endpoint(row, host)) ||
+      (value.schemaVersion !== 6 && value.schemaVersion !== 7) || !exact(value.commit, ["sequence", "id"]) || !natural(value.commit.sequence) ||
+      !bounded(value.commit.id, 128) || !list(value.endpoints, (row) => endpoint(row, host, value.schemaVersion === 6)) ||
       !list(value.deliveries, (row) => delivery(row, limits)) ||
       !list(value.retirements, (row) => exact(row, ["endpoint", "nativeKey", "alias", "at"]) && endpointRef(row.endpoint) &&
         typeof row.nativeKey === "string" && /^[a-f0-9]{64}$/.test(row.nativeKey) &&
@@ -123,10 +124,14 @@ export function createLedgerCodec(host: string, limits: LedgerLimits): OwnedStat
       if (prior !== undefined && prior !== signature) return undefined;
       attempts.set(row.state.attempt, signature);
     }
-    return state;
+    // 4.2.0 had no automatic Codex discovery: its existing rows are retained.
+    // Normalize only after validating the complete prior document and references.
+    return value.schemaVersion === 6 ? { ...state, schemaVersion: 7,
+      endpoints: state.endpoints.map((row) => ({ ...row, retained: true })) } : state;
   };
   return {
-    schemaVersion: 6,
+    schemaVersion: 7,
+    previousSchemaVersion: 6,
     maximumBytes: 8 * 1024 * 1024,
     decode,
     create: ({ commit }) => ({ ...emptyLedger(), commit }),

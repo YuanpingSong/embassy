@@ -3,7 +3,7 @@ import { BridgeError } from "../errors.js";
 import { composeProvenanceEnvelope } from "./provenance-envelope.js";
 
 export type EndpointRef = Readonly<{ id: string; host: string; provider: "claude" | "codex" }>;
-export type Endpoint = EndpointRef & { alias: string; handle: string };
+export type Endpoint = EndpointRef & { alias: string; handle: string; retained?: true };
 export type Outcome = "delivered" | "failed" | "cancelled" | "expired" | "ambiguous" | "unconfirmed";
 export type PreparedWake = Readonly<{ bytes: number; sha256: string; bodies: readonly string[] }>;
 type Attempt = { attempt: string; tries: number };
@@ -23,7 +23,7 @@ export type Delivery = {
   sourceAlias?: string; state: DeliveryPhase;
 };
 export type LedgerState = {
-  schemaVersion: 6; commit: { sequence: number; id: string };
+  schemaVersion: 7; commit: { sequence: number; id: string };
   endpoints: Endpoint[]; deliveries: Delivery[];
   retirements: { endpoint: EndpointRef; nativeKey: string; alias: string; at: number }[];
   rates: { source: EndpointRef; since: number; count: number }[];
@@ -60,7 +60,7 @@ function fitsEscapedEnvelope(input: Pick<Delivery, "source" | "target" | "body">
 }
 
 export function emptyLedger(): LedgerState {
-  return { schemaVersion: 6, commit: { sequence: 0, id: "initial" }, endpoints: [], deliveries: [], retirements: [], rates: [] };
+  return { schemaVersion: 7, commit: { sequence: 0, id: "initial" }, endpoints: [], deliveries: [], retirements: [], rates: [] };
 }
 
 /** Pure synchronous transitions on a transaction-owned draft. No provider I/O, aliases in
@@ -86,7 +86,7 @@ export class Ledger {
     if (this.state.endpoints.some((e) => e.provider === endpoint.provider && e.handle === endpoint.handle && e.id !== endpoint.id)) reject("ROUTE_BINDING_MISMATCH");
     if (this.state.retirements.some((r) => sameEndpoint(r.endpoint, endpoint) || r.nativeKey === nativeKey(endpoint))) reject("ROUTE_UNREGISTERED");
     if (!owned && this.state.endpoints.length >= this.limits.endpoints) reject("ROUTE_CAPACITY_EXCEEDED");
-    if (owned) owned.alias = endpoint.alias;
+    if (owned) { owned.alias = endpoint.alias; if (endpoint.retained) owned.retained = true; }
     else this.state.endpoints.push({ ...endpoint });
   }
 

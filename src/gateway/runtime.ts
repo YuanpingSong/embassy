@@ -51,7 +51,7 @@ const cancelled = () => new BridgeError("GATEWAY_START_CANCELLED",
 const codexEnvironment = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => Object.fromEntries(
   ["HOME", "USER", "LOGNAME"].flatMap((key) => env[key] === undefined ? [] : [[key, env[key]!]]));
 
-/** Assemble the schema-6 broker. The bounded Codex metadata observer starts only
+/** Assemble the schema-7 broker. The bounded Codex metadata observer starts only
  * after control and state ownership are established; provider writes stay per-operation. */
 export async function runCoreRuntime(options: CoreRuntimeOptions, dependencies: CoreRuntimeDependencies = {}): Promise<void> {
   const env = options.env ?? process.env;
@@ -140,7 +140,8 @@ export async function runCoreRuntime(options: CoreRuntimeOptions, dependencies: 
     const codex = new CodexDestination({ host: config.hostId, operation: d.createCodexOperation(env) });
     loopback = new LoopbackDestination(codex);
     federation = d.createFederation(config.hostId, config.peerNodes);
-    const directory = new EndpointDirectory({ host: config.hostId, limits: ledgerLimits, store, claude: peer, remote: federation });
+    const directory = new EndpointDirectory({ host: config.hostId, limits: ledgerLimits, store, claude: peer, remote: federation,
+      automaticCodex: true });
     let codexObservation: CodexDiscoveryObservation = { complete: false, truncated: false };
     discovery = d.createCodexDiscovery({ hostId: config.hostId, local: { environment: codexEnvironment(env) },
       maxEndpoints: ledgerLimits.endpoints, onSnapshot: async (snapshot) => {

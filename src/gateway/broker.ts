@@ -121,7 +121,8 @@ export class MessagingBroker {
       this.options.directory.refresh(), this.options.federation?.catalog(), this.options.codexDiscovery?.refresh(),
     ]);
     this.kick();
-    return { routes: endpoints.map(publicEndpoint) };
+    const codex = (await this.options.store.snapshot()).endpoints.filter((row) => row.provider === "codex");
+    return { routes: this.options.directory.listed([...codex, ...endpoints.filter((row) => row.provider !== "codex")]).map(publicEndpoint) };
   }
 
   async status() {
@@ -133,7 +134,7 @@ export class MessagingBroker {
       revision: state.commit.sequence,
       ...(this.options.codexDiscovery ? { codex: this.options.codexDiscovery.observation() } : {}),
       ...(this.options.federation ? { federation: this.options.federation.snapshot() } : {}),
-      routes: state.endpoints.map((e) => ({ ...publicEndpoint(e),
+      routes: this.options.directory.listed(state.endpoints).map((e) => ({ ...publicEndpoint(e),
         ...(e.provider === "codex" && this.options.codexDiscovery ? { codex: this.options.directory.codexMetadata(e, state.endpoints) } : {}),
         ...(this.options.coordinator.observation(e) === undefined ? {} : { lastOperation: this.options.coordinator.observation(e) }),
         queueDepth: state.deliveries.filter((d) => d.target.id === e.id && d.target.host === e.host && d.state.phase !== "terminal").length })),

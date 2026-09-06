@@ -17,14 +17,14 @@ import { isBrokerResult } from "../src/gateway/broker-control.js";
 
 const deferred = <T = void>() => { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done; }); return { promise, resolve }; };
 
-test("real observer, directory and control discover without registration, deduplicate fallback and honor retirement", { timeout: 10_000 }, async (t) => {
+test("real observer, directory and control discover roots, deduplicate fallback and honor retirement", { timeout: 10_000 }, async (t) => {
   const f = await fixture(t), stop = new AbortController(), observed = deferred();
   const parent = "00000000-0000-4000-8000-000000000010", child = "00000000-0000-4000-8000-000000000011";
   const listeners = new Set<(payload: string) => void>();
   let factoryCloses = 0, transportCloses = 0;
   const threads = [
-    { id: parent, name: "planner", status: { type: "idle" }, canAcceptDirectInput: true },
-    { id: child, name: "worker", parentThreadId: parent, status: { type: "notLoaded" }, canAcceptDirectInput: false },
+    { id: parent, name: "planner", status: { type: "idle" } },
+    { id: child, name: "worker", status: { type: "notLoaded" } },
   ];
   const transport = { cleanupConfirmed: true,
     onMessage: (fn: (payload: string) => void) => { listeners.add(fn); return () => { listeners.delete(fn); }; },
@@ -47,11 +47,11 @@ test("real observer, directory and control discover without registration, dedupl
     try {
       await observed.promise;
       const first = await call("list_snapshot"); assert.equal(isBrokerResult("list_snapshot", first), true);
-      const routes = first.routes as Array<{ id: string; alias: string; codex: { parentEndpoint?: string; canAcceptDirectInput: boolean } }>;
+      const routes = first.routes as Array<{ id: string; alias: string; codex: { state: string } }>;
       assert.equal(routes.length, 2);
       const root = routes.find((r) => r.alias === "codex-planner@local")!;
       const worker = routes.find((r) => r.alias === "codex-worker@local")!;
-      assert.equal(worker.codex.parentEndpoint, root.id); assert.equal(worker.codex.canAcceptDirectInput, false);
+      assert.equal(worker.codex.state, "dormant"); assert.equal(root.codex.state, "idle");
       assert.equal(JSON.stringify(first).includes(parent), false); assert.equal(JSON.stringify(first).includes(child), false);
       const registered = await call("register_codex", { caller: { kind: "codex", handle: parent }, alias: "codex-fallback@local" });
       assert.equal(registered.id, root.id);
@@ -125,7 +125,7 @@ async function seedQueued(stateDir: string): Promise<void> {
   await store.close();
 }
 
-test("runtime serves schema-6 commands and a real broker loopback without provider I/O", async (t) => {
+test("runtime serves schema-7 commands and a real broker loopback without provider I/O", async (t) => {
   const f = await fixture(t), stop = new AbortController();
   let checked: unknown;
   const running = runCoreRuntime({ env: { EMBASSY_STATE_DIR: f.stateDir }, signal: stop.signal, onReady: async () => {
@@ -141,7 +141,7 @@ test("runtime serves schema-6 commands and a real broker loopback without provid
   assert.equal(f.providerCalls(), 0);
   assert.equal(f.peerCloses(), 1);
   assert.equal(f.leaseCloses(), 1);
-  assert.equal((JSON.parse(await readFile(path.join(f.stateDir, "gateway-state.json"), "utf8")) as { schemaVersion: number }).schemaVersion, 6);
+  assert.equal((JSON.parse(await readFile(path.join(f.stateDir, "gateway-state.json"), "utf8")) as { schemaVersion: number }).schemaVersion, 7);
 });
 
 test("lease loss blocks shutdown persistence while every independent resource still closes", async (t) => {
@@ -190,7 +190,7 @@ test("a changed node inventory refuses before provider construction", async (t) 
     ensureInventory: async () => ({ host: "other-host", nodes: [] }) }),
   (error: unknown) => error instanceof Error && "code" in error && error.code === "GATEWAY_NODE_INVENTORY_CHANGED");
   const state = JSON.parse(await readFile(path.join(f.stateDir, "gateway-state.json"), "utf8")) as { schemaVersion: number; endpoints: unknown[] };
-  assert.equal(state.schemaVersion, 6);
+  assert.equal(state.schemaVersion, 7);
   assert.deepEqual(state.endpoints, []);
   assert.equal(f.providerCalls(), 0);
   assert.equal(f.leaseCloses(), 1);

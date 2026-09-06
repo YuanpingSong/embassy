@@ -76,8 +76,7 @@ The receiving Claude session wakes through its native socket.
 The broker creates a fresh bounded App Server operation, resumes the exact
 known task without retaining returned history, prepares the input, then
 revalidates the endpoint and operation immediately before the write. Dormant
-agents therefore wake through ordinary delivery. A native direct-input refusal
-remains a visible endpoint refusal. The accepted operation remains attached
+roots therefore wake through ordinary delivery. The accepted operation remains attached
 until its terminal lifetime event so an active-turn STEER has a valid target.
 
 Ordinary messages remain queued while the immediately observed task status is

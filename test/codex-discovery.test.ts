@@ -66,7 +66,7 @@ const thread = (
   id: string,
   extra: Record<string, unknown> = {},
 ): Record<string, unknown> => ({
-  id, source: "cli", status: { type: "idle" }, canAcceptDirectInput: true, ...extra,
+  id, source: "cli", status: { type: "idle" }, ...extra,
 });
 
 function observer(
@@ -95,7 +95,7 @@ test("discovery initializes before a bounded paged scan and projects only consum
     }
     if (frame.method === "thread/list") {
       return { data: [thread(B, {
-        agentNickname: "Child", parentThreadId: A,
+        name: "Waiting",
         status: { activeFlags: ["waitingOnApproval"], type: "active" },
       })], nextCursor: null };
     }
@@ -107,7 +107,7 @@ test("discovery initializes before a bounded paged scan and projects only consum
   await discovery.refresh();
 
   assert.deepEqual(wire.frames.map(({ method }) => method), [
-    "initialize", "initialized", "thread/list", "thread/list", "thread/loaded/list",
+    "initialize", "initialized", "thread/list", "thread/list",
   ]);
   assert.deepEqual(wire.frames[0], {
     id: 1,
@@ -126,16 +126,16 @@ test("discovery initializes before a bounded paged scan and projects only consum
     },
   });
   assert.deepEqual(wire.frames[2]!.params, {
-    archived: false, limit: 100, sortKey: "recencyAt",
-    sourceKinds: ["cli", "vscode", "exec", "appServer", "subAgent", "subAgentThreadSpawn"],
+    archived: false, limit: 20, sortKey: "recencyAt",
+    sourceKinds: ["cli", "vscode", "exec", "appServer"],
     useStateDbOnly: true,
   });
   assert.deepEqual(discovery.snapshot(), {
     threads: [
-      { id: A, name: "Root", status: "idle", canAcceptDirectInput: true, loaded: false },
+      { id: A, name: "Root", status: "idle", loaded: true },
       {
-        id: B, agentNickname: "Child", parentThreadId: A,
-        status: "waitingOnApproval", canAcceptDirectInput: true, loaded: true,
+        id: B, name: "Waiting",
+        status: "waiting", loaded: true,
       },
     ],
     removedIds: [],
@@ -166,8 +166,7 @@ test("events delivered during paging win reconciliation and newly subscribed thr
   await discovery.refresh();
 
   assert.deepEqual(discovery.snapshot().threads, [
-    { id: A, name: "Renamed", status: "idle", canAcceptDirectInput: true, loaded: false },
-    { id: C, name: "New", status: "idle", canAcceptDirectInput: true, loaded: true },
+    { id: A, name: "Renamed", status: "idle", loaded: true },
   ]);
   assert.ok(wire.frames.some((frame) => frame.method === "thread/unsubscribe" &&
     (frame.params as Frame).threadId === C));
@@ -243,7 +242,7 @@ test("archive removal survives a failed consumer and closed only marks a thread 
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.deepEqual(discovery.snapshot().threads, [
-    { id: A, status: "notLoaded", canAcceptDirectInput: true, loaded: false },
+    { id: A, status: "dormant", loaded: false },
   ]);
   assert.deepEqual(discovery.snapshot().removedIds, [B]);
 
@@ -253,7 +252,7 @@ test("archive removal survives a failed consumer and closed only marks a thread 
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(discovery.snapshot().removedIds, []);
-  assert.equal(discovery.snapshot().threads[0]!.status, "waitingOnUserInput");
+  assert.equal(discovery.snapshot().threads[0]!.status, "waiting");
   await discovery.close();
 });
 
@@ -273,29 +272,25 @@ test("start reconnects after transport loss without exposing native frames", asy
     createFactory: async () => factory(wires[factoryIndex++]!),
   });
   discovery.start();
-  while (wires[0]!.frames.length < 4) await new Promise((resolve) => setImmediate(resolve));
+  while (wires[0]!.frames.length < 3) await new Promise((resolve) => setImmediate(resolve));
   wires[0]!.lose();
-  while (wires[1]!.frames.length < 4) await new Promise((resolve) => setImmediate(resolve));
+  while (wires[1]!.frames.length < 3) await new Promise((resolve) => setImmediate(resolve));
 
   assert.deepEqual(discovery.snapshot().threads.map(({ id }) => id), [B]);
   assert.equal(JSON.stringify(snapshots).includes("thread/list"), false);
   await discovery.close();
 });
 
-test("loaded-list paging and cold nullable capability match the pinned daemon shape", async () => {
+test("root list already carries live status without a whole-daemon loaded scan", async () => {
   const wire = new FakeTransport((frame) => {
     if (frame.method === "initialize") return {};
-    if (frame.method === "thread/list") return { data: [thread(A, { canAcceptDirectInput: null }), thread(B)], nextCursor: null };
-    if (frame.method === "thread/loaded/list") return (frame.params as Frame).cursor
-      ? { data: [B], nextCursor: null } : { data: [A], nextCursor: "loaded-2" };
+    if (frame.method === "thread/list") return { data: [thread(A), thread(B)], nextCursor: null };
     throw new Error("unexpected request");
   });
   const discovery = observer(wire, []);
   await discovery.refresh();
-  assert.deepEqual(discovery.snapshot().threads.map((row) => [row.id, row.loaded, row.canAcceptDirectInput]),
-    [[A, true, undefined], [B, true, true]]);
-  assert.deepEqual(wire.frames.filter((r) => r.method === "thread/loaded/list").map((r) => r.params),
-    [{ limit: 100 }, { limit: 100, cursor: "loaded-2" }]);
+  assert.deepEqual(discovery.snapshot().threads.map((row) => [row.id, row.loaded]), [[A, true], [B, true]]);
+  assert.equal(wire.frames.some((r) => r.method === "thread/loaded/list"), false);
   await discovery.close();
 });
 
@@ -338,7 +333,7 @@ test("empty pages with ever-new cursors cannot make the scan unbounded", async (
   });
   const discovery = observer(wire, [], { maxEndpoints: 2 });
   await discovery.refresh();
-  assert.equal(pages, 3); assert.equal(discovery.snapshot().observation.truncated, true);
+  assert.equal(pages, 21); assert.equal(discovery.snapshot().observation.truncated, true);
   assert.equal(discovery.snapshot().observation.complete, false);
   await discovery.close();
 });
@@ -389,4 +384,21 @@ test("failed owned cleanup prevents another observer from attaching", async () =
   await discovery.refresh(); wire.lose(); await tick();
   await assert.rejects(discovery.refresh(), /cleanup failed/);
   assert.equal(connections, 1); await assert.rejects(discovery.close(), /cleanup failed/);
+});
+
+test("discovery stops at 20 roots in server recency order and does not read the older cursor", async () => {
+  const roots = Array.from({ length: 20 }, (_, n) => thread(`00000000-0000-7000-8000-${n.toString(16).padStart(12, "0")}`,
+    { name: `root-${n}`, status: { type: n === 0 ? "active" : n === 1 ? "idle" : "notLoaded" } }));
+  let calls = 0;
+  const wire = new FakeTransport((frame) => {
+    if (frame.method === "initialize") return {};
+    if (frame.method === "thread/list") { calls++; assert.equal((frame.params as Frame).cursor, undefined);
+      return { data: roots, nextCursor: "older" }; }
+    return { data: [], nextCursor: null };
+  });
+  const discovery = observer(wire, []); await discovery.refresh();
+  assert.equal(calls, 1); assert.equal(discovery.snapshot().observation.complete, true);
+  assert.deepEqual(discovery.snapshot().threads.map((row) => row.name), roots.map((row) => row.name));
+  assert.deepEqual(discovery.snapshot().threads.slice(0, 3).map((row) => row.status), ["busy", "idle", "dormant"]);
+  await discovery.close();
 });

@@ -8,7 +8,7 @@ import type { ClaudePeerDiscovery } from "../src/gateway/claude-peer.js";
 import type { CodexThread } from "../src/gateway/codex-discovery.js";
 import { EndpointDirectory, type ClaudeDirectoryAdapter } from "../src/gateway/endpoint-directory.js";
 import { createLedgerCodec } from "../src/gateway/ledger-codec.js";
-import { ledgerDefaults, type LedgerLimits } from "../src/gateway/ledger.js";
+import { Ledger, ledgerDefaults, type LedgerLimits } from "../src/gateway/ledger.js";
 import { OwnedStateFile } from "../src/gateway/owned-state.js";
 
 const HOST = "local";
@@ -53,12 +53,12 @@ test("native discovery reuses manual identity, renames one row, and defensively 
   const manual = await f.directory.registerCodex(IDS[0], "codex-manual@local");
   const result = await f.directory.reconcileCodex([
     thread(IDS[0], "stale"),
-    thread(IDS[0].toUpperCase(), "Review Agent", { agentNickname: "Original nickname" }),
+    thread(IDS[0].toUpperCase(), "Review Agent"),
   ]);
   assert.equal(result.truncated, false);
   assert.deepEqual(result.endpoints, [{ ...manual, alias: "codex-review-agent@local" }]);
   assert.deepEqual((await f.store.snapshot()).endpoints, result.endpoints);
-  await f.directory.reconcileCodex([thread(IDS[0], "Renamed", { agentNickname: "Original nickname" })]);
+  await f.directory.reconcileCodex([thread(IDS[0], "Renamed")]);
   assert.deepEqual((await f.store.snapshot()).endpoints, [{ ...manual, alias: "codex-renamed@local" }]);
 });
 
@@ -66,6 +66,8 @@ test("unnamed and native-ID-shaped names derive stable aliases only from the pub
   const f = await fixture(t);
   const first = await f.directory.reconcileCodex([thread(IDS[0])]);
   assert.equal(first.endpoints[0]?.alias, "codex-agent-public1@local");
+  const untitled = await f.directory.reconcileCodex([thread(IDS[0], "Untitled task")]);
+  assert.equal(untitled.endpoints[0]?.alias, first.endpoints[0]?.alias);
   const renamed = await f.directory.reconcileCodex([thread(IDS[0], `task ${IDS[0]}`)]);
   assert.equal(renamed.endpoints[0]?.id, first.endpoints[0]?.id);
   assert.equal(renamed.endpoints[0]?.alias, "codex-agent-public1@local");
@@ -116,24 +118,49 @@ test("positive archive/delete evidence retires exact identity and suppresses red
   assert.equal(state.retirements[0]?.endpoint.id, installed.id);
   assert.equal(state.retirements[0]?.nativeKey.length, 64);
   assert.deepEqual(f.directory.codexMetadata(installed, []), {
-    state: "unknown", canAcceptDirectInput: "unknown",
+    state: "unknown",
   });
   assert.deepEqual((await f.directory.reconcileCodex([thread(IDS[0], "gone")])).endpoints, []);
 });
 
-test("Codex metadata is memory-only and resolves parentage only to a public endpoint ID", async (t) => {
+test("Codex root status is memory-only", async (t) => {
   const f = await fixture(t);
   const result = await f.directory.reconcileCodex([
-    thread(IDS[0], "parent", { status: "active", canAcceptDirectInput: true }),
-    thread(IDS[1], "child", { parentThreadId: IDS[0], status: "waitingOnApproval" }),
+    thread(IDS[0], "working", { status: "busy" }),
+    thread(IDS[1], "approval", { status: "waiting" }),
   ]);
   const parent = result.endpoints.find((row) => row.handle === IDS[0])!;
   const child = result.endpoints.find((row) => row.handle === IDS[1])!;
   assert.deepEqual(f.directory.codexMetadata(parent, result.endpoints), {
-    state: "active", canAcceptDirectInput: true,
+    state: "busy",
   });
   assert.deepEqual(f.directory.codexMetadata(child, result.endpoints), {
-    state: "waitingOnApproval", canAcceptDirectInput: "unknown", parentEndpoint: parent.id,
+    state: "waiting",
   });
   assert.doesNotMatch(JSON.stringify(await f.store.snapshot()), /waitingOnApproval|canAcceptDirectInput|parentThreadId/u);
+});
+
+test("window aging hides without retiring, preserves admitted identities, and fallback survives restart", async (t) => {
+  const f = await fixture(t);
+  const initial = await f.directory.reconcileCodex([thread(IDS[0], "old"), thread(IDS[1], "kept")]);
+  const old = initial.endpoints[0]!, kept = initial.endpoints[1]!;
+  await f.store.transact((state) => new Ledger(state, HOST, ledgerDefaults, 1_000).admit({
+    id: "msg_00000000-0000-4000-8000-000000000011", token: "dlv_abcdefghijklmnopqrstuvwx",
+    reply: "conv_abcdefghijklmnop", source: old, target: kept, body: "queued before aging",
+    deadline: 10_000, steer: false,
+  }));
+  const deliveries = (await f.store.snapshot()).deliveries;
+  const registered = await f.directory.registerCodex(IDS[1], kept.alias);
+  assert.equal(registered.id, kept.id); assert.equal(registered.retained, true);
+  await f.directory.reconcileCodex([thread(IDS[2], "new")]);
+  const state = await f.store.snapshot();
+  assert.equal(state.retirements.length, 0);
+  assert.deepEqual(state.deliveries, deliveries);
+  assert.equal((await f.directory.exact(old))!.id, old.id);
+  assert.deepEqual(f.directory.listed(state.endpoints).map((e) => e.alias), ["codex-new@local", "codex-kept@local"]);
+  const restarted = new EndpointDirectory({ ...f.directory.options, automaticCodex: true });
+  assert.deepEqual(restarted.listed((await f.store.snapshot()).endpoints).map((e) => e.id), [kept.id]);
+  await restarted.reconcileCodex([thread(IDS[0], "returned")]);
+  assert.equal(restarted.listed((await f.store.snapshot()).endpoints)[0]!.id, old.id);
+  assert.equal((await f.store.snapshot()).retirements.length, 0);
 });
