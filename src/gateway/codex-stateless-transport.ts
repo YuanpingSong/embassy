@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
+import { CORE_VERSION } from "./core-version.js";
 
 import type { CodexAppServerTransport } from "./codex-app-server.js";
 import {
@@ -696,7 +697,7 @@ class OperationSession {
       clientInfo: {
         name: "agent_embassy_gateway",
         title: "Embassy Gateway",
-        version: "4.0.0",
+        version: CORE_VERSION,
       },
     });
     if (!isRecord(result)) throw new OperationError("RESULT_SCHEMA_MISMATCH");

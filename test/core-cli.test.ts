@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { Readable, Writable } from "node:stream";
+import { PassThrough, Readable, Writable } from "node:stream";
 import test from "node:test";
 import { CORE_VERSION, runCoreCli } from "../src/gateway/core-cli.js";
 import { runCoreRuntime, type CoreRuntimeDependencies } from "../src/gateway/runtime.js";
@@ -78,11 +78,36 @@ test("CLI register, named send, retained reply and broker check traverse the rea
   assert.match(terminal.read(), /Recent deliveries:/);
   assert.match(terminal.read(), /Recent retirements:[\s\S]*codex-b@local/);
   assert.doesNotMatch(terminal.read(), /hello from A|explicit reply/);
+  const nonTty = sink();
+  assert.equal(await runCoreCli(["tui"], { env: { EMBASSY_STATE_DIR: stateDir },
+    stdin: Readable.from([]), stdout: nonTty.stream, stderr: errors.stream }), 0);
+  assert.match(nonTty.read(), /Recent deliveries:/);
+  assert.match(nonTty.read(), /Recent retirements:[\s\S]*codex-b@local/);
+  assert.doesNotMatch(nonTty.read(), /\u001b|hello from A|explicit reply/);
   const unknown = sink();
   assert.equal(await runCoreCli(["wait-delivery", "--token", "dlv_abcdefghijklmnopqrstuvwx"], {
     env: { EMBASSY_STATE_DIR: stateDir }, stdout: unknown.stream, stderr: errors.stream,
   }), 3, "a missing retained receipt is not a failed delivery");
   assert.deepEqual(JSON.parse(unknown.read()).result, { found: false });
+  const keys = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {} });
+  const screen = sink(); Object.assign(screen.stream, { isTTY: true, columns: 100, rows: 24 });
+  const tuiStop = new AbortController();
+  const tui = runCoreCli(["tui"], { env: { EMBASSY_STATE_DIR: stateDir }, stdin: keys,
+    stdout: screen.stream, stderr: errors.stream, signal: tuiStop.signal });
+  const screenHas = async (pattern: RegExp) => {
+    const deadline = Date.now() + 5_000;
+    while (!pattern.test(screen.read()) && Date.now() < deadline)
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    assert.match(screen.read(), pattern);
+  };
+  try {
+    await screenHas(/codex-a@local/);
+    keys.write("x"); await screenHas(/Endpoint ID: reg_/);
+    keys.write("y"); await screenHas(/cancelled.*ambiguous.*unconfirmed/);
+    assert.deepEqual((await cli(["status", "--json"])).result.routes, []);
+    assert.equal(writes.length, 2, "operator TUI retirement performs no native provider write");
+    keys.write("q"); assert.equal(await tui, 0);
+  } finally { tuiStop.abort(); await tui; }
 });
 
 test("help/version avoid state access", async () => {

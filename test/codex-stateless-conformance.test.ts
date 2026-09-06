@@ -87,6 +87,7 @@ function statelessFixture(
   cleanupFails = false,
   limits: Record<string, unknown> = {},
   onSemanticSend?: () => void,
+  scheduleCompletion: (complete: () => void) => void = (complete) => { setImmediate(complete); },
 ) {
   let factoryCount = 0;
   let connectCount = 0;
@@ -159,7 +160,7 @@ function statelessFixture(
             peer.result(frame, start);
             if (mode === "accepted-timeout" || mode === "steer-reject") return;
             if (mode === "accepted-close") return void setImmediate(() => { void peer.close(); });
-            setImmediate(() => {
+            scheduleCompletion(() => {
               peer.emit({ method: "turn/started", params: { threadId: THREAD, turn: start.turn } });
               complete();
             });
@@ -789,7 +790,9 @@ test("history setup loss and expiry remain clean with zero authorization or body
   assert.equal(expired.counts().semanticWrites, 0);
 });
 
-test("authorization denial and uncertainty send nothing while allow invokes send synchronously once", async () => {
+test("authorization denial and uncertainty send nothing while allow invokes send synchronously once", async (t) => {
+  // This pins send ordering, not the runner's ability to emit a fake terminal in 10 ms.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const denied = statelessFixture(["success"]);
   const deniedResult = await denied.operation.execute(input(async () => false));
   assert.equal(deniedResult.phase, "clean");
@@ -825,6 +828,31 @@ test("authorization denial and uncertainty send nothing while allow invokes send
   assertState(racedResult, "armed", "ambiguous");
   assert.equal(raced.counts().semanticWrites, 0);
   assertGolden("authorization-race", racedResult, 0);
+});
+
+test("delayed fixture completion expires after acceptance without violating synchronous send", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let complete!: () => void;
+  let fenced = false;
+  const current = statelessFixture(["success"], false, { requestTimeoutMs: 1_000 },
+    () => assert.equal(fenced, false), (callback) => { complete = callback; });
+  let release!: (value: boolean) => void;
+  let observed!: () => void;
+  const permit = new Promise<boolean>((resolve) => { release = resolve; });
+  const authorization = new Promise<void>((resolve) => { observed = resolve; });
+  const execution = current.operation.execute(input(() => { observed(); return permit; }));
+  await authorization;
+  release(true);
+  queueMicrotask(() => { fenced = true; });
+  // The fake provider's completion is pending, exactly like a delayed setImmediate.
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(current.counts().semanticWrites, 1);
+  t.mock.timers.tick(11);
+  const result = await execution;
+  assertState(result, "accepted", "unconfirmed");
+  assert.equal("safeErrorCode" in result ? result.safeErrorCode : undefined, "REQUEST_TIMEOUT");
+  complete();
+  assert.equal(current.counts().semanticWrites, 1);
 });
 
 test("a reserved authorization is fenced by later busy approval or protocol evidence", async () => {

@@ -141,6 +141,7 @@ ask the owner directly.
 ```sh
 embassy status
 embassy status --json
+embassy tui                                # interactive operator client
 embassy refresh
 embassy delivery-status --token dlv_example
 embassy wait-delivery --token dlv_example
@@ -153,6 +154,15 @@ embassy serve                              # foreground alternative
 `status` reports the broker ledger, queue depth, recent message outcomes,
 retirements, each local route's last native operation, and the last bounded SSH
 catalog observation. It does not claim that an idle provider is ready.
+
+`embassy tui` live-updates that metadata in a plain terminal (including over
+SSH). On-screen keys select endpoints, confirm exact-ID local retirement,
+refresh discovery, run the loopback check, or look up a delivery token.
+It never displays message bodies. Remote rows show catalog age, not remote
+broker health, queue depth or last operation: those are not reported by the
+catalog. Run the TUI on the owning machine to inspect its local ledger.
+Disconnected views are marked stale; actions are never automatically retried.
+Without an interactive terminal, `tui` prints the status text once and exits.
 
 Machine output is one closed JSON line shaped as
 `{"ok":true,"command":"status","result":{...}}`; route rows are therefore at

@@ -39,7 +39,7 @@ test("public command list agrees with the side-effect-free CLI help", async () =
     read(".claude/agents/content-writer.md"),
   ]);
   const commands = [
-    "register-codex", "send", "status", "refresh", "delivery-status",
+    "register-codex", "send", "status", "tui", "refresh", "delivery-status",
     "wait-delivery", "retire", "check", "health", "serve", "service",
     "peer-stdio",
   ];

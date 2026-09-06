@@ -15,14 +15,17 @@ import { LocalControlError, requestLocalControl } from "./local-control.js";
 import { runCoreRuntime } from "./runtime.js";
 import { defaultRunLaunchctl } from "./service-agent.js";
 import { runCoreServiceCommand } from "./core-service-command.js";
+import { runTui } from "./tui.js";
 
-export const CORE_VERSION = "4.0.0";
+import { CORE_VERSION } from "./core-version.js";
+export { CORE_VERSION } from "./core-version.js";
 const HELP = `Embassy — named Claude/Codex messaging over local gateways and SSH
 
   embassy register-codex --alias <codex-name@host> [--succeeds <old-alias>]
   embassy send --to <name@host>                    # body on stdin
   embassy send --conversation <reference>          # identity-bound reply
   embassy status [--json]
+  embassy tui                                    # live operator terminal
   embassy refresh
   embassy delivery-status --token <delivery-token>
   embassy wait-delivery --token <delivery-token>
@@ -132,7 +135,7 @@ export async function runCoreCli(args: readonly string[], dependencies: CoreCliD
   const env = dependencies.env ?? process.env, stdin = dependencies.stdin ?? process.stdin;
   const stdout = dependencies.stdout ?? process.stdout, stderr = dependencies.stderr ?? process.stderr;
   const write = (command: string, result: unknown): void => { stdout.write(`${JSON.stringify({ ok: true, command, result })}\n`); };
-  const verbs = ["--help", "--version", "serve", "service", "send", "register-codex", "retire", "status", "refresh", "health", "check", "delivery-status", "wait-delivery", "peer-stdio"];
+  const verbs = ["--help", "--version", "serve", "service", "send", "register-codex", "retire", "status", "tui", "refresh", "health", "check", "delivery-status", "wait-delivery", "peer-stdio"];
   const command = args[0] === undefined ? "--help" : verbs.includes(args[0]) ? args[0] : "unknown";
   let stateDir = "the configured state directory";
   try {
@@ -169,6 +172,12 @@ export async function runCoreCli(args: readonly string[], dependencies: CoreCliD
       if (Object.keys(response).length !== 2 || !isBrokerResult(request.method, response.result)) return malformed();
       return response.result;
     };
+    if (command === "tui") {
+      if (args.length !== 1) return invalid();
+      await runTui({ input: stdin, output: stdout, call, renderStatus,
+        ...(dependencies.signal ? { signal: dependencies.signal } : {}) });
+      return 0;
+    }
     if (command === "peer-stdio") {
       if (args.length !== 1) return invalid();
       const session = runFederationStdio({ host: inventory.host, nodes: inventory.nodes, input: stdin,

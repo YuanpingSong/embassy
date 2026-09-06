@@ -33,7 +33,7 @@ implementation detail into a product promise.
 - Private state is schema 6, local control is protocol 5, federation is protocol
   3, and consumed Claude peer records use protocol 1. Older state resets; it is
   not migrated.
-- Current commands are `register-codex`, `send`, `status`, `refresh`,
+- Current commands are `register-codex`, `send`, `status`, `tui`, `refresh`,
   `delivery-status`, `wait-delivery`, `retire`, `check`, `health`, `serve`,
   `service`, `peer-stdio`, `--version`, and `--help`. Nothing else exists.
 

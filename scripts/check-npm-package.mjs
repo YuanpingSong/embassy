@@ -43,6 +43,8 @@ const GATEWAY_RUNTIME_MODULES = [
   "coordinator",
   "core-cli",
   "core-service-command",
+  "core-version",
+  "tui",
   "endpoint-directory",
   "federation-nodes",
   "federation",

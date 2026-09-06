@@ -226,7 +226,7 @@ socket. A mutating request whose reply is lost after write reports
 The public CLI is:
 
 ```text
-register-codex   send              status
+register-codex   send              status            tui
 refresh          delivery-status   wait-delivery
 retire           check             health
 serve            service           peer-stdio
@@ -241,6 +241,11 @@ catalog observation. `health` is a control-path probe. `check` creates temporary
 private loopback endpoints and uses the real ledger/coordinator/receipt path,
 then retires them; no provider or model is contacted. It is not a
 provider-readiness test.
+
+`tui` is a terminal-only client: one in-flight status poll, serialized existing
+operator commands, and no broker protocol or state extension. Remote catalogs
+do not report broker health or remote operation/queue state. Disconnection
+marks retained display data stale; an action is never automatically replayed.
 
 Machine-facing CLI success is one `{ok, command, result}` JSON line. The
 snapshot is at `.result` and its endpoint rows at `.result.routes`; native
