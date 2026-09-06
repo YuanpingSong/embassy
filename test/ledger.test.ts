@@ -191,3 +191,18 @@ test("receipt retention ranks late completions by settlement, not admission", ()
   ledger().settle([earlier.id], "slow", "failed", "PREWRITE_REFUSED");
   assert.deepEqual(f.state.deliveries.map((d) => d.id), [earlier.id]);
 });
+
+test("an explicit delivery id cannot change its reply or authenticated remote alias", () => {
+  const f = fixture(), local = f.admit("local");
+  const { state: _localState, admittedAt: _localAt, ...localReplay } = local;
+  let before = JSON.stringify(f.state);
+  assert.throws(() => f.ledger().admit({ ...localReplay, reply: "another-reply" }), { code: "INVALID_PEER_HANDOFF" });
+  assert.equal(JSON.stringify(f.state), before);
+
+  const remote = endpoint("remote", "claude", "remote"), delivery = f.admit("remote", remote, f.target);
+  const { state: _remoteState, admittedAt: _remoteAt, ...remoteReplay } = delivery;
+  before = JSON.stringify(f.state);
+  assert.throws(() => f.ledger().admit({ ...remoteReplay, sourceAlias: "impostor@remote" }),
+    { code: "INVALID_PEER_HANDOFF" });
+  assert.equal(JSON.stringify(f.state), before);
+});

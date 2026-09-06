@@ -22,7 +22,7 @@ export type Delivery = {
 export type LedgerState = {
   schemaVersion: 6; commit: { sequence: number; id: string };
   endpoints: Endpoint[]; deliveries: Delivery[];
-  retirements: { endpoint: EndpointRef; alias: string; at: number }[];
+  retirements: { endpoint: EndpointRef; nativeKey: string; alias: string; at: number }[];
   rates: { source: EndpointRef; since: number; count: number }[];
 };
 export type LedgerLimits = Readonly<{
@@ -40,6 +40,8 @@ export const ledgerDefaults: LedgerLimits = Object.freeze({
 export const sameEndpoint = (a: EndpointRef, b: EndpointRef): boolean =>
   a.id === b.id && a.host === b.host && a.provider === b.provider;
 export const bodyHash = (body: string): string => createHash("sha256").update(body).digest("hex");
+export const nativeKey = (endpoint: Pick<Endpoint, "provider" | "handle">): string =>
+  bodyHash(`${endpoint.provider}\0${endpoint.handle}`);
 const ref = ({ id, host, provider }: EndpointRef): EndpointRef => ({ id, host, provider });
 const reject = (code: string): never => { throw new BridgeError(code, "The ledger request was refused."); };
 const pending = (d: Delivery): boolean => d.state.phase !== "terminal";
@@ -69,7 +71,7 @@ export class Ledger {
     const owned = this.state.endpoints.find((e) => e.id === endpoint.id);
     if (owned && (!sameEndpoint(owned, endpoint) || owned.handle !== endpoint.handle)) reject("ROUTE_BINDING_MISMATCH");
     if (this.state.endpoints.some((e) => e.provider === endpoint.provider && e.handle === endpoint.handle && e.id !== endpoint.id)) reject("ROUTE_BINDING_MISMATCH");
-    if (this.state.retirements.some((r) => sameEndpoint(r.endpoint, endpoint))) reject("ROUTE_UNREGISTERED");
+    if (this.state.retirements.some((r) => sameEndpoint(r.endpoint, endpoint) || r.nativeKey === nativeKey(endpoint))) reject("ROUTE_UNREGISTERED");
     if (!owned && this.state.endpoints.length >= this.limits.endpoints) reject("ROUTE_CAPACITY_EXCEEDED");
     if (owned) owned.alias = endpoint.alias;
     else this.state.endpoints.push({ ...endpoint });
@@ -95,7 +97,7 @@ export class Ledger {
     this.assertLocal(input.source);
     this.assertLocal(input.target);
     const bytes = Buffer.byteLength(input.body);
-    if (!bytes || input.body.includes("\0") || bytes > this.limits.bodyBytes) reject("INVALID_MESSAGE_BODY");
+    if (!input.body.trim() || input.body.includes("\0") || bytes > this.limits.bodyBytes) reject("INVALID_MESSAGE_BODY");
     if (input.deadline <= this.now || input.deadline > this.now + this.limits.deadlineMs) reject("MESSAGE_EXPIRED");
     if (input.steer && (input.source.provider !== "claude" || input.target.provider !== "codex" || !input.body.startsWith("STEER:"))) reject("INVALID_MESSAGE_BODY");
     if (input.source.host !== this.host && (!input.sourceAlias || !input.sourceAlias.endsWith(`@${input.source.host}`))) reject("INVALID_PEER_HANDOFF");
@@ -103,7 +105,8 @@ export class Ledger {
     const duplicate = this.state.deliveries.find((d) => d.id === input.id);
     if (duplicate) {
       if (!sameEndpoint(duplicate.source, input.source) || !sameEndpoint(duplicate.target, input.target) ||
-        duplicate.body !== input.body || duplicate.steer !== input.steer || duplicate.deadline !== input.deadline) reject("INVALID_PEER_HANDOFF");
+        duplicate.body !== input.body || duplicate.steer !== input.steer || duplicate.deadline !== input.deadline ||
+        duplicate.reply !== input.reply || duplicate.sourceAlias !== input.sourceAlias) reject("INVALID_PEER_HANDOFF");
       return { delivery: duplicate, duplicate: true };
     }
     const active = this.state.deliveries.filter(pending);
@@ -232,7 +235,7 @@ export class Ledger {
       counts[outcome]++;
     }
     this.state.endpoints = this.state.endpoints.filter((e) => !sameEndpoint(e, identity));
-    this.state.retirements.push({ endpoint: ref(identity), alias: endpoint.alias, at: this.now });
+    this.state.retirements.push({ endpoint: ref(identity), nativeKey: nativeKey(endpoint), alias: endpoint.alias, at: this.now });
     this.prune();
     return counts;
   }

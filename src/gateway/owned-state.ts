@@ -43,6 +43,7 @@ export type OwnedStateDependencies = Readonly<{
   now?: () => Date;
   randomId?: () => string;
   renameStateFile?: (source: string, target: string) => Promise<void>;
+  syncStateDirectory?: (directory: string) => Promise<void>;
   afterStateFileRename?: () => void | Promise<void>;
 }>;
 
@@ -121,6 +122,7 @@ export class OwnedStateFile<T extends OwnedStateDocument> {
   private readonly now: () => Date;
   private readonly randomId: () => string;
   private readonly renameStateFile: (source: string, target: string) => Promise<void>;
+  private readonly syncStateDirectory: (directory: string) => Promise<void>;
   private readonly afterStateFileRename: (() => void | Promise<void>) | undefined;
   private readonly mutex = new KeyedMutex();
   private state: T | undefined;
@@ -148,6 +150,14 @@ export class OwnedStateFile<T extends OwnedStateDocument> {
     this.now = dependencies.now ?? (() => new Date());
     this.randomId = dependencies.randomId ?? randomUUID;
     this.renameStateFile = dependencies.renameStateFile ?? rename;
+    this.syncStateDirectory = dependencies.syncStateDirectory ?? (async (directoryPath) => {
+      const directory = await open(directoryPath, constants.O_RDONLY);
+      try {
+        await directory.sync();
+      } finally {
+        await directory.close();
+      }
+    });
     this.afterStateFileRename = dependencies.afterStateFileRename;
   }
 
@@ -438,6 +448,7 @@ export class OwnedStateFile<T extends OwnedStateDocument> {
     }
     let handle: FileHandle | undefined;
     let renameAttempted = false;
+    let directorySyncAttempted = false;
     try {
       try {
         handle = await open(
@@ -467,12 +478,8 @@ export class OwnedStateFile<T extends OwnedStateDocument> {
         renameAttempted = true;
         await this.renameStateFile(temporary, this.stateFilePath);
         await this.afterStateFileRename?.();
-        const directory = await open(this.rootDir, constants.O_RDONLY);
-        try {
-          await directory.sync();
-        } finally {
-          await directory.close();
-        }
+        directorySyncAttempted = true;
+        await this.syncStateDirectory(this.rootDir);
       } catch (error) {
         if (!renameAttempted) throw error;
         let installed: T | undefined;
@@ -482,7 +489,22 @@ export class OwnedStateFile<T extends OwnedStateDocument> {
         } catch {
           readbackFailed = true;
         }
-        if (sameCommit(installed, next)) return;
+        if (sameCommit(installed, next)) {
+          // A readback identifies the installed value, but only a confirmed
+          // directory sync makes that rename durable across process failure.
+          if (!directorySyncAttempted) {
+            try {
+              directorySyncAttempted = true;
+              await this.syncStateDirectory(this.rootDir);
+              return;
+            } catch {
+              // Fall through to the unknown-outcome poison below.
+            }
+          }
+          this.poisoned = true;
+          this.state = undefined;
+          throw new PostRenamePersistenceError();
+        }
         if (!readbackFailed && sameCommit(installed, prior)) throw error;
         this.poisoned = true;
         this.state = undefined;

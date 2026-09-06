@@ -8,6 +8,7 @@ import {
   mkdtemp,
   readFile,
   realpath,
+  rename,
   rm,
   symlink,
   unlink,
@@ -965,6 +966,10 @@ test("prepared send refuses a replaced socket generation before connecting", asy
     { deadlineAt: Date.now() + 30_000 },
   );
 
+  // Keep the old socket inode allocated so Linux cannot immediately reuse it
+  // for the replacement and make this test accidentally preserve generation.
+  const retainedSocket = path.join(current.root, "retained-original.sock");
+  await rename(original.socketPath, retainedSocket);
   await new Promise<void>((resolve, reject) =>
     original.server.close((error) => error ? reject(error) : resolve()),
   );
@@ -976,6 +981,14 @@ test("prepared send refuses a replaced socket generation before connecting", asy
   });
   await listen(replacement, original.socketPath);
   current.servers.push(replacement);
+  const [oldGeneration, newGeneration] = await Promise.all([
+    lstat(retainedSocket, { bigint: true }),
+    lstat(original.socketPath, { bigint: true }),
+  ]);
+  assert.notDeepEqual(
+    [oldGeneration.dev, oldGeneration.ino, oldGeneration.ctimeNs],
+    [newGeneration.dev, newGeneration.ino, newGeneration.ctimeNs],
+  );
 
   await assert.rejects(
     prepared.perform(async () => true),
@@ -985,6 +998,47 @@ test("prepared send refuses a replaced socket generation before connecting", asy
       error.recoverable,
   );
   assert.equal(replacementBytes, 0);
+});
+
+test("prepared send refuses a ctime-only socket generation change", async (t) => {
+  let connections = 0;
+  let receivedBytes = 0;
+  const current = await fixture(t, { createId: () => MESSAGE_ONE });
+  const peer = await addPeer(current, {
+    pid: 43_153,
+    handler: (socket) => {
+      connections += 1;
+      socket.on("data", (chunk) => {
+        receivedBytes += chunk.length;
+      });
+    },
+  });
+  const target = await selectFirstPeer(current);
+  const prepared = await current.adapter.prepareSend(
+    target.targetId,
+    "must stay on the exact socket metadata generation",
+    { deadlineAt: Date.now() + 30_000 },
+  );
+  const before = await lstat(peer.socketPath, { bigint: true });
+  let after = before;
+  for (let attempt = 0; attempt < 8 && after.ctimeNs === before.ctimeNs; attempt += 1) {
+    await chmod(peer.socketPath, 0o640);
+    await chmod(peer.socketPath, 0o600);
+    after = await lstat(peer.socketPath, { bigint: true });
+  }
+  assert.deepEqual([after.dev, after.ino], [before.dev, before.ino]);
+  assert.notEqual(after.ctimeNs, before.ctimeNs);
+  assert.equal(Number(after.mode & 0o777n), 0o600);
+
+  await assert.rejects(
+    prepared.perform(async () => true),
+    (error: unknown) =>
+      error instanceof BridgeError &&
+      error.code === "CLAUDE_PEER_TARGET_CHANGED" &&
+      error.recoverable,
+  );
+  assert.equal(connections, 0);
+  assert.equal(receivedBytes, 0);
 });
 
 test("a process change after connect is re-attested before the first byte", async (t) => {

@@ -27,6 +27,7 @@ const HELP = `Embassy — named Claude/Codex messaging over local gateways and S
   embassy delivery-status --token <delivery-token>
   embassy wait-delivery --token <delivery-token>
   embassy retire --alias <local-alias>
+  embassy retire --endpoint <public-endpoint-id>   # exact local retirement
   embassy check                                  # broker-only loopback, no live agent
   embassy health
   embassy serve
@@ -109,7 +110,7 @@ function renderStatus(value: unknown): string {
     if (!object(row)) return invalid("CONTROL_INVALID_RESPONSE");
     const last = object(row.lastOperation) ? `  last ${String(row.lastOperation.outcome)} / ${String(row.lastOperation.code)}` : "  not yet observed";
     const collision = value.routes.filter((candidate) => object(candidate) && candidate.alias === row.alias).length > 1;
-    lines.push(`${String(row.alias)}${collision ? " [ambiguous name]" : ""}  ${String(row.provider)}  queued ${String(row.queueDepth)}${last}`);
+    lines.push(`${String(row.alias)}${collision ? ` [ambiguous name; endpoint ${row.id}]` : ""}  ${String(row.provider)}  queued ${String(row.queueDepth)}${last}`);
   }
   if (value.routes.length === 0) lines.push("No registered endpoints.");
   if (object(value.federation) && Array.isArray(value.federation.nodes)) {
@@ -191,7 +192,10 @@ export async function runCoreCli(args: readonly string[], dependencies: CoreCliD
       request = { method: "register_codex", params: { caller: caller(env), alias: required(options, "--alias"),
         ...(options.has("--succeeds") ? { succeeds: required(options, "--succeeds") } : {}) } };
     } else if (command === "retire") {
-      request = { method: "retire_route", params: { alias: required(argumentsFor(args.slice(1), ["--alias"]), "--alias") } };
+      const options = argumentsFor(args.slice(1), ["--alias", "--endpoint"]);
+      if (options.size !== 1) return invalid();
+      request = { method: "retire_route", params: options.has("--alias")
+        ? { alias: required(options, "--alias") } : { endpoint: required(options, "--endpoint") } };
     } else if (command === "delivery-status" || command === "wait-delivery") {
       request = { method: "delivery_status", params: { token: required(argumentsFor(args.slice(1), ["--token"]), "--token") } };
     } else if (command === "status") {

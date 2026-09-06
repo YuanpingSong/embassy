@@ -231,7 +231,7 @@ export class CodexDestination implements Destination {
     if (active === undefined) return await this.deliverStart(input);
     if (
       active.target.host !== input.target.host ||
-      active.target.handle !== input.target.handle || active.target.alias !== input.target.alias
+      active.target.handle !== input.target.handle
     ) {
       return { outcome: "deferred", code: "ROUTE_BUSY" };
     }

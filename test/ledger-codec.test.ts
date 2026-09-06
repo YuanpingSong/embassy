@@ -121,8 +121,8 @@ test("configured collection, queue-byte, per-target, in-flight, rate and retenti
   assertCorrupt(state);
   state.deliveries[0]!.body = "hello";
   state.retirements = [
-    { endpoint: ref(state.endpoints[0]!), alias: state.endpoints[0]!.alias, at: 1_000 },
-    { endpoint: ref(state.endpoints[1]!), alias: state.endpoints[1]!.alias, at: 1_000 },
+    { endpoint: ref(state.endpoints[0]!), nativeKey: "a".repeat(64), alias: state.endpoints[0]!.alias, at: 1_000 },
+    { endpoint: ref(state.endpoints[1]!), nativeKey: "b".repeat(64), alias: state.endpoints[1]!.alias, at: 1_000 },
   ];
   assertCorrupt(state);
   state.retirements = []; state.rates[0]!.count = 2;

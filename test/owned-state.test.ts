@@ -147,12 +147,14 @@ test("an uncloneable transition result refuses before persistence", async (t) =>
 test("post-rename exact-current readback confirms the commit", async (t) => {
   let throwAfterRename = false;
   let id = 0;
+  let directorySyncs = 0;
   const subject = await fixture({
     randomId: () => `commit-${++id}`,
     renameStateFile: async (source, target) => {
       await rename(source, target);
       if (throwAfterRename) throw new Error("rename installed then errored");
     },
+    syncStateDirectory: async () => { directorySyncs += 1; },
   });
   t.after(() => rm(subject.root, { recursive: true, force: true }));
   await subject.store.initialize();
@@ -162,6 +164,31 @@ test("post-rename exact-current readback confirms the commit", async (t) => {
   const installed = JSON.parse(await readFile(subject.store.stateFilePath, "utf8")) as TestDocument;
   assert.deepEqual(installed.values, ["committed"]);
   assert.equal(installed.commit.sequence, 1);
+  assert.equal(directorySyncs, 2, "an exact-current reconciliation performs a fresh directory sync");
+});
+
+test("a post-rename directory sync failure poisons the installed outcome", async (t) => {
+  let failSync = false;
+  let directorySyncs = 0;
+  const subject = await fixture({
+    syncStateDirectory: async () => {
+      directorySyncs += 1;
+      if (failSync) throw new Error("directory sync failed");
+    },
+  });
+  t.after(() => rm(subject.root, { recursive: true, force: true }));
+  await subject.store.initialize();
+  failSync = true;
+  await assert.rejects(
+    subject.store.transact((draft) => draft.values.push("not acknowledged")),
+    (error: unknown) => error instanceof BridgeError &&
+      error.code === "GATEWAY_STATE_COMMIT_OUTCOME_UNKNOWN",
+  );
+  assert.equal(directorySyncs, 2);
+  const installed = JSON.parse(await readFile(subject.store.stateFilePath, "utf8")) as TestDocument;
+  assert.deepEqual(installed.values, ["not acknowledged"], "the unsynced installed value is never reported as committed");
+  await assert.rejects(subject.store.snapshot(), (error: unknown) =>
+    error instanceof BridgeError && error.code === "GATEWAY_STATE_COMMIT_OUTCOME_UNKNOWN");
 });
 
 test("a throwing rename distinguishes exact prior from an unknown install", async (t) => {

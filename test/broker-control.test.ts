@@ -17,6 +17,7 @@ const commands: readonly unknown[] = [
   { method: "send", params: { caller: { kind: "codex", handle: uuid }, body: "hello", to: endpoint.alias } },
   { method: "send", params: { caller: { kind: "codex", handle: uuid }, body: "reply", conversation: conversationId } },
   { method: "retire_route", params: { alias: endpoint.alias } },
+  { method: "retire_route", params: { endpoint: endpoint.id } },
   { method: "delivery_status", params: { token: deliveryToken } },
   { method: "peer_catalog", params: { node: "remote" } },
   { method: "peer_resolve", params: { node: "remote", selector: { id: endpoint.id, host: endpoint.host, provider: endpoint.provider } } },
@@ -32,6 +33,7 @@ test("broker commands are a closed semantic union", () => {
       { code: "INVALID_REQUEST" });
   }
   for (const invalid of [
+    { method: "retire_route", params: { alias: endpoint.alias, endpoint: endpoint.id } },
     { method: "send", params: { caller: { kind: "codex", handle: uuid }, body: " \n ", to: endpoint.alias } },
     { method: "send", params: { caller: { kind: "codex", handle: uuid }, body: "x", to: endpoint.alias, conversation: conversationId } },
     { method: "send", params: { caller: { kind: "claude", address: "relative.sock" }, body: "x", to: endpoint.alias } },

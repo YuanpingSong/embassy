@@ -80,4 +80,6 @@ embassy register-codex --alias codex-successor@your-host --succeeds codex-review
 
 For operator-authorized removal use `embassy retire --alias <local-alias>`. It requires same-user control access, not the route credential. Remote endpoints refuse with `FEDERATED_ROUTE_READ_ONLY`. Counts show queued/reserved work cancelled, armed work ambiguous, and accepted work unconfirmed. Old replies never retarget the successor.
 
+When a name collides, operator-authorized `embassy retire --endpoint <public-id>` removes just that local endpoint using its opaque ID from status. Use exactly one of `--alias` or `--endpoint`; never substitute a native session ID. A partial discovery cannot clear a known collision; exact user-supplied UUID addressing remains available until a complete scan proves uniqueness.
+
 There is no shell-peer mailbox, await command, native sending advertisement, automatic output forwarding, reply alias, or unregister-codex command in v4. Do not fall back to removed commands or direct provider sockets; report the precise refusal.

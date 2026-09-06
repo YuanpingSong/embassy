@@ -8,7 +8,7 @@ export type BrokerCommand =
   | { method: "health" | "list_snapshot" | "refresh_discovery" | "check"; params: Record<string, never> }
   | { method: "register_codex"; params: { caller: EndpointCaller; alias: string; succeeds?: string } }
   | { method: "send"; params: { caller: EndpointCaller; body: string; to?: string; conversation?: string } }
-  | { method: "retire_route"; params: { alias: string } }
+  | { method: "retire_route"; params: { alias: string } | { endpoint: string } }
   | { method: "delivery_status"; params: { token: string } }
   | { method: "peer_catalog"; params: { node: string } }
   | { method: "peer_resolve"; params: { node: string; selector: string | EndpointRef } }
@@ -91,7 +91,8 @@ export function parseBrokerCommand(input: unknown, validateHandoff: (x: unknown)
       p.body.trim().length > 0 && !p.body.includes("\0") && Buffer.byteLength(p.body) <= 16_384 &&
       (Object.hasOwn(p, "to") !== Object.hasOwn(p, "conversation")) &&
       (p.to === undefined ? token(p.conversation, "conv_", "16,64") : alias(p.to) || uuid(p.to)); break;
-    case "retire_route": valid = exact(p, ["alias"]) && alias(p.alias); break;
+    case "retire_route": valid = exact(p, ["alias"]) && alias(p.alias) ||
+      exact(p, ["endpoint"]) && token(p.endpoint, "reg_", "1,252"); break;
     case "delivery_status": valid = exact(p, ["token"]) && token(p.token, "dlv_", "24"); break;
     case "peer_catalog": valid = exact(p, ["node"]) && host(p.node); break;
     case "peer_resolve": valid = exact(p, ["node", "selector"]) && host(p.node) && (alias(p.selector) || ref(p.selector)); break;
@@ -118,7 +119,7 @@ export async function handleBrokerCommand(input: unknown, options: BrokerControl
       case "register_codex": result = await broker.register(command.params.caller, command.params.alias, command.params.succeeds); break;
       case "send": result = await broker.send(command.params.caller,
         command.params.to === undefined ? { conversation: command.params.conversation! } : { to: command.params.to }, command.params.body); break;
-      case "retire_route": result = await broker.retire(command.params.alias); break;
+      case "retire_route": result = await broker.retire("alias" in command.params ? command.params.alias : command.params); break;
       case "delivery_status": result = await broker.delivery(command.params.token); break;
       case "check": result = await options.check(); break;
       case "peer_catalog": case "peer_resolve": case "peer_handoff": {

@@ -123,3 +123,6 @@ one transaction. Incident queued/reserved work becomes `cancelled`; armed work
 becomes `ambiguous`; accepted work becomes `unconfirmed`. Recent retirement
 evidence remains bounded. Remote routes are read-only and must be retired on
 their owner. No pending message is moved to another identity.
+For a colliding name, use `embassy retire --endpoint <public-id>` with the
+opaque ID from status. It removes only that exact local row; `--alias` and
+`--endpoint` are mutually exclusive. This also works after both sessions exit.

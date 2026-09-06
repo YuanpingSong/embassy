@@ -96,7 +96,10 @@ checks the exact record and socket again before use.
 Aliases may collide in discovered Claude state. In that case name lookup
 refuses; user-supplied exact UUID selection can identify a Claude target, but
 Embassy never publishes a UUID. A retired or replaced endpoint remains fenced
-while its bounded retirement evidence is retained.
+while its bounded retirement evidence is retained. Re-enrollment after that
+evidence expires receives a fresh opaque ID, never the retired ID. Public
+endpoint IDs can select exact local operator retirement without exposing a
+native ID or authorizing remote mutation.
 
 A remote source is admitted only through an SSH peer named in `nodes.json`.
 The owner attests the source tuple and alias in the handoff, so first contact

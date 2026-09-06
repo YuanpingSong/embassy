@@ -92,7 +92,8 @@ export function createLedgerCodec(host: string, limits: LedgerLimits): OwnedStat
       value.schemaVersion !== 6 || !exact(value.commit, ["sequence", "id"]) || !natural(value.commit.sequence) ||
       !bounded(value.commit.id, 128) || !list(value.endpoints, (row) => endpoint(row, host)) ||
       !list(value.deliveries, (row) => delivery(row, limits)) ||
-      !list(value.retirements, (row) => exact(row, ["endpoint", "alias", "at"]) && endpointRef(row.endpoint) &&
+      !list(value.retirements, (row) => exact(row, ["endpoint", "nativeKey", "alias", "at"]) && endpointRef(row.endpoint) &&
+        typeof row.nativeKey === "string" && /^[a-f0-9]{64}$/.test(row.nativeKey) &&
         row.endpoint.host === host && typeof row.alias === "string" && ALIAS.test(row.alias) &&
         row.alias.endsWith(`@${host}`) && natural(row.at)) ||
       !list(value.rates, (row) => exact(row, ["source", "since", "count"]) && endpointRef(row.source) &&

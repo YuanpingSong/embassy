@@ -158,6 +158,8 @@ contacting a live Claude or Codex agent. It is not a provider-readiness test.
 `retire` removes one local endpoint identity. Queued and reserved work is
 cancelled, armed work becomes ambiguous, and accepted work becomes unconfirmed.
 Remote endpoints must be retired on their owning host.
+If departed sessions share a name, retire one exactly with
+`embassy retire --endpoint <public-id>` using its opaque ID from status.
 
 ## Safety
 

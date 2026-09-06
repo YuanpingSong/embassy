@@ -407,7 +407,7 @@ test("queued STEER falls back to a new turn after the accepted operation complet
 
   const first = destination.deliver(wake(codex, { attempt: "attempt-active" }));
   await acceptedReady.promise;
-  const steer = wake(codex, {
+  const steer = wake({ ...codex, alias: "codex-renamed@m5dev" }, {
     attempt: "attempt-queued-steer",
     steer: true,
     text: "STEER: retry after completion",

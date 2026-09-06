@@ -84,7 +84,7 @@ export type ClaudePeerPreparedSend = Readonly<{
   cancel: () => void;
 }>;
 type FileGeneration = { dev: number; ino: number; size: number; mtimeMs: number };
-type SocketGeneration = { dev: number; ino: number };
+type SocketGeneration = { dev: bigint; ino: bigint; ctimeNs: bigint };
 
 type ParsedRegistryRecord = {
   pid: number; sessionId: string; cwd: string; kind: ClaudePeerKind;
@@ -154,7 +154,7 @@ function sameFileGeneration(left: FileGeneration, right: FileGeneration): boolea
 }
 
 function sameSocketGeneration(left: SocketGeneration, right: SocketGeneration): boolean {
-  return left.dev === right.dev && left.ino === right.ino;
+  return left.dev === right.dev && left.ino === right.ino && left.ctimeNs === right.ctimeNs;
 }
 
 function pathContains(parent: string, child: string): boolean {
@@ -574,11 +574,11 @@ export class ClaudePeerAdapter {
         "Peer socket filename does not match its process.",
       );
     }
-    const stat = await lstat(socketPath);
+    const stat = await lstat(socketPath, { bigint: true });
     if (stat.isSymbolicLink() || !stat.isSocket()) {
       throw new BridgeError("SOCKET_NOT_SOCKET", "Peer endpoint is not a socket.");
     }
-    return { dev: stat.dev, ino: stat.ino };
+    return { dev: stat.dev, ino: stat.ino, ctimeNs: stat.ctimeNs };
   }
 
   async #bindingFromRegistry(

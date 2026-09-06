@@ -25,6 +25,7 @@ export class MessagingBroker {
   private stopped = false;
   private started = false;
   private pumping: Promise<void> | undefined;
+  private requested = false;
   private fault: string | undefined;
   private readonly now: () => number;
 
@@ -64,11 +65,12 @@ export class MessagingBroker {
     return { accepted: true as const, conversationId: admitted.delivery.reply, deliveryToken: admitted.delivery.token };
   }
 
-  async retire(alias: string) {
-    if (!alias.endsWith(`@${this.options.host}`)) throw new BridgeError("FEDERATED_ROUTE_READ_ONLY", "Retire a remote route on its owning host.");
+  async retire(selector: string | { endpoint: string }) {
+    if (typeof selector === "string" && !selector.endsWith(`@${this.options.host}`)) throw new BridgeError("FEDERATED_ROUTE_READ_ONLY", "Retire a remote route on its owning host.");
     // Retirement acts on owned state, not discovery: an exited session must remain removable.
     const counts = await this.change((ledger) => {
-      const endpoint = ledger.resolve(alias);
+      const endpoint = typeof selector === "string" ? ledger.resolve(selector)
+        : ledger.state.endpoints.find((row) => row.id === selector.endpoint);
       if (!endpoint) throw new BridgeError("ROUTE_UNREGISTERED", "The local route is absent.");
       return ledger.retire(endpoint);
     });
@@ -140,14 +142,20 @@ export class MessagingBroker {
   }
 
   private kick(): void {
-    if (this.stopped || this.pumping) return;
+    if (this.stopped) return;
+    this.requested = true;
+    if (this.pumping) return;
     if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
     this.pumping = this.pump().catch((error: unknown) => {
       this.fault = error instanceof BridgeError ? error.code : "DISPATCH_OUTCOME_AMBIGUOUS";
-    }).finally(() => { this.pumping = undefined; });
+    }).finally(() => {
+      this.pumping = undefined;
+      if (this.requested) this.kick();
+    });
   }
 
   private async pump(): Promise<void> {
+    this.requested = false;
     const state = await this.options.store.snapshot();
     const targets = new Map<string, Delivery>();
     for (const d of state.deliveries) {

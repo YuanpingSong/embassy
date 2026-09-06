@@ -47,6 +47,11 @@ The `(id, host, provider)` tuple is identity. `alias` is mutable lookup and
 display data. `handle` stays private and is required only for the owning
 provider's final attestation.
 
+The ID is minted randomly for a new registration, then retained across rename
+and restart. Retirement retains a bounded private hash of the native binding
+to fence immediate re-enrollment. After that evidence is evicted, a later
+registration gets a new ID; old replies and remote references cannot revive.
+
 Codex endpoints are explicitly registered by the task that inherits the exact
 task UUID. Claude endpoints are discovered by exact session UUID and recorded
 when a Claude caller or target is resolved. A same-UUID rename updates one
@@ -54,6 +59,10 @@ endpoint; a different identity never inherits work. Two live Claude sessions
 may share a display name, but name resolution then refuses with
 `PEER_ALIAS_COLLISION`. An exact user-supplied Claude UUID can disambiguate
 selection without making UUIDs public output.
+Partial discovery cannot clear an observed collision. The bounded collision
+proof sets fail closed on overflow until a complete scan; exact UUID lookup
+remains available. Operator retirement can use `--endpoint <public-id>` when
+departed sessions share a name and can no longer rename themselves.
 
 Remote name and identity resolution calls the endpoint's owner. Catalog replies
 and any local cache are bounded and memory-only; neither grants lookup or write

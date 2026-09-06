@@ -7,7 +7,7 @@ import test from "node:test";
 import type { ClaudePeerDescriptor, ClaudePeerDiscovery } from "../src/gateway/claude-peer.js";
 import { EndpointDirectory, type ClaudeDirectoryAdapter, type RemoteEndpointResolver } from "../src/gateway/endpoint-directory.js";
 import { createLedgerCodec } from "../src/gateway/ledger-codec.js";
-import { Ledger, ledgerDefaults, type Endpoint, type EndpointRef } from "../src/gateway/ledger.js";
+import { Ledger, ledgerDefaults, type Endpoint, type EndpointRef, type LedgerLimits } from "../src/gateway/ledger.js";
 import { OwnedStateFile } from "../src/gateway/owned-state.js";
 
 const HOST = "local";
@@ -39,21 +39,23 @@ class FakeClaude implements ClaudeDirectoryAdapter {
 }
 
 async function fixture(t: { after: (cleanup: () => Promise<void>) => void },
-  remote?: RemoteEndpointResolver) {
+  remote?: RemoteEndpointResolver, options: { limits?: LedgerLimits; randomIds?: boolean } = {}) {
   const root = await mkdtemp(path.join(await realpath(os.tmpdir()), "embassy-directory-"));
   const stateDir = path.join(root, "state");
   await mkdir(path.dirname(stateDir), { recursive: true, mode: 0o700 });
   t.after(() => rm(root, { recursive: true, force: true }));
-  const store = new OwnedStateFile(stateDir, createLedgerCodec(HOST, ledgerDefaults), {
+  const limits = options.limits ?? ledgerDefaults;
+  const store = new OwnedStateFile(stateDir, createLedgerCodec(HOST, limits), {
     randomId: (() => { let value = 0; return () => `commit-${++value}`; })(),
     now: () => new Date(1_000),
   });
   await store.initialize();
   const claude = new FakeClaude();
-  const directory = new EndpointDirectory({ host: HOST, limits: ledgerDefaults, store, claude,
+  const directory = new EndpointDirectory({ host: HOST, limits, store, claude,
     ...(remote === undefined ? {} : { remote }),
-    createRegistrationId: (provider, handle) => `reg_${provider}_${handle.slice(-12)}` });
-  return { claude, directory, store };
+    ...(options.randomIds ? {} : { createRegistrationId: (provider: "claude" | "codex", handle: string) =>
+      `reg_${provider}_${handle.slice(-12)}` }) });
+  return { claude, directory, store, limits };
 }
 
 test("Codex registration reuses one stable identity and successor replacement is one atomic commit", async (t) => {
@@ -183,6 +185,52 @@ test("owner-authenticated remote resolution is injected and never persists catal
   assert.deepEqual(await f.directory.named(remote.alias), remote);
   assert.deepEqual(await f.directory.exact(reference(remote)), remote);
   assert.deepEqual((await f.store.snapshot()).endpoints, []);
+});
+
+test("an evicted retirement re-enrolls one native endpoint under a new identity without reviving old authority", async (t) => {
+  const limits = { ...ledgerDefaults, retained: 1 };
+  const f = await fixture(t, undefined, { limits, randomIds: true });
+  f.claude.peers = [peer(UUID_B, "returning")];
+  const retired = (await f.directory.named(UUID_B))!;
+  const caller = await f.directory.registerCodex(UUID_A, "codex-caller@local");
+  let conversation = "";
+  await f.store.transact((state) => {
+    const ledger = new Ledger(state, HOST, limits, 1_000);
+    const delivery = ledger.admit({ id: "msg_00000000-0000-4000-8000-000000000001",
+      reply: "conv_abcdefghijklmnop", token: "dlv_abcdefghijklmnopqrstuvwx", source: retired, target: caller,
+      body: "old authority", deadline: 2_000, steer: false }).delivery;
+    conversation = delivery.reply; ledger.retire(reference(retired));
+  });
+  f.claude.peers = [peer(UUID_C, "other")];
+  const other = (await f.directory.named(UUID_C))!;
+  await f.store.transact((state) => new Ledger(state, HOST, limits, 1_000).retire(reference(other)));
+  assert.equal((await f.store.snapshot()).retirements.some((row) => row.endpoint.id === retired.id), false);
+  f.claude.peers = [peer(UUID_B, "returning")];
+  const replacement = (await f.directory.named(UUID_B))!;
+  assert.notEqual(replacement.id, retired.id);
+  assert.equal(await f.directory.exact(reference(retired)), undefined);
+  await assert.rejects(f.store.transact((state) =>
+    new Ledger(state, HOST, limits, 1_000).replyTarget(conversation, caller)), { code: "ROUTE_UNREGISTERED" });
+});
+
+test("partial collision proofs survive renames and bounded proof overflow until a complete scan", async (t) => {
+  const f = await fixture(t, undefined, { limits: { ...ledgerDefaults, endpoints: 2 } });
+  f.claude.truncated = true;
+  f.claude.peers = [peer(UUID_A, "shared"), peer(UUID_B, "shared")];
+  await f.directory.refresh();
+  f.claude.peers = [peer(UUID_A, "shared"), peer(UUID_B, "renamed")];
+  await assert.rejects(f.directory.named("shared@local"), { code: "PEER_ALIAS_COLLISION" });
+
+  f.claude.peers = [peer(UUID_A, "alpha"), peer(UUID_B, "beta")];
+  await f.directory.refresh();
+  f.claude.peers = [peer(UUID_A, "gamma"), peer(UUID_B, "delta")];
+  await f.directory.refresh();
+  await assert.rejects(f.directory.named("gamma@local"), { code: "PEER_ALIAS_COLLISION" });
+  const byUuid = await f.directory.named(UUID_A);
+  assert.equal(byUuid?.alias, "gamma@local");
+  assert.equal((await f.directory.exact(reference(byUuid!)))?.id, byUuid?.id);
+  f.claude.truncated = false;
+  assert.equal((await f.directory.named("gamma@local"))?.id, byUuid?.id);
 });
 
 const reference = ({ id, host, provider }: Endpoint): EndpointRef => ({ id, host, provider });

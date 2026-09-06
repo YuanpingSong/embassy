@@ -1,8 +1,8 @@
-import { createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 import { BridgeError } from "../errors.js";
 import type { ClaudePeerAdapter, ClaudePeerDescriptor } from "./claude-peer.js";
-import { Ledger, sameEndpoint, type Endpoint, type EndpointRef, type LedgerLimits, type LedgerState } from "./ledger.js";
+import { Ledger, nativeKey, sameEndpoint, type Endpoint, type EndpointRef, type LedgerLimits, type LedgerState } from "./ledger.js";
 import type { OwnedStateFile } from "./owned-state.js";
 
 const ALIAS = /^[a-z][a-z0-9_-]{0,31}@[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
@@ -33,11 +33,11 @@ export class EndpointDirectory {
   readonly #collidingAliases = new Set<string>();
   readonly #observedClaudeAliases = new Set<string>();
   #completeRefreshObserved = false;
+  #proofOverflow = false;
 
   constructor(readonly options: EndpointDirectoryOptions) {
     if (!HOST.test(options.host)) throw new BridgeError("INVALID_GATEWAY_CONFIGURATION", "The endpoint host is invalid.");
-    this.#createRegistrationId = options.createRegistrationId ?? ((provider, handle) =>
-      `reg_${createHash("sha256").update(`${options.host}\0${provider}\0${handle}`).digest("base64url")}`);
+    this.#createRegistrationId = options.createRegistrationId ?? (() => `reg_${randomUUID()}`);
   }
 
   async registerCodex(handle: string, alias: string, succeeds?: string): Promise<Endpoint> {
@@ -101,12 +101,15 @@ export class EndpointDirectory {
     try {
       live = await this.refresh();
     } catch (error) {
-      if (this.#collidingAliases.has(selector) || !this.#completeRefreshObserved && known.length > 1) {
+      if (this.#proofOverflow || this.#collidingAliases.has(selector) || !this.#completeRefreshObserved && known.length > 1) {
         throw new BridgeError("PEER_ALIAS_COLLISION", "The endpoint name is ambiguous.");
       }
       if (codex.length === 1 && (known.length === 1 ||
         this.#completeRefreshObserved && !this.#observedClaudeAliases.has(selector))) return codex[0];
       throw error;
+    }
+    if (this.#proofOverflow || this.#collidingAliases.has(selector)) {
+      throw new BridgeError("PEER_ALIAS_COLLISION", "A complete discovery is required to clear this name's collision.");
     }
     const matches = live.filter((row) => row.alias === selector);
     if (matches.length > 1) throw new BridgeError("PEER_ALIAS_COLLISION", "The endpoint name is ambiguous.");
@@ -162,9 +165,15 @@ export class EndpointDirectory {
       this.#completeRefreshObserved = true;
       this.#observedClaudeAliases.clear();
       this.#collidingAliases.clear();
+      this.#proofOverflow = false;
     }
-    for (const alias of observed) this.#observedClaudeAliases.add(alias);
-    for (const alias of collisions) this.#collidingAliases.add(alias);
+    for (const [set, aliases] of [[this.#observedClaudeAliases, observed], [this.#collidingAliases, collisions]] as const) {
+      for (const alias of aliases) {
+        if (set.has(alias)) continue;
+        if (set.size < this.options.limits.endpoints) set.add(alias);
+        else this.#proofOverflow = true;
+      }
+    }
     return [...codex, ...refreshed.listed];
   }
 
@@ -178,7 +187,7 @@ export class EndpointDirectory {
     const existing = state.endpoints.find((row) => row.provider === "claude" && row.handle === handle);
     const endpoint: Endpoint = { id: existing?.id ?? this.#id("claude", handle), host: this.options.host,
       provider: "claude", alias, handle };
-    if (state.retirements.some((row) => sameEndpoint(row.endpoint, endpoint))) {
+    if (state.retirements.some((row) => sameEndpoint(row.endpoint, endpoint) || row.nativeKey === nativeKey(endpoint))) {
       if (skipRetired) return undefined;
       throw new BridgeError("ROUTE_UNREGISTERED", "The Claude endpoint was retired.");
     }
