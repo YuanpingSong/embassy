@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [4.1.0] - 2026-09-06
 
 ### Added
+- Multi-host TUI: independent client-side SSH status panes and existing operator actions on configured hosts, with host-bound retirement confirmation and stale/unsupported-response handling. No broker protocol or state change.
 - `embassy tui`: a metadata-only terminal client for status and existing operator actions, with no new broker protocol or state. Non-TTY output is one status-text snapshot.
 
 ### Fixed

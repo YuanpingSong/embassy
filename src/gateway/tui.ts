@@ -23,7 +23,8 @@ export type TuiDependencies = Readonly<{
   call: (command: BrokerCommand) => Promise<unknown>;
   renderStatus: (snapshot: unknown) => string;
   host?: string;
-  hint?: (code: string) => string;
+  hint?: (code: string, host?: string) => string;
+  remote?: Readonly<{ hosts: readonly string[]; call: (host: string, command: BrokerCommand) => Promise<unknown>; close: () => void }>;
   signal?: AbortSignal;
 }>;
 type Obj = Record<string, unknown>;
@@ -47,6 +48,7 @@ export type TuiModel = {
   snapshotAt?: number;
   staleSince?: number;
   error?: string;
+  errorDetail?: string;
   action?: string;
   actionRunning?: boolean;
   host?: string;
@@ -179,7 +181,7 @@ function collisionAliases(snapshot?: Obj): Set<string> {
   return new Set([...counts].filter(([, count]) => count > 1).map(([alias]) => alias));
 }
 function retirementLines(row: EndpointRow, width: number): string[] {
-  return ["Embassy retirement confirmation", ...wrap(`Alias: ${row.alias}`, width), ...wrap(`Endpoint ID: ${row.id}`, width),
+  return ["Embassy retirement confirmation", ...wrap(`Host: ${row.host}`, width), ...wrap(`Alias: ${row.alias}`, width), ...wrap(`Endpoint ID: ${row.id}`, width),
     ...wrap(`${row.provider} · queued ${row.queueDepth ?? 0} · last ${operation(row)}`, width),
     ...wrap("queued/reserved work is cancelled, armed work becomes ambiguous, accepted work becomes unconfirmed — cannot be undone.", width),
     "y confirm · N cancel"];
@@ -200,8 +202,9 @@ export function renderTui(model: Readonly<TuiModel>, columns = 80, rows = 24, no
   const snapshot = model.snapshot, host = model.host ? ` ${model.host}` : "", lines: string[] = [];
   if (model.error) { const elapsed = model.staleSince ? `, ${age(now - model.staleSince)}` : "";
     lines.push(`Embassy${host} · broker UNREACHABLE (${model.error}${elapsed})`);
-    lines.push(`${snapshot ? `Last-known: ${text(snapshot.health, "unknown")} · ledger rev ${snapshot.revision ?? "-"}. ` : ""}Run embassy service status.`);
+    lines.push(`${snapshot ? `Last-known: ${text(snapshot.health, "unknown")} · ledger rev ${snapshot.revision ?? "-"}. ` : ""}Run embassy service status${model.host ? ` on ${model.host}` : ""}.`);
     lines.push("STALE data · not a provider readiness proof");
+    if (model.errorDetail) lines.push(...wrap(model.errorDetail, width));
   } else {
     const broker = snapshot ? text(snapshot.health, "unknown") : "not reachable";
     const fault = snapshot?.safeErrorCode ? ` !${text(snapshot.safeErrorCode)}` : "";
@@ -240,34 +243,52 @@ export async function runTui(dependencies: TuiDependencies): Promise<void> {
     return;
   }
   if (signal?.aborted) return;
-  const model: TuiModel = {
-    ...(dependencies.host ? { host: dependencies.host } : {}),
-    section: "endpoints",
-    selected: { endpoints: 0, deliveries: 0, retirements: 0 },
-    mode: "browse",
-    token: "",
-  };
+  const remote = dependencies.remote;
+  type Pane = { model: TuiModel; call: typeof call; interval: number; pollInFlight: boolean; actionDepth: number;
+    activePoll: Promise<void>; actionTail: Promise<void>; timer?: ReturnType<typeof setTimeout> };
+  const hosts = [dependencies.host ?? "local", ...(remote?.hosts ?? [])];
+  const panes: Pane[] = hosts.map((host, index) => ({
+    model: { host, section: "endpoints", selected: { endpoints: 0, deliveries: 0, retirements: 0 }, mode: "browse", token: "" },
+    call: index === 0 ? call : (command) => remote!.call(host, command), interval: index === 0 ? 1_000 : 5_000,
+    pollInFlight: false, actionDepth: 0, activePoll: Promise.resolve(), actionTail: Promise.resolve(),
+  }));
+  let active = 0, model = panes[0]!.model;
   const priorRaw = input.isRaw === true, priorFlowing = input.readableFlowing;
-  let closed = false, pollInFlight = false, actionDepth = 0, lastFrame = "";
-  let activePoll: Promise<void> = Promise.resolve(), actionTail: Promise<void> = Promise.resolve();
-  let pollTimer: ReturnType<typeof setTimeout> | undefined, drawTimer: ReturnType<typeof setTimeout> | undefined;
+  let closed = false, lastFrame = "";
+  let drawTimer: ReturnType<typeof setTimeout> | undefined;
   let resolveDone!: () => void;
   const done = new Promise<void>((resolve) => { resolveDone = resolve; });
   const keyInput = new PassThrough();
   const draw = () => {
     if (closed) return;
-    const frame = renderTui(model, output.columns, output.rows);
+    const width = output.columns || 80, height = output.rows || 24;
+    const overview: string[] = [];
+    if (panes.length > 1 && model.mode !== "confirm") {
+      overview.push("Hosts: [ / ] switch · each pane reports its own broker");
+      const visible = Math.min(4, Math.max(1, height - 10));
+      const start = Math.max(0, Math.min(active - 1, panes.length - visible));
+      panes.slice(start, start + visible).forEach((pane, offset) => {
+        const m = pane.model;
+        const state = m.error ? `STALE !${m.error}` : m.snapshot ? text(m.snapshot.health) : "connecting";
+        const elapsed = m.snapshotAt === undefined ? "not observed" : `${age(Date.now() - m.snapshotAt)} ago`;
+        overview.push(`${start + offset === active ? ">" : " "} ${m.host} · ${state} · ${elapsed}`);
+      });
+    }
+    const frame = [...overview.map((line) => fit(line, width)), renderTui(model, width, Math.max(1, height - overview.length))].join("\n");
     if (frame === lastFrame) return;
     lastFrame = frame;
     output.write(`\x1b[H\x1b[2J${frame}\x1b[0m`);
   };
-  const replaceSnapshot = (value: unknown) => {
+  const replaceSnapshot = (pane: Pane, value: unknown) => {
     if (!object(value)) throw new Error("CONTROL_INVALID_RESPONSE");
+    const model = pane.model;
     const before = typeof model.snapshot?.revision === "number" ? model.snapshot.revision : undefined;
     const after = typeof value.revision === "number" ? value.revision : undefined;
     if (before !== undefined && after !== undefined && after < before) model.restarted = true;
-    model.snapshot = value; model.snapshotAt = Date.now(); delete model.staleSince; delete model.error;
-    const endpoints = endpointRows(value);
+    // A selected host's own rows are authoritative for its pane, not its mirrors.
+    model.snapshot = remote ? { ...value, federation: { nodes: [], truncated: false } } : value;
+    model.snapshotAt = Date.now(); delete model.staleSince; delete model.error; delete model.errorDetail;
+    const endpoints = endpointRows(model.snapshot);
     if (model.selectedEndpoint === undefined && endpoints[0]) model.selectedEndpoint = endpointKey(endpoints[0]);
     const endpointIndex = endpoints.findIndex((row) => endpointKey(row) === model.selectedEndpoint);
     model.selected.endpoints = endpointIndex < 0 ? 0 : endpointIndex;
@@ -278,77 +299,87 @@ export async function runTui(dependencies: TuiDependencies): Promise<void> {
       model.section = previous;
     }
   };
-  const snapshot = async () => {
-    if (closed || pollInFlight || actionDepth > 0) return;
-    pollInFlight = true;
-    activePoll = (async () => {
-      try { replaceSnapshot(await call({ method: "list_snapshot", params: {} })); }
+  const recordFailure = (pane: Pane, error: unknown) => {
+    pane.model.staleSince ??= Date.now(); pane.model.error = errorText(error);
+    delete pane.model.errorDetail;
+    if (object(error) && object(error.detail) && typeof error.detail.detail === "string")
+      pane.model.errorDetail = clean(error.detail.detail);
+  };
+  const snapshot = async (pane: Pane) => {
+    if (closed || pane.pollInFlight || pane.actionDepth > 0) return;
+    pane.pollInFlight = true;
+    pane.activePoll = (async () => {
+      try { const result = await pane.call({ method: "list_snapshot", params: {} }); if (!closed) replaceSnapshot(pane, result); }
       catch (error) {
-        model.staleSince ??= Date.now();
-        model.error = errorText(error);
+        if (!closed) recordFailure(pane, error);
       } finally {
-        pollInFlight = false;
+        pane.pollInFlight = false;
         draw();
       }
     })();
-    await activePoll;
+    await pane.activePoll;
   };
-  const schedulePoll = () => {
+  const schedulePoll = (pane: Pane) => {
     if (closed) return;
-    pollTimer = setTimeout(async () => {
-      await snapshot();
-      schedulePoll();
-    }, 1_000);
-    pollTimer.unref?.();
+    pane.timer = setTimeout(async () => {
+      await snapshot(pane);
+      schedulePoll(pane);
+    }, pane.interval);
+    pane.timer.unref?.();
   };
   const scheduleDraw = () => {
     if (closed) return;
     drawTimer = setTimeout(() => {
-      if (pollInFlight || actionDepth > 0 || model.error || !model.snapshot) draw();
+      if (panes.length > 1 || panes.some((p) => p.pollInFlight || p.actionDepth > 0) || model.error || !model.snapshot) draw();
       scheduleDraw();
     }, 1_000);
     drawTimer.unref?.();
   };
+  const fresh = (pane: Pane) => !pane.model.error && pane.model.snapshotAt !== undefined && Date.now() - pane.model.snapshotAt <= 10_000;
   const queueAction = (label: string, command: BrokerCommand) => {
-    if (actionDepth > 0) {
+    const pane = panes[active]!, model = pane.model;
+    if (pane.actionDepth > 0) {
       model.action = "An action is already running.";
       draw();
       return;
     }
-    actionDepth++;
+    pane.actionDepth++;
     model.actionRunning = true;
     model.action = `${label} in progress`;
     draw();
-    actionTail = actionTail.then(async () => {
-      await activePoll;
+    pane.actionTail = pane.actionTail.then(async () => {
+      await pane.activePoll;
       if (closed) {
-        actionDepth--;
+        pane.actionDepth--;
         return;
       }
+      if (pane !== panes[0] && command.method === "retire_route" && !fresh(pane)) {
+        pane.actionDepth--; model.actionRunning = false;
+        model.action = "retire: wait for a fresh supported owner snapshot"; draw(); return;
+      }
       try {
-        const result = await call(command);
+        const result = await pane.call(command);
         if (closed) return;
         model.result = { label, value: json(result) };
         model.previousSection = model.section === "result" ? model.previousSection ?? "endpoints" : model.section;
         model.action = `${label} result ready (4): ${json(result)}`;
-        try { replaceSnapshot(await call({ method: "list_snapshot", params: {} })); }
+        try { const result = await pane.call({ method: "list_snapshot", params: {} }); if (!closed) replaceSnapshot(pane, result); }
         catch (error) {
-          model.staleSince ??= Date.now();
-          model.error = errorText(error);
+          if (!closed) recordFailure(pane, error);
         }
       } catch (error) {
-        const code = errorText(error), guidance = dependencies.hint?.(code);
+        const code = errorText(error), guidance = dependencies.hint?.(code, model.host);
         model.result = { label, value: guidance ? `${code}\n${guidance}` : code };
         model.previousSection = model.section === "result" ? model.previousSection ?? "endpoints" : model.section;
         const disposition = code === "CONTROL_WRITE_OUTCOME_AMBIGUOUS" ? "outcome uncertain" : "refused";
         model.action = `${label} ${disposition} — result ready (4): ${code}${guidance ? ` — ${guidance}` : ""}`;
       } finally {
-        actionDepth--;
+        pane.actionDepth--;
         model.actionRunning = false;
         draw();
       }
     }, () => {
-      actionDepth--;
+      pane.actionDepth--;
       model.actionRunning = false;
     });
   };
@@ -380,7 +411,7 @@ export async function runTui(dependencies: TuiDependencies): Promise<void> {
   const finish = () => {
     if (closed) return;
     closed = true;
-    if (pollTimer) clearTimeout(pollTimer);
+    for (const pane of panes) if (pane.timer) clearTimeout(pane.timer);
     if (drawTimer) clearTimeout(drawTimer);
     input.off("data", onInputData);
     input.off("end", finish);
@@ -395,6 +426,7 @@ export async function runTui(dependencies: TuiDependencies): Promise<void> {
     }
     try { if (!priorRaw) input.setRawMode?.(false); } catch { /* terminal may already be gone */ }
     try { if (priorFlowing === true) input.resume?.(); else input.pause?.(); } catch { /* input may already be closed */ }
+    remote?.close();
     output.write("\x1b[0m\x1b[?25h\x1b[?1049l"); resolveDone(); };
   const onKeypress = (sequence: unknown, details?: { name?: string; ctrl?: boolean; shift?: boolean }) => {
     const key = typeof sequence === "string" ? sequence : "", name = details?.name;
@@ -415,7 +447,10 @@ export async function runTui(dependencies: TuiDependencies): Promise<void> {
       draw(); return;
     }
     const sections: Section[] = ["endpoints", "deliveries", "retirements", "result"];
-    if ((name === "escape" || key === "\x1b") && model.section === "result") chooseSection(model.previousSection ?? "endpoints");
+    if ((key === "[" || key === "]") && panes.length > 1) {
+      active = (active + (key === "]" ? 1 : -1) + panes.length) % panes.length;
+      model = panes[active]!.model;
+    } else if ((name === "escape" || key === "\x1b") && model.section === "result") chooseSection(model.previousSection ?? "endpoints");
     else if (name === "tab") { const direction = details?.shift || key === "\x1b[Z" ? -1 : 1;
       chooseSection(sections[(sections.indexOf(model.section) + direction + sections.length) % sections.length]!); }
     else if (/^[1-4]$/.test(key)) chooseSection(sections[Number(key) - 1]!);
@@ -425,7 +460,9 @@ export async function runTui(dependencies: TuiDependencies): Promise<void> {
     else if (key === "c") queueAction("check", { method: "check", params: {} });
     else if (key === "d") { model.mode = "token"; model.token = ""; clearAction(); }
     else if (key === "x" && model.section === "endpoints") { const selected = currentEndpoint();
-      if (!selected) model.action = "retire: the selected endpoint is no longer present";
+      if (active > 0 && !fresh(panes[active]!))
+        model.action = "retire: wait for a fresh supported owner snapshot";
+      else if (!selected) model.action = "retire: the selected endpoint is no longer present";
       else if (!selected.local) model.action = selected.placeholder ? `${selected.host} has no cached endpoints — press r or run Embassy there`
         : `retire: ${selected.alias} is owned by ${selected.host}; run Embassy there`;
       else { model.retiring = selected; model.mode = "confirm"; delete model.action; }
@@ -438,5 +475,7 @@ export async function runTui(dependencies: TuiDependencies): Promise<void> {
   output.on?.("resize", draw); signal?.addEventListener("abort", finish, { once: true });
   if (!signal) { process.on("SIGINT", finish); process.on("SIGTERM", finish); }
   try { if (!priorRaw) input.setRawMode?.(true); } catch (error) { finish(); throw error; }
-  output.write("\x1b[?1049h\x1b[?25l"); draw(); scheduleDraw(); await snapshot(); schedulePoll(); await done;
+  output.write("\x1b[?1049h\x1b[?25l"); draw(); scheduleDraw();
+  for (const pane of panes) void snapshot(pane).then(() => schedulePoll(pane));
+  await done;
 }

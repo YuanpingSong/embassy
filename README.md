@@ -155,14 +155,20 @@ embassy serve                              # foreground alternative
 retirements, each local route's last native operation, and the last bounded SSH
 catalog observation. It does not claim that an idle provider is ready.
 
-`embassy tui` live-updates that metadata in a plain terminal (including over
-SSH). On-screen keys select endpoints, confirm exact-ID local retirement,
-refresh discovery, run the loopback check, or look up a delivery token.
-It never displays message bodies. Remote rows show catalog age, not remote
-broker health, queue depth or last operation: those are not reported by the
-catalog. Run the TUI on the owning machine to inspect its local ledger.
+`embassy tui` shows the local broker and each direct host in `nodes.json` in one
+terminal. Use `[` / `]` to select a host: local status polls every second, while
+independent SSH clients read each remote's `embassy status --json` about every
+five seconds. Each pane reports its own broker's health, queue and last
+operations—not another broker's cached catalog. One hanging host cannot block
+the other panes. No message bodies are displayed.
+On-screen keys refresh, check, look up a token or retire on the selected host.
+Remote actions run the same CLI there over configured non-interactive SSH;
+retirement requires HOST + full endpoint ID confirmation and a fresh supported
+owner snapshot. An uncertain action is never automatically retried.
 Disconnected views are marked stale; actions are never automatically retried.
-Without an interactive terminal, `tui` prints the status text once and exits.
+Without an interactive terminal, `tui` prints local status text once and exits
+without SSH. Unsupported remote response shapes are not guessed; a lazy
+`embassy --version` read identifies only that remote CLI, not its broker version.
 Deliveries are newest-admitted first, with faults distinguished from successful
 delivery. Use 1–4 or Tab to change sections, g/G for first/last row, and Esc to
 return from an action result. Token lookup echoes only the token you type;

@@ -45,6 +45,7 @@ const GATEWAY_RUNTIME_MODULES = [
   "core-service-command",
   "core-version",
   "tui",
+  "tui-ssh",
   "endpoint-directory",
   "federation-nodes",
   "federation",

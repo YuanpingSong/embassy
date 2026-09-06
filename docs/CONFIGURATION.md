@@ -127,6 +127,20 @@ and timestamp. A failed observation retains its last rows and records
 provider I/O. Display is capped at 128 remote rows across all nodes; exact and
 named routing always queries the owner and is unaffected by display truncation.
 
+## Multi-host terminal
+
+`embassy tui` uses this inventory for its host overview. Opening it in a terminal
+starts bounded status reads over the same non-interactive SSH configuration as
+federation; it does not modify SSH keys, configuration, or broker protocols.
+Use `[` / `]` for host selection. Explicit actions execute the existing CLI on
+that host, and remote retirement confirms the HOST and full endpoint ID.
+Read timeout is eight seconds; refresh/retire allow fifteen seconds and loopback
+check thirty. A timed-out SSH process is terminated, escalated after one second,
+and never overlapped by a replacement before it closes. Its pane stays stale;
+local operation and other hosts continue. Version diagnostics are lazy remote
+CLI observations only, never broker-version evidence. Unsupported shapes refuse
+display as current data and disable retirement until a supported fresh read.
+
 ## launchd service
 
 ```sh

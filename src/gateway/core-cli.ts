@@ -16,6 +16,7 @@ import { runCoreRuntime } from "./runtime.js";
 import { defaultRunLaunchctl } from "./service-agent.js";
 import { runCoreServiceCommand } from "./core-service-command.js";
 import { runTui } from "./tui.js";
+import { createTuiSshClient } from "./tui-ssh.js";
 
 import { CORE_VERSION } from "./core-version.js";
 export { CORE_VERSION } from "./core-version.js";
@@ -174,8 +175,12 @@ export async function runCoreCli(args: readonly string[], dependencies: CoreCliD
     };
     if (command === "tui") {
       if (args.length !== 1) return invalid();
+      const ssh = createTuiSshClient({ nodes: inventory.nodes, env });
       await runTui({ input: stdin, output: stdout, call, renderStatus, host: inventory.host,
-        hint: (code) => hint("tui", code, stateDir),
+        remote: { hosts: inventory.nodes, call: ssh.call, close: ssh.close },
+        hint: (code, host) => host && host !== inventory.host
+          ? `On ${host}: ${hint("tui", code, "the configured state directory on that host")}`
+          : hint("tui", code, stateDir),
         ...(dependencies.signal ? { signal: dependencies.signal } : {}) });
       return 0;
     }

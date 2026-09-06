@@ -242,10 +242,13 @@ private loopback endpoints and uses the real ledger/coordinator/receipt path,
 then retires them; no provider or model is contacted. It is not a
 provider-readiness test.
 
-`tui` is a terminal-only client: one in-flight status poll, serialized existing
-operator commands, and no broker protocol or state extension. Remote catalogs
-do not report broker health or remote operation/queue state. Disconnection
-marks retained display data stale; an action is never automatically replayed.
+`tui` is a terminal-only client: one in-flight operation per host and no broker
+protocol or state extension. Its local pane uses private control; remote panes
+run existing CLI commands over non-interactive SSH, independently of each other.
+Remote status is validated with the same closed snapshot decoder, not inferred
+from catalogs. Each confirmation captures host and endpoint ID; stale remote
+observations cannot authorize retirement. Lost action responses remain unknown
+and are never automatically replayed. Non-TTY output is local-only.
 
 Machine-facing CLI success is one `{ok, command, result}` JSON line. The
 snapshot is at `.result` and its endpoint rows at `.result.routes`; native
