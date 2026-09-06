@@ -159,3 +159,7 @@ Reset procedure:
 A reset abandons unsettled work and invalidates delivery tokens and
 conversation references. Rollback means stopping v4 and restoring both the old
 binary and its untouched old state. Never hand-edit either schema.
+After v4 has accepted work, the old backup does not contain that work. Before
+rolling back, inspect and drain or explicitly abandon v4 deliveries, and keep
+a separate backup of the v4 state. Restoring v3 is not a rollback of those
+delivery effects and must never silently discard unsettled v4 work.
