@@ -39,8 +39,8 @@ test("TUI shows root states without changing endpoint selection", () => {
   const rendered = renderTui(model, 160, 28, Date.parse("2026-09-06T00:00:30.000Z"));
   assert.match(rendered, /Codex discovery partial · truncated · 30s ago !PROTOCOL_ERROR/);
   assert.ok(rendered.indexOf("waiting@local") < rendered.indexOf("idle@local"));
-  assert.match(rendered, /> waiting@local.*waiting/);
-  assert.match(rendered, /unknown@local.*unknown/);
+  assert.match(rendered, /> waiting\s+waiting@local/);
+  assert.match(rendered, /unknown\s+unknown@local/);
   assert.doesNotMatch(rendered, /native|thread[_-]?id|reg_absent/iu);
   const complete = renderTui({ ...model, snapshot: { ...snapshot,
     codex: { ...snapshot.codex, complete: true, truncated: false } } }, 160, 28);

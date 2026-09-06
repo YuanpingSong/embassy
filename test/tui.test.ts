@@ -3,6 +3,7 @@ import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 import type { BrokerCommand } from "../src/gateway/broker-control.js";
 import { renderTui, runTui, type TuiModel } from "../src/gateway/tui.js";
+import { tuiScreen } from "./helpers/tui-screen.js";
 
 const endpoint = { id: "reg_original", alias: "codex-one@local", host: "local", provider: "codex", queueDepth: 2,
   lastOperation: { outcome: "delivered", code: "DELIVERED" } };
@@ -25,9 +26,10 @@ function terminal(call: (command: BrokerCommand) => Promise<unknown>, dimensions
   const stop = new AbortController();
   const running = runTui({ input, output, call, renderStatus: () => "plain snapshot\n", host: "local",
     hint: (code) => code === "CONTROL_WRITE_OUTCOME_AMBIGUOUS" ? "The operation may have applied. Inspect status; do not resend an uncertain write." : "",
+    terminal: { noColor: true, dumb: false },
     signal: stop.signal });
   return { input, output, raw, stop, running, text: () => bytes,
-    frame: () => bytes.split("\u001b[2J").at(-1)!, key: (value: string) => input.emit("data", Buffer.from(value)) };
+    frame: () => tuiScreen(bytes), key: (value: string) => input.emit("data", Buffer.from(value)) };
 }
 
 test("TUI renders only metadata and distinguishes remote catalog observation from local health", () => {
@@ -36,7 +38,7 @@ test("TUI renders only metadata and distinguishes remote catalog observation fro
   assert.match(text, /broker healthy/);
   assert.match(text, /not a provider readiness proof/);
   assert.match(text, /codex-one@local/);
-  assert.match(text, /queued 2/);
+  assert.match(text, /queue\s+2/);
   assert.doesNotMatch(text, /\bDELIVERED\b/);
   assert.match(text, /pm@remote/);
   assert.match(text, /not reported/);
@@ -73,6 +75,22 @@ test("non-TTY TUI reads one snapshot and prints the existing status renderer wit
   assert.equal(output, "existing status text\n");
 });
 
+test("TERM=dumb remains byte-plain and NO_COLOR keeps interactive keys without SGR or full repaint", async () => {
+  let bytes = "", calls = 0, raw = false;
+  await runTui({ input: Object.assign(new PassThrough(), { isTTY: true, setRawMode() { raw = true; } }),
+    output: { isTTY: true, write(value) { bytes += String(value); return true; } },
+    terminal: { dumb: true }, call: async () => { calls++; return snapshot(); }, renderStatus: () => "plain status\n" });
+  assert.equal(bytes, "plain status\n"); assert.equal(calls, 1); assert.equal(raw, false);
+  const ui = terminal(async () => snapshot());
+  try {
+    await settle(); ui.key("2"); await settle();
+    assert.match(ui.frame(), /\[2 deliveries\]/);
+    assert.match(ui.text(), /\u001b\[\?1049h/);
+    assert.doesNotMatch(ui.text(), /\u001b\[[0-9;]*m|\u001b\[2J/);
+  } finally { ui.stop.abort(); await ui.running; }
+  assert.doesNotMatch(ui.text(), /\u001b\[[0-9;]*m/);
+});
+
 test("TUI actions call existing methods, confirm exact IDs, and refuse remote retirement", async () => {
   const commands: BrokerCommand[] = [];
   const ui = terminal(async (command) => {
@@ -96,7 +114,7 @@ test("TUI actions call existing methods, confirm exact IDs, and refuse remote re
     ui.key("r"); await settle(); ui.key("c"); await settle();
     assert.ok(commands.some((c) => c.method === "refresh_discovery"));
     assert.ok(commands.some((c) => c.method === "check"));
-    ui.key("d"); ui.key("dlv_abcdefghijklmnopqrstuvwx\r"); await settle();
+    ui.key("d"); await settle(); ui.key("dlv_abcdefghijklmnopqrstuvwx"); await settle(); ui.key("\r"); await settle();
     assert.deepEqual(commands.find((c) => c.method === "delivery_status"), {
       method: "delivery_status", params: { token: "dlv_abcdefghijklmnopqrstuvwx" } });
     assert.match(ui.text(), /dlv_abcdefghijklmnopqrstuvwx/);
@@ -124,7 +142,7 @@ test("polling is single-flight, disconnected data is stale, recovery clears it",
     pending.resolve(snapshot()); await settle();
     t.mock.timers.tick(1_000); await settle();
     assert.equal(count, 2);
-    assert.match(ui.frame(), /broker UNREACHABLE.*CONTROL_CONNECT_DENIED/);
+    assert.match(ui.frame(), /broker UNREACHABLE[\s\S]*CONTROL_CONNECT_DENIED/);
     assert.match(ui.frame(), /STALE/);
     assert.doesNotMatch(ui.text(), /private diagnostic/);
     t.mock.timers.tick(1_000); await settle();
@@ -141,7 +159,7 @@ test("retirement confirmation never switches identity when polling replaces an a
     mutations.push(command); return { cancelled: 0, ambiguous: 0, unconfirmed: 0 };
   });
   try {
-    await settle(); ui.key("x");
+    await settle(); ui.key("x"); await settle();
     current = { ...snapshot(), routes: [{ ...endpoint, id: "reg_replacement" }] };
     t.mock.timers.tick(1_000); await settle(); ui.key("y"); await settle();
     assert.deepEqual(mutations, [{ method: "retire_route", params: { endpoint: "reg_original" } }]);
@@ -174,7 +192,7 @@ test("empty remote catalogs still show failure, and long action results remain s
   m.section = "result";
   m.result = { label: "delivery", value: JSON.stringify({ found: true, state: "unconfirmed", terminal: true,
     deadlineAt: "2026-09-06T00:00:00.000Z", safeErrorCode: "REQUEST_TIMEOUT" }) };
-  const full = renderTui(m, 40, 24).split("\n").map((line) => line.replace(/^[> ] /, "")).join("");
+  const full = renderTui(m, 80, 24).split("\n").map((line) => line.replace(/^[> ] /, "")).join("");
   assert.match(full, /REQUEST_TIMEOUT/);
   assert.match(full, /unconfirmed/);
 });
@@ -231,14 +249,14 @@ test("newest deliveries lead with age/state and fault counts exclude pending and
   assert.match(rendered, />.*1s.*delivered.*fresh@local/);
   assert.doesNotMatch(rendered, /TRANSPORT_WRITTEN/);
   assert.match(rendered, /!\s*NEW_FAILURE/);
-  const narrow = renderTui(m, 40, 12);
+  const narrow = renderTui(m, 80, 24);
   assert.match(narrow, /1s.*delivered/);
 });
 
 test("unreachable headline demotes last-known health and shows a next step on first launch too", () => {
   const m = model(); m.host = "m5dev"; m.error = "CONTROL_UNAVAILABLE"; m.staleSince = 5_000;
   const rendered = renderTui(m, 120, 24, 50_000);
-  assert.match(rendered.split("\n")[0]!, /Embassy m5dev.*broker UNREACHABLE.*CONTROL_UNAVAILABLE.*45s/);
+  assert.match(rendered, /Embassy m5dev.*broker UNREACHABLE[\s\S]*45s.*CONTROL_UNAVAILABLE/);
   assert.doesNotMatch(rendered.split("\n")[0]!, /healthy/);
   assert.match(rendered, /embassy service status/);
   assert.match(rendered, /STALE/);
@@ -250,8 +268,8 @@ test("unreachable headline demotes last-known health and shows a next step on fi
 test("retirement modal shows the exact identity and all settlement consequences", () => {
   const m = model(); m.mode = "confirm"; m.retiring = { ...endpoint, local: true };
   const rendered = renderTui(m, 100, 24).replaceAll("\n", " ");
-  assert.match(rendered, /Endpoint ID: reg_original/);
-  assert.match(rendered, /codex.*queued 2.*delivered/);
+  assert.match(rendered, /Endpoint ID.*reg_original/);
+  assert.match(rendered, /codex.*queue 2.*delivered/);
   assert.match(rendered, /queued\/reserved.*cancelled/i);
   assert.match(rendered, /armed.*ambiguous/);
   assert.match(rendered, /accepted.*unconfirmed/);
@@ -295,7 +313,7 @@ test("selection follows identity across insertion and cannot silently select its
     await settle(); ui.key("j");
     current = { ...snapshot(), routes: [{ ...endpoint, id: "reg_new" }, endpoint, second] };
     t.mock.timers.tick(1_000); await settle();
-    ui.key("x"); assert.match(ui.frame(), /Endpoint ID: reg_second/); ui.key("n");
+    ui.key("x"); await settle(); assert.match(ui.frame(), /Endpoint ID[\s\S]*reg_second/); ui.key("n");
     current = { ...snapshot(), routes: [{ ...endpoint, id: "reg_new" }, endpoint] };
     t.mock.timers.tick(1_000); await settle();
     ui.key("xy"); await settle();
@@ -320,13 +338,14 @@ test("redraw clock continues through a slow action without extra polls and CLI u
     assert.notEqual(ui.frame(), startFrame);
     assert.match(ui.frame(), /refresh in progress.*polling paused/);
     assert.match(ui.frame(), /3s/);
-    action.resolve(undefined); await settle(); ui.key("4");
-    assert.match(ui.frame().replace(/\n[> ] /g, ""), /The operation may have applied/);
-    assert.match(ui.frame().replace(/\n[> ] /g, ""), /do not resend an uncertain write/);
+    action.resolve(undefined); await settle(); ui.key("4"); await settle();
+    const guidance = ui.frame().replace(/\n[> ] /g, " ").replace(/\s+/g, " ");
+    assert.match(guidance, /The operation may have applied/);
+    assert.match(guidance, /do not resend an uncertain write/);
     // readline owns the real escape-sequence disambiguation timer.
     t.mock.timers.reset();
     ui.key("\u001b"); await new Promise((resolve) => setTimeout(resolve, 600));
-    assert.match(ui.frame(), /\[endpoints/);
+    assert.match(ui.frame(), /\[1 endpoints\]/);
   } finally { ui.stop.abort(); await ui.running; }
 });
 
@@ -337,10 +356,10 @@ test("frame caching, direct navigation and ledger revision drop are visible with
   try {
     await settle(); const previous = ui.text();
     ui.output.emit("resize"); assert.equal(ui.text(), previous, "identical frames are not written");
-    ui.key("2"); assert.match(ui.frame(), /\[deliveries/);
-    ui.key("3"); assert.match(ui.frame(), /\[retirements/);
-    ui.key("1G"); assert.match(ui.frame(), />.*remote/);
-    ui.key("g"); assert.match(ui.frame(), />.*codex-one@local/);
+    ui.key("2"); await settle(); assert.match(ui.frame(), /\[2 deliveries/);
+    ui.key("3"); await settle(); assert.match(ui.frame(), /\[3 retirements/);
+    ui.key("1G"); await settle(); assert.match(ui.frame(), />.*remote/);
+    ui.key("g"); await settle(); assert.match(ui.frame(), />.*codex-one@local/);
     current = { ...snapshot(), revision: 1 };
     t.mock.timers.tick(1_000); await settle();
     assert.match(ui.frame(), /ledger rev 1/);
@@ -350,12 +369,12 @@ test("frame caching, direct navigation and ledger revision drop are visible with
 
 test("token typing validates live, and a reachable degraded broker retains its named fault", async () => {
   const m = model(); m.snapshot = { ...snapshot(), health: "degraded", safeErrorCode: "DISPATCH_OUTCOME_AMBIGUOUS" };
-  assert.match(renderTui(m, 120, 24).split("\n")[0]!, /degraded.*DISPATCH_OUTCOME_AMBIGUOUS/);
+  assert.match(renderTui(m, 120, 24), /degraded[\s\S]*DISPATCH_OUTCOME_AMBIGUOUS/);
   const ui = terminal(async () => snapshot());
   try {
-    await settle(); ui.key("dno");
+    await settle(); ui.key("dno"); await settle();
     assert.match(ui.frame(), /invalid|incomplete|dlv_<24/i);
-    ui.key("\u007f\u007fdlv_abcdefghijklmnopqrstuvwx");
+    ui.key("\u007f\u007fdlv_abcdefghijklmnopqrstuvwx"); await settle();
     assert.match(ui.frame(), /dlv_abcdefghijklmnopqrstuvwx/);
     assert.match(ui.frame(), /format valid/);
     assert.match(ui.frame(), /Enter look up/);

@@ -15,7 +15,6 @@ import { LocalControlError, requestLocalControl } from "./local-control.js";
 import { runCoreRuntime } from "./runtime.js";
 import { defaultRunLaunchctl } from "./service-agent.js";
 import { runCoreServiceCommand } from "./core-service-command.js";
-import { runTui } from "./tui.js";
 import { createTuiSshClient } from "./tui-ssh.js";
 
 import { CORE_VERSION } from "./core-version.js";
@@ -177,8 +176,10 @@ export async function runCoreCli(args: readonly string[], dependencies: CoreCliD
     };
     if (command === "tui") {
       if (args.length !== 1) return invalid();
+      const { runTui } = await import("./tui.js");
       const ssh = createTuiSshClient({ nodes: inventory.nodes, env });
       await runTui({ input: stdin, output: stdout, call, renderStatus, host: inventory.host,
+        terminal: { noColor: env.NO_COLOR !== undefined, dumb: env.TERM === "dumb" },
         remote: { hosts: inventory.nodes, call: ssh.call, close: ssh.close },
         hint: (code, host) => host && host !== inventory.host
           ? `On ${host}: ${hint("tui", code, "the configured state directory on that host")}`

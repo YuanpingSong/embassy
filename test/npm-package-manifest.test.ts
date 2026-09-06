@@ -74,8 +74,8 @@ test("exact npm manifest names every runtime artifact and canonical public asset
   assert.ok(!expected.includes("assets/social-preview-arcs-fable.png"));
 
   const sourceModules = (await readdir(path.join(repoRoot, "src", "gateway")))
-    .filter((filename) => filename.endsWith(".ts"))
-    .map((filename) => filename.slice(0, -3))
+    .filter((filename) => /\.tsx?$/.test(filename))
+    .map((filename) => filename.replace(/\.tsx?$/, ""))
     .sort();
   const manifestModules = expected
     .filter(

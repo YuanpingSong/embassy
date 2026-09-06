@@ -4,6 +4,7 @@ import test from "node:test";
 import { BridgeError } from "../src/errors.js";
 import type { BrokerCommand } from "../src/gateway/broker-control.js";
 import { runTui } from "../src/gateway/tui.js";
+import { tuiScreen } from "./helpers/tui-screen.js";
 
 const snapshot = (host: string) => ({ health: "healthy", revision: 1, routes: [{
   id: `reg_${host}`, alias: `codex-one@${host}`, host, provider: "codex", queueDepth: 2,
@@ -19,9 +20,10 @@ function terminal(hosts: string[], local: (c: BrokerCommand) => Promise<unknown>
   const output = Object.assign(new Writable({ write(chunk, _enc, done) { bytes += String(chunk); done(); } }), { isTTY: true, columns: 120, rows: 30 });
   const stop = new AbortController();
   const running = runTui({ input, output, host: "local", call: local, renderStatus: () => "plain\n", signal: stop.signal,
+    terminal: { noColor: true, dumb: false },
     remote: { hosts, call: remote, close: () => { closes++; } } });
   return { raw, input, output, stop, running, key: (keys: string) => input.write(keys), closes: () => closes,
-    frame: () => bytes.split("\u001b[2J").at(-1)!, text: () => bytes };
+    frame: () => tuiScreen(bytes), text: () => bytes };
 }
 
 test("one hung host cannot block local or other host polls, navigation, or quit", async (t) => {
@@ -39,8 +41,8 @@ test("one hung host cannot block local or other host polls, navigation, or quit"
     assert.doesNotMatch(ui.frame(), /codex-mirror/);
     for (let i = 0; i < 5; i++) { t.mock.timers.tick(1_000); await settle(); }
     assert.equal(calls.local, 6); assert.equal(calls.dead, 1); assert.equal(calls.remote, 2);
-    ui.key("]]"); assert.match(ui.frame(), /Embassy remote/); assert.match(ui.frame(), /codex-one@remote/);
-    ui.key("["); assert.match(ui.frame(), /Embassy dead/);
+    ui.key("]]"); await settle(); assert.match(ui.frame(), /Embassy remote/); assert.match(ui.frame(), /codex-one@remote/);
+    ui.key("["); await settle(); assert.match(ui.frame(), /Embassy dead/);
     ui.key("q"); await ui.running;
     assert.equal(ui.closes(), 1); assert.deepEqual(ui.raw, [true, false]);
     const stopped = ui.text(); hung.resolve(snapshot("dead")); await settle();
@@ -58,15 +60,15 @@ test("remote retirement captures host and full ID even if the operator changes p
     mutations.push({ host, command }); return result.promise;
   });
   try {
-    await settle(); ui.key("]x");
-    assert.match(ui.frame(), /Host: remote/); assert.match(ui.frame(), /Endpoint ID: reg_remote/);
+    await settle(); ui.key("]x"); await settle();
+    assert.match(ui.frame(), /Host: remote/); assert.match(ui.frame(), /Endpoint ID[\s\S]*reg_remote/);
     assert.doesNotMatch(ui.frame(), /Host: local/);
-    ui.key("y["); await settle();
+    ui.key("y"); await settle(); ui.key("["); await settle();
     assert.match(ui.frame(), /Embassy local/);
     assert.deepEqual(mutations, [{ host: "remote", command: { method: "retire_route", params: { endpoint: "reg_remote" } } }]);
     result.resolve({ cancelled: 2, ambiguous: 0, unconfirmed: 1 }); await settle();
     assert.doesNotMatch(ui.frame(), /cancelled/);
-    ui.key("]4"); assert.match(ui.frame(), /cancelled.*2/);
+    ui.key("]"); await settle(); ui.key("4"); await settle(); assert.match(ui.frame(), /cancelled.*2/);
     assert.equal(mutations.length, 1);
   } finally { ui.stop.abort(); await ui.running; }
 });
@@ -103,10 +105,10 @@ test("retirement rechecks a pending owner poll before launching the remote mutat
   });
   try {
     await settle(); ui.key("]x");
-    t.mock.timers.tick(5_000); await settle(); ui.key("y["); await settle();
+    t.mock.timers.tick(5_000); await settle(); ui.key("y"); await settle(); ui.key("["); await settle();
     assert.equal(writes, 0);
     next.resolve(undefined); await settle();
-    assert.equal(writes, 0); ui.key("]"); assert.match(ui.frame(), /fresh supported owner snapshot/);
+    assert.equal(writes, 0); ui.key("]"); await settle(); assert.match(ui.frame(), /fresh supported owner snapshot/);
   } finally { ui.stop.abort(); await ui.running; }
 });
 

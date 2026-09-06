@@ -1,5 +1,7 @@
 # Configuration
 
+Embassy requires macOS and Node.js 22 or newer.
+
 Embassy has one broker per login user and machine. Configuration is inherited
 when the broker starts; changing it requires a broker restart. Provider build
 or version metadata never grants routing authority.

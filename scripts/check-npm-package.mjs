@@ -46,6 +46,8 @@ const GATEWAY_RUNTIME_MODULES = [
   "core-service-command",
   "core-version",
   "tui",
+  "tui-model",
+  "tui-view",
   "tui-ssh",
   "endpoint-directory",
   "federation-nodes",
@@ -80,6 +82,7 @@ export const EXPECTED_NPM_PACKAGE_PATHS = Object.freeze(
 
 const REQUIRED_ESM_IMPORTS = [
   "dist/src/gateway/core-cli.js",
+  "dist/src/gateway/tui.js",
   "dist/src/gateway/codex-stateless-transport.js",
   "dist/src/gateway/runtime.js",
 ];

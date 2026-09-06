@@ -58,6 +58,7 @@ test("one terminal reads two real test-owned brokers and retires only the confir
   const output = Object.assign(new Writable({ write(chunk, _enc, done) { bytes += String(chunk); done(); } }), { isTTY: true, columns: 120, rows: 30 });
   const stop = new AbortController();
   const tui = runTui({ input: keys, output, host: "local", call: (request) => call("local", request), renderStatus: () => "plain",
+    terminal: { noColor: true, dumb: false },
     signal: stop.signal, remote: { hosts: ["remote"], call: ssh.call, close: ssh.close } });
   t.after(async () => { stop.abort(); await tui; });
   const waitFor = async (pattern: RegExp) => {
@@ -66,7 +67,7 @@ test("one terminal reads two real test-owned brokers and retires only the confir
     assert.match(bytes, pattern);
   };
   await waitFor(/remote.*healthy/); assert.match(bytes, /local.*healthy/);
-  keys.write("]x"); await waitFor(/Host: remote/); await waitFor(/Endpoint ID: reg_/);
+  keys.write("]x"); await waitFor(/Host: remote/); await waitFor(/Endpoint ID[\s\S]*reg_/);
   keys.write("y"); await waitFor(/retire result ready/);
   const local = await call("local", { method: "list_snapshot", params: {} }) as { routes: unknown[] };
   const remote = await call("remote", { method: "list_snapshot", params: {} }) as { routes: unknown[] };

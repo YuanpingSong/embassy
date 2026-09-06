@@ -13,7 +13,7 @@ identity, so a rename or replacement never silently retargets queued work.
 
 ## Requirements
 
-- macOS and Node.js 20 or newer.
+- macOS and Node.js 22 or newer.
 - Claude Code installed for the Claude sessions you use.
 - To receive in Codex, use its managed standalone installation with its App
   Server daemon already running under the same macOS login. Embassy discovers

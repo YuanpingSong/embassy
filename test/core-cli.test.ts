@@ -104,7 +104,7 @@ test("CLI register, named send, retained reply and broker check traverse the rea
   try {
     await screenHas(/codex-a@local/);
     await screenHas(/Embassy local.*ledger rev/);
-    keys.write("x"); await screenHas(/Endpoint ID: reg_/);
+    keys.write("x"); await screenHas(/Endpoint ID[\s\S]*reg_/);
     keys.write("y"); await screenHas(/result ready/); keys.write("4");
     await screenHas(/cancelled.*ambiguous.*unconfirmed/);
     assert.deepEqual((await cli(["status", "--json"])).result.routes, []);
