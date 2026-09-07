@@ -4,12 +4,13 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [4.5.1] - 2026-09-07
 
 ### Added
 - Simplified Chinese README (`README_CN.md`) with a language switcher under the badges.
 
 ### Changed
+- The packaged `embassy-peer` skill is rewritten around what an agent does — who is there, send, reply, receiving, delivery status, refusals — at about half its previous length; every claim re-verified against the code.
 - README Status section rewritten as two short lists: what works today, and what Embassy deliberately does not promise.
 - `embassy skills install|status` documented in the operations, configuration and security docs and the site quick start; the 3.x reset procedure is removed from the docs (there are no pre-4.x installations to migrate).
 - Demo project under `demo/` re-cut: illustrated agents, native wake, SSH and receipts scenes with newcomer-friendly wording.
