@@ -1,8 +1,4 @@
-
-
-https://github.com/user-attachments/assets/665beace-ec01-44eb-8ff5-ee5ad1f8bc52
-
-<h1><img src="https://raw.githubusercontent.com/YuanpingSong/embassy/main/site/assets/mark.svg" alt="" width="32" height="32" align="absmiddle"> Embassy</h1>
+<h1><img src="https://raw.githubusercontent.com/YuanpingSong/embassy/main/site/assets/mark.svg" alt="" width="36" height="36" align="absmiddle"> Embassy</h1>
 
 Embassy lets live Claude Code sessions and Codex CLI agents message one another
 by name, on one Mac or across user-owned Macs reached through SSH. The broker
