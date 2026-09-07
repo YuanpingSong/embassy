@@ -65,13 +65,16 @@ const Send = () => {
 
 const Wake = () => {
   const f = useCurrentFrame(), p = ease(f, 18, 75);
+  const answering = f >= 108;
   return <Scene duration={180}>
     <Caption title="The Codex agent wakes up." eyebrow="It arrives in Codex" />
     <Line x1={230} x2={720} y={540} progress={p} />
     <Broker x={230} y={540} small glow={1 - p} />
-    <div style={{position: "absolute", top: 375, left: 440, opacity: .3 + .7 * ease(f, 60, 84)}}>
-      <TerminalWindow captureId="codex-wake" title="Codex CLI · codex-reviewer" width={1370} height={330} fontSize={30} lineHeight={1.3}
-        sourceStartMs={87} sourceEndMs={4993} viewportRow={6} viewportRows={6} viewportColumns={73} focusRows={[0, 5]} />
+    <div style={{position: "absolute", top: 295, left: 320, opacity: .75 + .25 * ease(f, 12, 36)}}>
+      <TerminalWindow captureId="codex-wake" title="Codex CLI · codex-reviewer" width={1570} height={530} fontSize={28} lineHeight={1.25}
+        sourceStartMs={answering ? 5000 : 87} sourceEndMs={answering ? 7426 : 4993}
+        viewportRow={answering ? 4 : 0} viewportRows={answering ? 9 : 12} viewportColumns={90}
+        focusRows={answering ? [0, 1, 2, 8] : [0, 6, 11]} />
     </div>
     {f < 90 ? <Packet x={230 + 490 * p} y={540} opacity={1 - ease(f, 73, 88)} /> : null}
     <div style={styles.bottomCaption}>Delivered straight into the Codex session. Nothing polls.</div>
@@ -98,13 +101,16 @@ const Reply = () => {
 
 const Arrival = () => {
   const f = useCurrentFrame();
+  const reading = f >= 38;
   return <Scene duration={150}>
     <Caption title="Back in Claude." eyebrow="The loop closes" />
-    <div style={{position: "absolute", left: 360, top: 380}}>
-      <TerminalWindow captureId="claude-reply" title="Claude Code · embassy-demo" width={1200} height={165} fontSize={34} lineHeight={1.4}
-        sourceStartMs={2000} sourceEndMs={2000} viewportRow={11} viewportRows={1} viewportColumns={49} />
+    <div style={{position: "absolute", left: 130, top: 285}}>
+      <TerminalWindow captureId="claude-reply" title="Claude Code · embassy-demo" width={1660} height={510} fontSize={29} lineHeight={1.25}
+        sourceStartMs={reading ? 2000 : 181} sourceEndMs={reading ? 2000 : 1808}
+        viewportRow={reading ? 1 : 12} viewportRows={reading ? 11 : 5} viewportColumns={90}
+        focusRows={reading ? [0, 5, 6, 7, 10] : [0, 4]} />
     </div>
-    <div style={{position: "absolute", top: 635, width: "100%", textAlign: "center", opacity: ease(f, 25, 45)}}>
+    <div style={{position: "absolute", top: 840, width: "100%", textAlign: "center", opacity: ease(f, 38, 58)}}>
       <span style={{display: "inline-block", color: AMBER, fontSize: 66, marginRight: 22}}>✓</span><span style={{fontSize: 42}}>Reply received.</span>
     </div>
   </Scene>;
