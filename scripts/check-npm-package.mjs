@@ -3,6 +3,7 @@
 import { spawn } from "node:child_process";
 import {
   lstat,
+  mkdir,
   mkdtemp,
   readFile,
   realpath,
@@ -44,6 +45,7 @@ const GATEWAY_RUNTIME_MODULES = [
   "coordinator",
   "core-cli",
   "core-service-command",
+  "core-skills-command",
   "core-version",
   "tui",
   "tui-model",
@@ -223,6 +225,24 @@ async function smokeInstalledPackage(tarballPath, pkg) {
     });
     if (cli.stdout !== `embassy ${pkg.version}\n` || cli.stderr !== "") {
       fail("installed embassy CLI returned unexpected version output");
+    }
+    const skillHome = path.join(smokeRoot, "skill-home");
+    await mkdir(skillHome, { mode: 0o700 });
+    const skillEnv = { ...process.env, HOME: skillHome, EMBASSY_STATE_DIR: path.join(skillHome, "absent-state") };
+    for (const [subcommand, expected] of [["install", "installed"], ["status", "current"], ["install", "unchanged"]]) {
+      const copied = await run(cliPath, ["skills", subcommand], { cwd: smokeRoot, env: skillEnv });
+      const expectedTargets = ["claude", "codex"].map(provider => ({ provider,
+        path: path.join(skillHome, `.${provider}`, "skills", "embassy-peer"), status: expected }));
+      if (copied.stdout !== `${JSON.stringify({ ok: true, command: "skills", result: { subcommand, targets: expectedTargets } })}\n` || copied.stderr !== "") {
+        fail("installed skills command returned unexpected output");
+      }
+    }
+    for (const provider of ["claude", "codex"]) {
+      for (const relative of ["SKILL.md", "agents/openai.yaml"]) {
+        const actual = await readFile(path.join(skillHome, `.${provider}`, "skills", "embassy-peer", relative));
+        const expected = await readFile(path.join(installedRoot, "skills", "embassy-peer", relative));
+        if (!actual.equals(expected)) fail("installed skills command did not copy its own packaged file");
+      }
     }
   } finally {
     await rm(smokeRoot, { recursive: true, force: true });

@@ -41,7 +41,7 @@ test("public command list agrees with the side-effect-free CLI help", async () =
   const commands = [
     "register-codex", "send", "status", "tui", "refresh", "delivery-status",
     "wait-delivery", "retire", "check", "health", "serve", "service",
-    "peer-stdio",
+    "skills", "peer-stdio",
   ];
   for (const command of commands) {
     assert.match(help, new RegExp(`\\b${command}\\b`), `help omits ${command}`);
@@ -53,6 +53,10 @@ test("public command list agrees with the side-effect-free CLI help", async () =
   assert.match(help, /send --conversation <reference>/);
   assert.match(help, /sender is resolved from the calling Claude\/Codex session/i);
   assert.doesNotMatch(help, /--from|register-peer|unregister-peer|\bawait\b|\bwatch\b|send-to-/);
+  assert.match(squash(architecture), /skills install\|status.*client-local.*does not contact the broker/i);
+  assert.match(architecture, /SKILLS_TARGET_UNSAFE/);
+  assert.match(architecture, /SKILLS_PACKAGE_INVALID/);
+  assert.match(architecture, /SKILLS_FILESYSTEM_FAILED/);
 });
 
 test("quickstart teaches inferred sending, native receiving, and identity-bound replies", async () => {
@@ -66,6 +70,8 @@ test("quickstart teaches inferred sending, native receiving, and identity-bound 
   assert.match(readme, /\{"ok":true,"command":"status","result":\{\.\.\.\}\}/);
   assert.match(readme, /wakes the receiving agent through its native interface/i);
   assert.match(readme, /Claude→Claude, Claude→Codex, Codex→Claude, and Codex→Codex/);
+  assert.match(squash(readme), /embassy skills install.*installs or updates only `embassy-peer` for both providers/i);
+  assert.doesNotMatch(readme, /npm root -g|cp -R .*embassy-peer/);
   assert.match(squash(readme), /No helper or native advertisement process is installed/i);
   assert.match(squash(readme), /may survive a broker restart while their retained ledger row and both exact endpoints remain valid/i);
   assert.match(squash(readme), /stop resolving after retirement, replacement, expiry, eviction, or a state reset/i);

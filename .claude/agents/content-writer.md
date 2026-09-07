@@ -35,7 +35,9 @@ implementation detail into a product promise.
   not migrated.
 - Current commands are `register-codex`, `send`, `status`, `tui`, `refresh`,
   `delivery-status`, `wait-delivery`, `retire`, `check`, `health`, `serve`,
-  `service`, `peer-stdio`, `--version`, and `--help`. Nothing else exists.
+  `service`, `skills`, `peer-stdio`, `--version`, and `--help`. The `skills`
+  subcommands `install|status` manage the packaged `embassy-peer` copy locally
+  without a broker connection. Nothing else exists.
 
 Do not describe native Claude sending helpers, `ListAgents` advertisement,
 shell-peer registration or mailboxes, automatic Codex output forwarding,
@@ -49,7 +51,8 @@ remote mirrors, or old-state conversion as current behavior.
 - Armed or accepted uncertainty is never replayed.
 - Native IDs, socket paths, message bodies, credentials, histories, and raw
   diagnostics never belong in public copy.
-- The operator installs or copies skills and services. Never instruct an agent
+- The operator installs skills with `embassy skills install` and manages
+  services. Never instruct an agent
   to mutate its own approval, sandbox, provider, service, or global package
   configuration.
 - Keep English and translated surfaces semantically aligned when both exist.

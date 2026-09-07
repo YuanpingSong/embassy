@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+- `embassy skills install|status` installs, updates, and checks the packaged `embassy-peer` skill for Claude Code and Codex CLI without contacting the broker; provider-only flags can limit the operation to one target.
+
 ### Changed
 - README opens with a Quick start, including how to give Claude Code and Codex CLI the `embassy-peer` skill; the 3.x upgrade section is removed.
 

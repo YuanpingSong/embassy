@@ -8,6 +8,7 @@ test("packaged skill describes native-receive, identity-inferred v4 operations",
   const skill = await readFile(new URL("../skills/embassy-peer/SKILL.md", import.meta.url), "utf8");
   const metadata = await readFile(new URL("../skills/embassy-peer/agents/openai.yaml", import.meta.url), "utf8");
   assert.match(skill, /^---\nname: embassy-peer\ndescription: .+\n---\n/);
+  assert.match(skill, /The operator runs `embassy skills install` to install or update the packaged `embassy-peer` skill/);
   assert.match(skill, /The agent must not install or copy skills, or modify provider configuration\./);
   assert.match(skill, /Receiving is native/);
   assert.match(skill, /Do not resend an ambiguous or unconfirmed delivery/);

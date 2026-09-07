@@ -247,7 +247,7 @@ The public CLI is:
 register-codex   send              status            tui
 refresh          delivery-status   wait-delivery
 retire           check             health
-serve            service           peer-stdio
+serve            service           skills            peer-stdio
 --version        --help
 ```
 
@@ -261,6 +261,19 @@ exposes only the last bounded catalog observation. `health` is a control-path pr
 private loopback endpoints and uses the real ledger/coordinator/receipt path,
 then retires them; no provider or model is contacted. It is not a
 provider-readiness test.
+
+`skills install|status` is client-local and does not contact the broker.
+It resolves the packaged `embassy-peer` skill relative to the running CLI,
+then compares or copies its files into the current user's Claude and Codex
+skill directories. Installation preserves unrelated and extra user files;
+identical copies are left alone. The closed result names each target path and
+its `installed`, `updated`, or `unchanged` outcome; status reports `absent`,
+`current`, or `stale`. `--claude-only` and `--codex-only` select one target and
+are mutually exclusive. Unsafe ownership or symlink evidence at HOME, a skill
+parent directory, or a packaged destination refuses with `SKILLS_TARGET_UNSAFE`; an invalid
+packaged source refuses with `SKILLS_PACKAGE_INVALID`; filesystem failures use
+`SKILLS_FILESYSTEM_FAILED`. The command never uses sudo or changes provider
+configuration.
 
 `tui` is a terminal-only client: one in-flight operation per host and no broker
 protocol or state extension. Its local pane uses private control; remote panes

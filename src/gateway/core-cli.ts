@@ -15,6 +15,7 @@ import { LocalControlError, requestLocalControl } from "./local-control.js";
 import { runCoreRuntime } from "./runtime.js";
 import { defaultRunLaunchctl } from "./service-agent.js";
 import { runCoreServiceCommand } from "./core-service-command.js";
+import { runCoreSkillsCommand } from "./core-skills-command.js";
 import { createTuiSshClient } from "./tui-ssh.js";
 
 import { CORE_VERSION } from "./core-version.js";
@@ -35,6 +36,7 @@ const HELP = `Embassy — named Claude/Codex messaging over local gateways and S
   embassy health
   embassy serve
   embassy service install|uninstall|status
+  embassy skills install|status [--claude-only|--codex-only]
   embassy peer-stdio                             # SSH broker transport
   embassy --version | --help
 
@@ -93,6 +95,9 @@ async function body(input: Readable): Promise<string> {
 }
 
 function hint(command: string, code: string, stateDir: string): string {
+  if (code === "SKILLS_TARGET_UNSAFE") return "Check that HOME and the selected skill paths are owned by this user and are real directories/files, not symlinks. Do not use sudo.";
+  if (code === "SKILLS_PACKAGE_INVALID") return "Reinstall the Embassy CLI package; its bundled embassy-peer skill is missing or invalid.";
+  if (code === "SKILLS_FILESYSTEM_FAILED") return "Check filesystem permissions, then run embassy skills status; some files may already have been updated. Do not use sudo.";
   if (code === "CALLER_IDENTITY_CONFLICT") return "Use env -u CLAUDE_CODE_MESSAGING_SOCKET for a Codex call, or env -u CODEX_THREAD_ID for a Claude call; do not restart the broker.";
   if (code === "CONTROL_CONNECT_DENIED") return command === "serve"
     ? `Grant local-policy access to ${stateDir}; verify EMBASSY_STATE_DIR names this user's own directory.`
@@ -137,12 +142,20 @@ export async function runCoreCli(args: readonly string[], dependencies: CoreCliD
   const env = dependencies.env ?? process.env, stdin = dependencies.stdin ?? process.stdin;
   const stdout = dependencies.stdout ?? process.stdout, stderr = dependencies.stderr ?? process.stderr;
   const write = (command: string, result: unknown): void => { stdout.write(`${JSON.stringify({ ok: true, command, result })}\n`); };
-  const verbs = ["--help", "--version", "serve", "service", "send", "register-codex", "retire", "status", "tui", "refresh", "health", "check", "delivery-status", "wait-delivery", "peer-stdio"];
+  const verbs = ["--help", "--version", "serve", "service", "skills", "send", "register-codex", "retire", "status", "tui", "refresh", "health", "check", "delivery-status", "wait-delivery", "peer-stdio"];
   const command = args[0] === undefined ? "--help" : verbs.includes(args[0]) ? args[0] : "unknown";
   let stateDir = "the configured state directory";
   try {
     if (command === "--help" && args.length <= 1) { stdout.write(HELP); return 0; }
     if (command === "--version" && args.length === 1) { stdout.write(`embassy ${CORE_VERSION}\n`); return 0; }
+    if (command === "skills") {
+      const subcommand = args[1], flag = args[2];
+      if ((subcommand !== "install" && subcommand !== "status") || args.length > 3 ||
+          (flag !== undefined && flag !== "--claude-only" && flag !== "--codex-only")) return invalid();
+      write(command, await runCoreSkillsCommand(subcommand,
+        flag === "--claude-only" ? ["claude"] : flag === "--codex-only" ? ["codex"] : ["claude", "codex"], env));
+      return 0;
+    }
     stateDir = path.resolve(defaultGatewayStateDir(env));
     if (command === "serve") {
       if (args.length !== 1) return invalid();

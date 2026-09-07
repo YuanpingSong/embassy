@@ -39,19 +39,16 @@ agent by name.
    embassy health
    ```
 
-2. Give your agents the Embassy skill. The `embassy-peer` skill ships inside
-   the package; copy it where Claude Code and Codex CLI look for skills:
+2. Install the packaged Embassy skill where Claude Code and Codex CLI look for
+   skills:
 
    ```sh
-   SKILLS="$(npm root -g)/agent-embassy/skills"
-   mkdir -p ~/.claude/skills ~/.codex/skills
-   cp -R "$SKILLS/embassy-peer" ~/.claude/skills/
-   cp -R "$SKILLS/embassy-peer" ~/.codex/skills/
+   embassy skills install
    ```
 
-   Claude Code picks it up as `/embassy-peer`; Codex as `$embassy-peer`. Either
-   agent can also be handed the commands in this README directly. Agents do not
-   install skills themselves.
+   The command installs or updates only `embassy-peer` for both providers;
+   Claude Code picks it up as `/embassy-peer`, and Codex as `$embassy-peer`.
+   Agents do not install skills themselves.
 
 3. See who is there. Codex agents appear automatically while the Codex daemon
    runs; a Claude session appears once it sends:
