@@ -99,7 +99,7 @@ function Header({ model, width, now, color }: { model: Readonly<TuiModel>; width
 
 function observationAge(value: unknown, now: number): string {
   const parsed = typeof value === "string" ? Date.parse(value) : Number.NaN;
-  return Number.isFinite(parsed) ? `${age(now - parsed)} ago` : "not yet refreshed";
+  return Number.isFinite(parsed) ? now - parsed < 1_000 ? "just now" : `${age(now - parsed)} ago` : "not yet refreshed";
 }
 
 function SectionTabs({ model, color }: { model: Readonly<TuiModel>; color: boolean }) {

@@ -16,7 +16,7 @@ const notFound = { code: 3, stdout: "", stderr: "Could not find specified servic
 const running = { code: 0, stdout: "state = running\npid = 4242\nlast exit code = 0\n", stderr: "" } as const;
 
 async function fixture(t: TestContext, withInventory = true) {
-  const root = await mkdtemp(path.join(await realpath(os.tmpdir()), "emb-v4-service-command-"));
+  const root = await mkdtemp(path.join(await realpath(process.platform === "darwin" ? "/tmp" : os.tmpdir()), "emb-service-"));
   const home = path.join(root, "home");
   const stateDir = path.join(root, "state");
   await mkdir(home, { mode: 0o700 });

@@ -113,6 +113,9 @@ test("retirement confirmation shows exact identity and consequences if and only 
 });
 
 test("honesty and action guidance remain present across connection states", () => {
+  const recent = tuiDesignFixture("empty");
+  recent.snapshot!.codex = { complete: true, observedAt: new Date(FIXED_TUI_NOW - 994).toISOString() };
+  assert.match(renderTui(recent, 100, 30, FIXED_TUI_NOW, false), /Codex discovery up to 20 most recent · just now/);
   const stale = renderTui(tuiDesignFixture("stale-unreachable"), 100, 30, FIXED_TUI_NOW, false);
   assert.match(stale, /broker UNREACHABLE/);
   assert.match(stale, /STALE 45s !PEER_TUNNEL_UNAVAILABLE/);

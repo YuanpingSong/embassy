@@ -1,0 +1,25 @@
+{
+  "name": "embassy-demo-video",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "studio": "remotion studio src/index.ts",
+    "check": "node --test emulate.test.mjs edit.test.mjs && tsc --noEmit",
+    "render": "remotion render src/index.ts EmbassyDemo out/embassy-demo.mp4 --codec=h264 --crf=18",
+    "render:gif": "remotion render src/index.ts EmbassyTeaser out/embassy-demo.gif --codec=gif --every-nth-frame=4"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.521",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.3",
+    "@xterm/headless": "6.0.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "remotion": "4.0.521",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,0 +1,6 @@
+node_modules/
+out/
+public/captures/
+captures/
+.venv/
+__pycache__/
