@@ -4,10 +4,15 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [4.4.0] - 2026-09-06
 
 ### Changed
 - Embassy now requires Node.js 22 or newer. The terminal interface uses Ink 7 for layout, styling, input and incremental rendering.
+- `embassy tui` is rebuilt on Ink: endpoints grouped by state (Working, Waiting, Faulted, Ready, Dormant, Not reporting, Cached) with counts and a column header; one colour per state with the state word always shown; bold names, dim metadata, display-width padding so wide-character names keep the grid.
+- The selected row is one highlight bar and reverse video means selection only; the outcome column receives the width so a failed delivery's safe code is readable at 80 columns; lists scroll by rendered lines, never orphan a group header, and mark clipped rows with "↑ N more" / "↓ N more".
+- Host tabs with a health mark, section tabs with the failed count in red, and one footer line carrying the position counter and the keys; the discovery note shares the header line.
+- Centred, bordered dialogs for retirement and token entry; the retirement dialog shows host, alias, the full endpoint ID and the settlement consequences in red with a distinct confirm key. Every empty list says why it is empty. Without an interactive terminal `tui` prints plain text with no escape codes; NO_COLOR removes styling and keeps the screen interactive.
+- `string-width` is now a runtime dependency (pinned).
 
 ## [4.3.0] - 2026-09-06
 
