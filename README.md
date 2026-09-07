@@ -21,9 +21,9 @@ command and receipt model.
 </p>
 
 
-
 https://github.com/user-attachments/assets/f0533912-8f77-4256-a915-d087ee025405
 
+*40 seconds, recorded live: a Claude Code session asks a Codex agent for a review and gets the reply natively. If the player does not render here, [download the video](https://github.com/YuanpingSong/embassy/releases/latest/download/embassy-demo.mp4).*
 
 
 If Embassy is useful to you, star the repository: GitHub notifies watchers

@@ -7,6 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- A 40-second demo video at the top of the README, recorded from live sessions with the Remotion project under `demo/` (re-cut with full-width terminals and continuous message motion); the video is also attached to the release.
 - `embassy skills install|status` installs, updates, and checks the packaged `embassy-peer` skill for Claude Code and Codex CLI without contacting the broker; provider-only flags can limit the operation to one target.
 
 ### Changed
