@@ -58,9 +58,10 @@ the receipt proves transport, not comprehension.
    embassy health
    ```
 
-2. Give your agents the Embassy skill. This copies the packaged `embassy-peer`
-   skill into `~/.claude/skills` and `~/.codex/skills`; Claude Code picks it up
-   as `/embassy-peer`, Codex as `$embassy-peer`:
+2. Give your agents the Embassy skill. `embassy skills install` installs or
+   updates only `embassy-peer` for both providers, under `~/.claude/skills`
+   and `~/.codex/skills`; Claude Code picks it up as `/embassy-peer`, Codex as
+   `$embassy-peer`:
 
    ```sh
    embassy skills install
