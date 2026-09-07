@@ -30,6 +30,23 @@ const runStyle = (run: CellRun): CSSProperties => {
   };
 };
 
+// Editorial redaction, not a renamed endpoint: preserve cells and ANSI runs,
+// including when a recorded host suffix crosses a styling boundary.
+const maskMachineSuffixes = (row: readonly CellRun[]): readonly CellRun[] => {
+  const text = row.map(run => run.text).join("");
+  const suffixes = [...text.matchAll(/@(?:m5dev|this-mac)\b/g)];
+  let offset = 0;
+  return row.map(run => {
+    const start = offset;
+    offset += run.text.length;
+    return {...run, text: run.text.split("").map((character, index) => {
+      const column = start + index;
+      const suffix = suffixes.find(match => column > match.index && column < match.index + match[0].length);
+      return suffix ? column === suffix.index + 1 ? "…" : " " : character;
+    }).join("")};
+  });
+};
+
 type TerminalWindowProps = Readonly<{
   captureId: string;
   title: string;
@@ -113,7 +130,7 @@ export const TerminalWindow = ({
                 ...(highlightPattern && index === highlightedRow ? {minWidth: 0, width: viewportColumns ? `${viewportColumns}ch` : width - 38, background: `${accent}12`, boxShadow: `inset 0 0 0 2px ${accent}`} : {}),
               }}
             >
-              {row.map((run, runIndex) => <span key={runIndex} style={runStyle(run)}>{run.text}</span>)}
+              {maskMachineSuffixes(row).map((run, runIndex) => <span key={runIndex} style={runStyle(run)}>{run.text}</span>)}
             </div>
           ))}
           {cursor?.visible && cursorRow >= 0 && (!viewportRows || cursorRow < viewportRows) ? (
