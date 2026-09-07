@@ -3,8 +3,10 @@ import xterm from "@xterm/headless";
 
 const {Terminal} = xterm;
 
-const COLUMNS = 90;
-const ROWS = 24;
+const COLUMNS = Number(process.argv[2] ?? 90);
+const ROWS = Number(process.argv[3] ?? 24);
+if (!Number.isInteger(COLUMNS) || COLUMNS < 24 || COLUMNS > 160 ||
+    !Number.isInteger(ROWS) || ROWS < 8 || ROWS > 60) throw new Error("INVALID_DIMENSIONS");
 const MAX_DATA_BYTES = 1024 * 1024;
 const ansi16 = [
   "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",

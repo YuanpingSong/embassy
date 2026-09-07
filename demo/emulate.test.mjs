@@ -5,8 +5,8 @@ import test from "node:test";
 
 const helper = fileURLToPath(new URL("./emulate.mjs", import.meta.url));
 
-const run = (requests) => {
-  const result = spawnSync(process.execPath, [helper], {
+const run = (requests, dimensions = []) => {
+  const result = spawnSync(process.execPath, [helper, ...dimensions], {
     encoding: "utf8",
     input: `${requests.map((request) => JSON.stringify(request)).join("\n")}\n`,
     timeout: 5_000,
@@ -20,6 +20,15 @@ const run = (requests) => {
 
 const data = (value) => ({data: Buffer.from(value).toString("base64")});
 const rowText = (snapshot, row = 0) => snapshot.rows[row].map((entry) => entry.text).join("");
+
+test("recording dimensions retain real tall viewports and native wrapping", () => {
+  const snapshot = run([data("\u001b[40;1Hlast-row"), {snapshot: true}], ["90", "40"]).messages.at(-1);
+  assert.equal(snapshot.rows.length, 40);
+  assert.equal(rowText(snapshot, 39), "last-row");
+  const narrow = run([data("x".repeat(25)), {snapshot: true}], ["24", "8"]).messages.at(-1);
+  assert.equal(rowText(narrow, 0), "x".repeat(24));
+  assert.equal(rowText(narrow, 1), "x");
+});
 
 test("ANSI cursor addressing overwrites cells and tracks cursor visibility", () => {
   const hidden = run([
