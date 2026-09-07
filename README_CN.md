@@ -1,4 +1,4 @@
-<h1><img src="https://raw.githubusercontent.com/YuanpingSong/embassy/main/site/assets/mark.svg" alt="" width="32" height="32" align="absmiddle"> Embassy</h1>
+<h1><img src="https://raw.githubusercontent.com/YuanpingSong/embassy/main/site/assets/mark.svg" alt="" width="36" height="36" align="absmiddle"> Embassy</h1>
 
 Embassy 能让运行中的 Claude Code 会话和 Codex CLI agent 直接按名称互相发消息。无论是在单台 Mac 上，还是跨多台通过 SSH 互联的个人 Mac，都没问题。中转服务（broker）会通过接收方 agent 的原生接口直接将其唤醒，无需任何轮询。无论 Claude→Claude、Claude→Codex、Codex→Claude 还是 Codex→Codex，全都遵循同一套命令和回执（receipt）机制。
 
@@ -21,8 +21,7 @@ Embassy 能让运行中的 Claude Code 会话和 Codex CLI agent 直接按名称
   <a href="README_CN.md"><img src="https://img.shields.io/badge/简体中文-1a1a1e" alt="简体中文"></a>
 </p>
 
-
-https://github.com/user-attachments/assets/f0533912-8f77-4256-a915-d087ee025405
+https://github.com/user-attachments/assets/1487b1e3-4579-49cd-8cdb-04772607e71f
 
 *40 秒实录演示：Claude Code 会话向 Codex agent 请求代码 review，并以原生方式收到回复。如果视频无法直接播放，请[下载视频文件](https://github.com/YuanpingSong/embassy/releases/latest/download/embassy-demo.mp4)。*
 
