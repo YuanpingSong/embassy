@@ -124,8 +124,8 @@ const Ssh = () => {
   const f = useCurrentFrame(), outbound = ease(f, 24, 100), inbound = ease(f, 120, 188), returning = f >= 120;
   return <Scene duration={210}>
     <Caption title="Across Macs. Over SSH." eyebrow="More than one Mac" />
-    <Mac x={140} host="m5dev" provider="Claude agent" />
-    <Mac x={1170} host="this-mac" provider="Codex agent" />
+    <Mac x={140} host="This Mac" provider="Claude agent" />
+    <Mac x={1170} host="Another Mac" provider="Codex agent" />
     <div style={{position: "absolute", right: 140, top: 795, color: MUTED, fontSize: 23}}>illustration</div>
     <Line x1={750} x2={1170} y={580} progress={returning ? inbound : outbound} reverse={returning} />
     <div style={{position: "absolute", left: 880, top: 500, width: 160, textAlign: "center", fontSize: 32, letterSpacing: ".12em", color: MUTED}}>SSH</div>
