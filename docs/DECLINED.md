@@ -6,8 +6,8 @@ decision here means addressing its reason, not ignoring it.
 
 - **Native Claude sending advertisement or helper process** — Declined.
   Sending is one `embassy send` command from the calling session; Embassy
-  installs nothing into Claude's native agent list and forks no helper. The
-  native socket is used only to wake the receiving session.
+  installs no helper or advertisement process into Claude's native agent
+  list. The native socket is used only to wake the receiving session.
 - **Shell-peer registration, tokens, mailboxes, or an `await` command** —
   Declined. Receiving is native and never polled; an agent that cannot be
   woken natively is not an endpoint.
@@ -41,6 +41,7 @@ decision here means addressing its reason, not ignoring it.
 - **A separate federation identity mode** — Declined. The plain same-user SSH
   login is the trust boundary; a forced command, per-node key, or host-label
   attestation would add configuration without changing who is trusted.
-- **Old-state migration or a compatibility reader** — Declined. Schemas
-  Embassy does not write refuse before mutation; rollback is the preserved old
-  binary with its untouched old state.
+- **3.x or unknown-schema migration or converter** — Declined. Only the
+  immediately previous 4.x schema is read forward; every other schema refuses
+  before mutation, and rollback is the preserved old binary with its
+  untouched old state.

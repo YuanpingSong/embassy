@@ -254,8 +254,9 @@ serve            service           peer-stdio
 `send` accepts exactly one of `--to` and `--conversation`; it has no `--from`.
 Human `status` is a rendering of the same closed body-free JSON shape. Its
 health word describes control/ledger health, local route rows expose their last
-native operation, and Codex rows expose busy, waiting, idle, dormant or unknown
-status, without parent references or registration-origin labels. The federation section
+native operation, and Codex rows expose busy, waiting, idle, dormant,
+systemError or unknown status, without parent references or
+registration-origin labels. The federation section
 exposes only the last bounded catalog observation. `health` is a control-path probe. `check` creates temporary
 private loopback endpoints and uses the real ledger/coordinator/receipt path,
 then retires them; no provider or model is contacted. It is not a
@@ -301,7 +302,7 @@ model interrupt.
 
 | Surface | Version | Compatibility policy |
 |---|---:|---|
-| Private state (`gateway-state.json`) | 7 | Reset only; older and unknown schemas refuse without mutation |
+| Private state (`gateway-state.json`) | 7 | A valid schema-6 document is read forward with rows retained; ≤5 and unknown refuse without mutation (reset) |
 | Private control (CLI ↔ broker) | 6 | CLI and broker must come from one installation |
 | Federation (`peer-stdio`) | 3 | Exact version and host handshake; no compatibility mode |
 | Consumed Claude peer protocol | 1 | Incompatible records are rejected in isolation |

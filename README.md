@@ -260,10 +260,9 @@ embassy check
 embassy service status
 ```
 
-The ellipses (`...` or `…`), `conv_example`, `dlv_example`, and `<public-id>`
-are substitutions, not runnable literal values: supply the indicated command
-arguments, exact received conversation reference, exact returned delivery
-token, or public endpoint ID respectively. Retain `result.deliveryToken` from
+`conv_example`, `dlv_example`, and `<public-id>` are substitutions, not
+runnable literal values: supply the exact received conversation reference,
+exact returned delivery token, or public endpoint ID respectively. Retain `result.deliveryToken` from
 the successful send response in your current session; status shows aggregate
 route queues and recent delivery metadata but cannot recover a lost delivery
 token or distinguish identical sends by token.
