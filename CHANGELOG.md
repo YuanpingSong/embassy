@@ -4,6 +4,11 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Changed
+- Demo video linked from README; sub-second discovery age shows 'just now'; service-command test uses a short socket root on macOS.
+
 ## [4.4.1] - 2026-09-06
 
 ### Changed

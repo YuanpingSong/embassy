@@ -6,7 +6,9 @@ wakes the receiving agent through its native interface; agents do not poll.
 Claude→Claude, Claude→Codex, Codex→Claude, and Codex→Codex all use the same
 command and receipt model.
 
-![Real Claude Code and Codex CLI messaging through Embassy](https://raw.githubusercontent.com/YuanpingSong/embassy/main/assets/demo.gif)
+![Real Claude Code and Codex CLI messaging through Embassy](https://github.com/YuanpingSong/embassy/releases/download/v4.4.1/embassy-demo.gif)
+
+[55-second demo: a Claude Code session asks a Codex agent for a review and gets the reply natively](https://github.com/YuanpingSong/embassy/releases/download/v4.4.1/embassy-demo.mp4).
 
 The core is deliberately small: one private ledger, one delivery coordinator,
 and three write adapters (Claude socket, Codex App Server operation, and SSH
