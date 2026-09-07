@@ -49,9 +49,9 @@ const Intro = () => {
 const Send = () => {
   const f = useCurrentFrame(), p = ease(f, 80, 145);
   return <Scene duration={180}>
-    <Caption title="Send to a name." eyebrow="One command from Claude" />
+    <Caption title="Send by name." eyebrow="One command from Claude" />
     <div style={{position: "absolute", left: 130, top: 330}}>
-      <TerminalWindow captureId="claude-send" title="Claude Code · real recording" width={1660} height={160} fontSize={38} lineHeight={1.3}
+      <TerminalWindow captureId="claude-send" title="Claude Code · embassy-demo" width={1660} height={160} fontSize={38} lineHeight={1.3}
         sourceStartMs={3034} sourceEndMs={3034} viewportRow={5} viewportRows={1} viewportColumns={60} />
     </div>
     <Line x1={340} x2={1520} y={700} progress={p} />
@@ -66,24 +66,24 @@ const Send = () => {
 const Wake = () => {
   const f = useCurrentFrame(), p = ease(f, 18, 75);
   return <Scene duration={180}>
-    <Caption title="The task wakes inside Codex." eyebrow="Native receiving" />
+    <Caption title="The Codex agent wakes up." eyebrow="It arrives in Codex" />
     <Line x1={230} x2={720} y={540} progress={p} />
     <Broker x={230} y={540} small glow={1 - p} />
     <div style={{position: "absolute", top: 375, left: 440, opacity: .3 + .7 * ease(f, 60, 84)}}>
-      <TerminalWindow captureId="codex-wake" title="Codex CLI · real recording" width={1370} height={330} fontSize={30} lineHeight={1.3}
+      <TerminalWindow captureId="codex-wake" title="Codex CLI · codex-reviewer" width={1370} height={330} fontSize={30} lineHeight={1.3}
         sourceStartMs={87} sourceEndMs={4993} viewportRow={6} viewportRows={6} viewportColumns={73} focusRows={[0, 5]} />
     </div>
     {f < 90 ? <Packet x={230 + 490 * p} y={540} opacity={1 - ease(f, 73, 88)} /> : null}
-    <div style={styles.bottomCaption}>The agent receives it natively. No polling loop.</div>
+    <div style={styles.bottomCaption}>Delivered straight into the Codex session. Nothing polls.</div>
   </Scene>;
 };
 
 const Reply = () => {
   const f = useCurrentFrame(), p = ease(f, 65, 145);
   return <Scene duration={180}>
-    <Caption title="Reply to the conversation." eyebrow="Codex replies" />
+    <Caption title="Codex answers in the same conversation." eyebrow="Codex replies" />
     <div style={{position: "absolute", left: 360, top: 330}}>
-      <TerminalWindow captureId="codex-wake" title="Codex CLI · real recording" width={1200} height={150} fontSize={36} lineHeight={1.4}
+      <TerminalWindow captureId="codex-wake" title="Codex CLI · codex-reviewer" width={1200} height={150} fontSize={36} lineHeight={1.4}
         sourceStartMs={5000} sourceEndMs={5000} viewportRow={4} viewportRows={1} viewportColumns={49}
         highlightPattern="Ran embassy send --conversation" accent={TERRA} />
     </div>
@@ -92,16 +92,16 @@ const Reply = () => {
     <div style={{...styles.label, right: 130, top: 755}}>Codex CLI</div>
     <Broker x={960} y={700} small glow={Math.sin(p * Math.PI)} />
     {f >= 65 ? <Packet x={1580 - 1240 * p} y={700} opacity={1 - ease(f, 160, 174)} /> : null}
-    <div style={styles.bottomCaption}>Bound to the original conversation.</div>
+    <div style={styles.bottomCaption}>The reply can only go back to whoever asked.</div>
   </Scene>;
 };
 
 const Arrival = () => {
   const f = useCurrentFrame();
   return <Scene duration={150}>
-    <Caption title="Back in Claude." eyebrow="The reply arrives natively" />
+    <Caption title="Back in Claude." eyebrow="The loop closes" />
     <div style={{position: "absolute", left: 360, top: 380}}>
-      <TerminalWindow captureId="claude-reply" title="Claude Code · real recording" width={1200} height={165} fontSize={34} lineHeight={1.4}
+      <TerminalWindow captureId="claude-reply" title="Claude Code · embassy-demo" width={1200} height={165} fontSize={34} lineHeight={1.4}
         sourceStartMs={2000} sourceEndMs={2000} viewportRow={11} viewportRows={1} viewportColumns={49} />
     </div>
     <div style={{position: "absolute", top: 635, width: "100%", textAlign: "center", opacity: ease(f, 25, 45)}}>
@@ -115,7 +115,7 @@ const Mac = ({x, host, provider}: {x: number; host: string; provider: string}) =
     <div style={{fontSize: 34, fontWeight: 620}}>{host}</div>
     <div style={{position: "absolute", top: 105, left: 150, width: 310, height: 70, display: "grid", placeItems: "center", background: "#232328", border: "1px solid #4c4851", borderRadius: 35, fontSize: 28}}>{provider}</div>
     <div style={{position: "absolute", left: 303, top: 175, height: 37, borderLeft: "2px solid #57535c"}} />
-    <div style={{position: "absolute", left: 211, top: 212, display: "flex", alignItems: "center", gap: 14}}><Mark size={44} /><span style={{fontSize: 28}}>broker</span></div>
+    <div style={{position: "absolute", left: 211, top: 212, display: "flex", alignItems: "center", gap: 14}}><Mark size={44} /><span style={{fontSize: 28}}>Embassy</span></div>
   </div>
   <div style={{position: "absolute", top: 357, left: 225, width: 160, height: 36, background: "#39373e", clipPath: "polygon(25% 0,75% 0,90% 100%,10% 100%)"}} />
   <div style={{position: "absolute", top: 393, left: 155, width: 300, height: 7, background: "#77717c", borderRadius: 6}} />
@@ -123,13 +123,14 @@ const Mac = ({x, host, provider}: {x: number; host: string; provider: string}) =
 const Ssh = () => {
   const f = useCurrentFrame(), outbound = ease(f, 24, 100), inbound = ease(f, 120, 188), returning = f >= 120;
   return <Scene duration={210}>
-    <Caption title="Across Macs. Over SSH." eyebrow="Illustrated federation flow" />
-    <Mac x={140} host="m5dev" provider="Claude session" />
-    <Mac x={1170} host="this-mac" provider="Codex task" />
+    <Caption title="Across Macs. Over SSH." eyebrow="More than one Mac" />
+    <Mac x={140} host="m5dev" provider="Claude agent" />
+    <Mac x={1170} host="this-mac" provider="Codex agent" />
+    <div style={{position: "absolute", right: 140, top: 795, color: MUTED, fontSize: 23}}>illustration</div>
     <Line x1={750} x2={1170} y={580} progress={returning ? inbound : outbound} reverse={returning} />
     <div style={{position: "absolute", left: 880, top: 500, width: 160, textAlign: "center", fontSize: 32, letterSpacing: ".12em", color: MUTED}}>SSH</div>
     {f >= 24 && f < 200 ? <Packet x={returning ? 1170 - 420 * inbound : 750 + 420 * outbound} y={580} receipt={returning} /> : null}
-    <div style={styles.bottomCaption}>{returning ? "A receipt comes back." : "The message crosses to the other broker."}</div>
+    <div style={styles.bottomCaption}>{returning ? "A receipt comes back." : "The message crosses over SSH."}</div>
   </Scene>;
 };
 
@@ -144,10 +145,10 @@ const Receipts = () => {
       </div>)}
     </div>
     <div style={{position: "absolute", top: 575, left: 110, opacity: ease(f, 70, 90)}}>
-      <TerminalWindow captureId="tui-settled" title="embassy tui · the two real receipts" width={1700} height={170} fontSize={31} lineHeight={1.4}
+      <TerminalWindow captureId="tui-settled" title="embassy tui · deliveries" width={1700} height={170} fontSize={31} lineHeight={1.4}
         sourceEndMs={4000} viewportRow={5} viewportRows={2} viewportColumns={82} />
     </div>
-    <div style={styles.bottomCaption}>Delivery, not proof of reading.</div>
+    <div style={styles.bottomCaption}>Delivered means it arrived, not that it was read.</div>
   </Scene>;
 };
 
