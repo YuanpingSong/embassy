@@ -121,15 +121,15 @@ test("STEER copy preserves its narrow direction and safe boundary", async () => 
 });
 
 test("protocol and reset documentation pins the v4-only boundary", async () => {
-  const [readme, config, architecture, security] = await Promise.all([
-    read("README.md"), read("docs/CONFIGURATION.md"),
+  const [config, architecture, security] = await Promise.all([
+    read("docs/CONFIGURATION.md"),
     read("docs/GATEWAY-ARCHITECTURE.md"), read("SECURITY.md"),
   ]);
   assert.match(architecture, /Private state \(`gateway-state\.json`\) \| 7/);
   assert.match(architecture, /Private control \(CLI ↔ broker\) \| 6/);
   assert.match(architecture, /Federation \(`peer-stdio`\) \| 3/);
   assert.match(architecture, /Consumed Claude peer protocol \| 1/);
-  for (const document of [readme, config, architecture, security]) {
+  for (const document of [config, architecture, security]) {
     assert.match(document, /schema.?6/i);
     assert.match(document, /reset/i);
     assert.match(document, /(?:no|does not|without).{0,30}(?:compatibility|migrat|converter)/is);

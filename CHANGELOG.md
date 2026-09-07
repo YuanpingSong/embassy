@@ -4,6 +4,11 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Changed
+- README opens with a Quick start, including how to give Claude Code and Codex CLI the `embassy-peer` skill; the 3.x upgrade section is removed.
+
 ## [4.4.2] - 2026-09-06
 
 ### Added

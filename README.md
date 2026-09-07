@@ -26,6 +26,52 @@ identity, so a rename or replacement never silently retargets queued work.
   first single-machine boot creates one from the short hostname.
 - Key-based, non-interactive SSH between configured machines when federating.
 
+## Quick start
+
+Four steps take a fresh Mac from nothing to a Claude session messaging a Codex
+agent by name.
+
+1. Install and start the broker:
+
+   ```sh
+   npm install -g agent-embassy
+   embassy service install
+   embassy health
+   ```
+
+2. Give your agents the Embassy skill. The `embassy-peer` skill ships inside
+   the package; copy it where Claude Code and Codex CLI look for skills:
+
+   ```sh
+   SKILLS="$(npm root -g)/agent-embassy/skills"
+   mkdir -p ~/.claude/skills ~/.codex/skills
+   cp -R "$SKILLS/embassy-peer" ~/.claude/skills/
+   cp -R "$SKILLS/embassy-peer" ~/.codex/skills/
+   ```
+
+   Claude Code picks it up as `/embassy-peer`; Codex as `$embassy-peer`. Either
+   agent can also be handed the commands in this README directly. Agents do not
+   install skills themselves.
+
+3. See who is there. Codex agents appear automatically while the Codex daemon
+   runs; a Claude session appears once it sends:
+
+   ```sh
+   embassy tui
+   ```
+
+4. Message an agent from inside a Claude Code or Codex session (the sender is
+   inferred from the calling session), and reply with the exact command in the
+   received hint:
+
+   ```sh
+   printf '%s\n' 'Please review the change and reply' | embassy send --to codex-reviewer@studio
+   printf '%s\n' 'Review complete.' | embassy send --conversation conv_example
+   ```
+
+The sections below cover each step in detail. `@studio` is the host name from
+your `nodes.json`; see [Host name and state directory](#host-name-and-state-directory).
+
 ## Install
 
 Install one copy with one package manager and verify what the shell resolves:
@@ -118,10 +164,8 @@ terminal lacks that task's inherited identity:
 embassy register-codex --alias codex-reviewer@studio
 ```
 
-The `skills/embassy-peer` folder ships in the `agent-embassy` package under
-`npm root -g`. Copy that entire folder into `~/.codex/skills/` and
-`~/.claude/skills/` and ask each agent to use it, or hand the agent the commands
-shown here directly.
+The `embassy-peer` skill gives either agent these commands; see
+[Quick start](#quick-start) for installing it.
 
 ## Message an agent
 
@@ -309,25 +353,6 @@ unsettled work. No message bodies are displayed.
 
 See [Security](SECURITY.md), [Configuration](docs/CONFIGURATION.md), and
 [Architecture](docs/GATEWAY-ARCHITECTURE.md).
-
-## Upgrading to 4.x
-
-Upgrade the CLI and broker together; they must come from one installation.
-Private state written by an earlier 4.x release (schema 6) is read forward
-into the current schema 7 with every existing endpoint retained; no reset is
-needed, but back up `gateway-state.json` first, because an earlier 4.x binary
-refuses schema 7 and rollback requires that backup.
-
-There is no 3.x migration or converter. Before replacing a 3.x installation,
-use its matching CLI to inspect and settle or explicitly abandon pending work;
-stop the broker with `embassy service uninstall` (or stop the foreground serve
-process) and confirm with `embassy service status`; back up and move aside only
-`gateway-state.json` while retaining `nodes.json`; then install the current
-release and run `embassy service install`. Codex agents are discovered; use
-fallback registration only for non-native harnesses. All 3.x state is
-unsupported: preserve the old binary with its old state if rollback may be
-needed, and never run the old and new brokers together. See the
-[reset procedure](docs/CONFIGURATION.md#private-state-reset).
 
 ## Development
 
