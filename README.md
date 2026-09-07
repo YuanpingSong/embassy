@@ -20,7 +20,11 @@ command and receipt model.
   <a href="LICENSE"><img src="https://img.shields.io/npm/l/agent-embassy" alt="MIT license"></a>
 </p>
 
-![Real Claude Code and Codex CLI messaging through Embassy](https://raw.githubusercontent.com/YuanpingSong/embassy/main/assets/demo.gif)
+
+
+https://github.com/user-attachments/assets/f0533912-8f77-4256-a915-d087ee025405
+
+
 
 If Embassy is useful to you, star the repository: GitHub notifies watchers
 about new releases, and the release notes are where changes are explained.
