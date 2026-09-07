@@ -4,6 +4,7 @@ import {dirname, isAbsolute, resolve, sep} from "node:path";
 import {fileURLToPath} from "node:url";
 
 const OUTPUTS = ["tui-overview", "claude-send", "codex-wake", "claude-reply", "tui-settled"];
+const AGENT_VIEWS = ["v2-claude-agents", "v2-codex-agents", "v2-tui-overview", "v2-ssh", "v2-codex-idle"];
 
 const fail = (message) => {
   throw new Error(message);
@@ -85,14 +86,16 @@ export const editCaptures = async (planPath, outputDirectory) => {
     fail("edit plan must use schema version 1 and define outputs");
   }
   const names = Object.keys(plan.outputs).sort();
-  if (names.join("\n") !== [...OUTPUTS].sort().join("\n")) fail(`edit plan must define exactly: ${OUTPUTS.join(", ")}`);
+  if (OUTPUTS.some((name) => !names.includes(name)) || names.some((name) => ![...OUTPUTS, ...AGENT_VIEWS].includes(name))) {
+    fail(`edit plan must define exactly the five exchange outputs, with optional native agent views`);
+  }
 
   const planDirectory = dirname(resolve(planPath));
   const sourceCache = new Map();
   const products = new Map();
   const provenance = {version: 1, planSha256: sha256(planBytes), outputs: {}};
 
-  for (const name of OUTPUTS) {
+  for (const name of names) {
     const specification = plan.outputs[name];
     if (!specification || typeof specification !== "object" || !Array.isArray(specification.segments) || specification.segments.length === 0) {
       fail(`${name}.segments must not be empty`);

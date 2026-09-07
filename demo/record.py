@@ -24,7 +24,7 @@ PRIVATE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
     r"|conv_[A-Za-z0-9_-]+|peer_[A-Za-z0-9_-]{12,}"
     r"|sk-[A-Za-z0-9_-]{10,}|eyJ[A-Za-z0-9_-]{15,}\.[A-Za-z0-9_.-]+"
-    r"|/Users/[^\s/]+|(?:/private)?/tmp/embassy-demo-session\.[A-Za-z0-9]+",
+    r"|/Users/[^\s]+|(?:/private)?/tmp/[^\s]+|~/[^\s]+",
     re.IGNORECASE,
 )
 
@@ -40,16 +40,20 @@ def main():
     parser.add_argument("--output", required=True)
     parser.add_argument("--cwd", required=True)
     parser.add_argument("--seconds", type=int, default=1200)
+    parser.add_argument("--columns", type=int, default=90)
+    parser.add_argument("--rows", type=int, default=24)
     parser.add_argument("--fresh-principal", action="store_true")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command: parser.error("an explicit command is required")
+    if not 24 <= args.columns <= 160 or not 8 <= args.rows <= 60:
+        parser.error("dimensions must be 24..160 columns and 8..60 rows")
     output = Path(args.output).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.exists(): parser.error("refusing to replace an existing recording")
     master, slave = pty.openpty()
-    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 90, 0, 0))
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", args.rows, args.columns, 0, 0))
     env = dict(os.environ, TERM="xterm-256color", FORCE_COLOR="1")
     env.pop("NO_COLOR", None)
     if args.fresh_principal:
@@ -57,7 +61,7 @@ def main():
             env.pop(key, None)
     child = subprocess.Popen(command, cwd=args.cwd, env=env, stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
     os.close(slave)
-    emulator = subprocess.Popen(["node", str(Path(__file__).with_name("emulate.mjs"))],
+    emulator = subprocess.Popen(["node", str(Path(__file__).with_name("emulate.mjs")), str(args.columns), str(args.rows)],
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     def emulate(request):
         emulator.stdin.write(json.dumps(request) + "\n"); emulator.stdin.flush()
@@ -87,9 +91,9 @@ def main():
         capture()
         with output.open("w", encoding="utf8") as handle:
             os.chmod(output, 0o600)
-            json.dump({"version": 1, "columns": 90, "rows": 24,
+            json.dump({"version": 1, "columns": args.columns, "rows": args.rows,
                        "frames": frames}, handle, separators=(",", ":"))
-    print(json.dumps({"ready": True, "columns": 90, "rows": 24}), flush=True)
+    print(json.dumps({"ready": True, "columns": args.columns, "rows": args.rows}), flush=True)
     try:
         while time.monotonic() - started < args.seconds and len(frames) < 12000:
             readable, _, _ = select.select([master, sys.stdin], [], [], .05)

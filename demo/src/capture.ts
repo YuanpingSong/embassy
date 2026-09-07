@@ -2,6 +2,11 @@ import {continueRender, delayRender, staticFile} from "remotion";
 import {useEffect, useState} from "react";
 
 export const captureIds = [
+  "v2-claude-agents",
+  "v2-codex-agents",
+  "v2-tui-overview",
+  "v2-ssh",
+  "v2-codex-idle",
   "tui-overview",
   "claude-send",
   "codex-wake",

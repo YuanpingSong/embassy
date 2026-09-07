@@ -13,6 +13,9 @@ class RedactionTests(unittest.TestCase):
             "peer_exampleCredential00000000",
             "sk-exampleCredential00000000",
             "/Users/example",
+            "/Users/example/.claude/jobs/private-session",
+            "/private/tmp/private-workspace/file",
+            "~/Desktop/private-project",
         ]
         for value in values:
             with self.subTest(value=value):

@@ -1,8 +1,14 @@
-# Embassy demo video
+# Embassy demo video — v2
 
 This isolated Remotion project turns sanitized, real terminal captures into the
 Embassy demo. It is development-only and is intentionally absent from the root
 npm package allowlist.
+
+The current cut is 40 seconds: native agent views, Claude send, Codex wake,
+Codex reply, Claude arrival, a real SSH host-pane switch, then the ledger.
+It uses the site's mark and ink/amber palette, with recorded ANSI colors left
+unchanged. There is no logo end card or new GIF. Explicit camera crops keep
+terminal content at 28 px or larger; the editor never rewrites terminal rows.
 
 ## Capture contract
 
@@ -13,6 +19,12 @@ Put these five files in `public/captures/`:
 - `codex-wake.json`
 - `claude-reply.json`
 - `tui-settled.json`
+
+V2 also uses `v2-claude-agents.json`, `v2-codex-agents.json`,
+`v2-tui-overview.json`, and `v2-ssh.json`, all recorded from the real native
+commands. The opener uses a 90×40 TUI recording so both provider groups are
+visible at once. Native views are camera-cropped to name columns, excluding
+unrelated task previews and paths.
 
 Each file is a complete terminal recording:
 
@@ -44,7 +56,7 @@ Missing captures render an explicit `REAL CAPTURE REQUIRED` card. The project
 contains no fabricated terminal transcript.
 
 `emulate.mjs` is the recorder's terminal backend. It reads one JSON object per
-line on stdin: `{"data":"<base64>"}` feeds PTY output into a fixed 90×24
+line on stdin: `{"data":"<base64>"}` feeds PTY output into a bounded, default 90×24
 xterm parser, and `{"snapshot":true}` returns the current structured rows and
 cursor. Terminal query replies are emitted as `{"response":"<base64>"}` for
 the recorder to write back to the PTY. Standard output contains JSON only; the
@@ -60,7 +72,7 @@ npm run check
 npm run studio
 ```
 
-The recorder requires Python 3 (standard library only). It owns a 90×24 PTY;
+The recorder requires Python 3 (standard library only). It owns a PTY;
 raw terminal bytes remain in memory and redaction runs before snapshots are
 written. Recording real agents requires explicit operator authorization.
 
@@ -71,6 +83,7 @@ python3 record.py --output public/captures/take.json --cwd /path/to/demo -- emba
 Send JSON lines to its stdin: `{"input":"2"}`, `{"snapshot":true}`,
 `{"save":true}`, `{"stop":true}`. Stopping closes only the process it started.
 Use `--fresh-principal` when starting a scratch agent, not a read-only TUI.
+`--columns` and `--rows` select bounded recording dimensions (default 90×24).
 The recorder never changes provider configuration or grants permissions.
 Normal one-shot permission dialogs are approved by the recording operator.
 
@@ -81,12 +94,12 @@ terminal text. Source captures, edit lists, and rendered media are local artifac
 not part of the published npm package. Tests: `npm run check` and
 `python3 -m unittest test_record.py`.
 
-Render the 1920×1080, 30 fps, 55-second master and a separate 12-second
-README teaser GIF (90 sampled frames to stay within the 8 MB budget):
+Render the 1920×1080, 30 fps, 40-second master and the first-frame poster
+(1280 pixels wide; poster scaling requires `ffmpeg` on PATH):
 
 ```sh
 npm run render
-npm run render:gif
+npm run render:poster
 ```
 
 Outputs go to the ignored `out/` directory. Use the Remotion still command for
@@ -95,3 +108,7 @@ keyframes, for example:
 ```sh
 npx remotion still src/index.ts EmbassyDemo out/keyframe-overview.png --frame=120
 ```
+
+Current outputs: `out/embassy-demo-v2.mp4` and `out/poster.png`. The original
+v1 MP4/GIF are preserved locally. Neither recording nor rendering uploads media
+or changes README, broker state, or provider configuration.

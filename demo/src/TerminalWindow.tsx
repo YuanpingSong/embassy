@@ -1,5 +1,5 @@
 import type {CSSProperties} from "react";
-import {interpolate, useCurrentFrame, useVideoConfig} from "remotion";
+import {useCurrentFrame, useVideoConfig} from "remotion";
 import type {CaptureId, CellRun} from "./capture";
 import {frameAt, useCapture} from "./capture";
 
@@ -30,16 +30,48 @@ const runStyle = (run: CellRun): CSSProperties => {
   };
 };
 
-export const TerminalWindow = ({captureId, title}: {captureId: CaptureId; title: string}) => {
+type TerminalWindowProps = Readonly<{
+  captureId: string;
+  title: string;
+  width: number;
+  height: number;
+  fontSize?: number;
+  lineHeight?: number;
+  sourceStartMs?: number;
+  viewportRow?: number;
+  viewportRows?: number;
+  cameraColumn?: number;
+  highlightPattern?: string;
+  accent?: string;
+}>;
+
+export const TerminalWindow = ({
+  captureId,
+  title,
+  width,
+  height,
+  fontSize = 29,
+  lineHeight = 1.04,
+  sourceStartMs = 0,
+  viewportRow = 0,
+  viewportRows,
+  cameraColumn = 0,
+  highlightPattern,
+  accent = "#f4a259",
+}: TerminalWindowProps) => {
   const currentFrame = useCurrentFrame();
   const {fps} = useVideoConfig();
-  const {capture, error} = useCapture(captureId);
-  const timeMs = (currentFrame / fps) * 1000;
+  const {capture, error} = useCapture(captureId as CaptureId);
+  const timeMs = sourceStartMs + (currentFrame / fps) * 1000;
   const terminalFrame = capture ? frameAt(capture, timeMs) : undefined;
-  const opacity = interpolate(currentFrame, [0, 8], [0, 1], {extrapolateRight: "clamp"});
+  const rows = terminalFrame?.rows.slice(viewportRow, viewportRows ? viewportRow + viewportRows : undefined);
+  const rowHeight = fontSize * lineHeight;
+  const cursor = terminalFrame?.cursor;
+  const cursorRow = cursor ? cursor.row - viewportRow : -1;
+  const highlightedRow = rows?.findIndex((row) => row.map((run) => run.text).join("").includes(highlightPattern ?? "\u0000")) ?? -1;
 
   return (
-    <div style={{...styles.shell, opacity}}>
+    <div style={{...styles.shell, width, height}}>
       <div style={styles.chrome}>
         <div style={styles.lights}>
           {["#ff5f57", "#febc2e", "#28c840"].map((color) => (
@@ -48,30 +80,38 @@ export const TerminalWindow = ({captureId, title}: {captureId: CaptureId; title:
         </div>
         <div style={styles.title}>{title}</div>
       </div>
-      <div style={styles.terminal}>
+      <div style={{...styles.terminal, height: height - 42, fontSize, lineHeight}}>
         {error ? (
           <div style={styles.missing}>
             <strong>REAL CAPTURE REQUIRED</strong>
             <span>{error}</span>
             <span>Place sanitized schema-v1 footage in demo/public/captures/.</span>
           </div>
-        ) : terminalFrame ? <>
-          {terminalFrame.rows.map((row, index) => (
-            <div key={index} style={styles.line}>
+        ) : terminalFrame ? <div style={{...styles.viewport, transform: `translateX(-${cameraColumn}ch)`}}>
+          {rows?.map((row, index) => (
+            <div
+              key={index}
+              style={{
+                ...styles.line,
+                height: `${lineHeight}em`,
+                ...(highlightPattern && index === highlightedRow ? {minWidth: 0, width: width - 38, background: `${accent}12`, boxShadow: `inset 0 0 0 2px ${accent}`} : {}),
+              }}
+            >
               {row.map((run, runIndex) => <span key={runIndex} style={runStyle(run)}>{run.text}</span>)}
             </div>
           ))}
-          {terminalFrame.cursor?.visible ? (
+          {cursor?.visible && cursorRow >= 0 && (!viewportRows || cursorRow < viewportRows) ? (
             <span
               aria-hidden
               style={{
                 ...styles.cursor,
-                left: `calc(24px + ${terminalFrame.cursor.column}ch)`,
-                top: 12 + terminalFrame.cursor.row * 31.5,
+                left: `${cursor.column}ch`,
+                top: cursorRow * rowHeight,
+                height: rowHeight,
               }}
             />
           ) : null}
-        </> : null}
+        </div> : null}
       </div>
     </div>
   );
@@ -79,37 +119,34 @@ export const TerminalWindow = ({captureId, title}: {captureId: CaptureId; title:
 
 const styles: Record<string, CSSProperties> = {
   shell: {
-    height: 826,
-    border: "1px solid #344052",
-    borderRadius: 22,
+    border: "1px solid #393940",
+    borderRadius: 18,
     overflow: "hidden",
     boxShadow: "0 28px 90px rgba(0,0,0,.48)",
-    background: "#0f131a",
+    background: "#131316",
   },
   chrome: {
     height: 42,
     display: "grid",
-    gridTemplateColumns: "160px 1fr 160px",
+    gridTemplateColumns: "100px 1fr 100px",
     alignItems: "center",
-    background: "#1a202b",
-    borderBottom: "1px solid #303a4a",
+    background: "#1a1a1e",
+    borderBottom: "1px solid #393940",
   },
   lights: {display: "flex", gap: 10, paddingLeft: 20},
   light: {display: "block", width: 13, height: 13, borderRadius: "50%"},
-  title: {gridColumn: 2, textAlign: "center", color: "#9ca8b9", fontSize: 22, fontWeight: 600},
+  title: {gridColumn: 2, textAlign: "center", color: "#8a8a96", fontSize: 28, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis"},
   terminal: {
-    height: 784,
     boxSizing: "border-box",
-    padding: "12px 24px",
+    padding: "12px 18px",
     overflow: "hidden",
     fontFamily: '"SFMono-Regular", Menlo, Monaco, Consolas, monospace',
-    fontSize: 30,
-    lineHeight: 1.05,
     whiteSpace: "pre",
     color: "#e8edf5",
     position: "relative",
   },
-  line: {height: "1.05em"},
-  cursor: {position: "absolute", width: "0.6em", height: "1.05em", background: "rgba(232,237,245,.72)"},
+  viewport: {position: "relative", width: "max-content", minWidth: "100%"},
+  line: {minWidth: "100%"},
+  cursor: {position: "absolute", width: "0.6em", background: "rgba(232,237,245,.72)"},
   missing: {display: "flex", flexDirection: "column", gap: 18, color: "#ff8793", whiteSpace: "normal"},
 };
