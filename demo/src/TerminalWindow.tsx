@@ -41,6 +41,7 @@ type TerminalWindowProps = Readonly<{
   viewportRow?: number;
   viewportRows?: number;
   cameraColumn?: number;
+  viewportColumns?: number;
   highlightPattern?: string;
   accent?: string;
 }>;
@@ -56,6 +57,7 @@ export const TerminalWindow = ({
   viewportRow = 0,
   viewportRows,
   cameraColumn = 0,
+  viewportColumns,
   highlightPattern,
   accent = "#f4a259",
 }: TerminalWindowProps) => {
@@ -87,7 +89,12 @@ export const TerminalWindow = ({
             <span>{error}</span>
             <span>Place sanitized schema-v1 footage in demo/public/captures/.</span>
           </div>
-        ) : terminalFrame ? <div style={{...styles.viewport, transform: `translateX(-${cameraColumn}ch)`}}>
+        ) : terminalFrame ? <div style={{
+          ...styles.viewport,
+          transform: `translateX(-${cameraColumn}ch)`,
+          clipPath: viewportColumns === undefined ? undefined
+            : `inset(0 calc(100% - ${cameraColumn + viewportColumns}ch) 0 ${cameraColumn}ch)`,
+        }}>
           {rows?.map((row, index) => (
             <div
               key={index}
