@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 - README opens with a Quick start, including how to give Claude Code and Codex CLI the `embassy-peer` skill; the 3.x upgrade section is removed.
+- README restructured to under eight screens: hero with the mark, link row and badges, a Status section, and one-paragraph summaries that link to the docs; operational detail moves to the new `docs/OPERATIONS.md`.
 
 ## [4.4.2] - 2026-09-06
 
