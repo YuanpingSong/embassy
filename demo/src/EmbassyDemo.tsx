@@ -42,9 +42,9 @@ const BrokerLane = ({reverse = false, complete = false, token, entering}: {rever
   );
 };
 
-const Scene = ({duration, children}: {duration: number; children: ReactNode}) => {
+const Scene = ({duration, children, fadeOut = true}: {duration: number; children: ReactNode; fadeOut?: boolean}) => {
   const frame = useCurrentFrame();
-  const opacity = interpolate(frame, [duration - 8, duration], [1, 0], {extrapolateLeft: "clamp"});
+  const opacity = fadeOut ? interpolate(frame, [duration - 8, duration], [1, 0], {extrapolateLeft: "clamp"}) : 1;
   return <AbsoluteFill style={{...styles.scene, opacity}}>{children}<Brand /></AbsoluteFill>;
 };
 
@@ -112,7 +112,7 @@ const ActionScene = ({duration, caption, captureId, title, sourceStartMs, camera
 };
 
 const FullTuiScene = ({duration, captureId, caption, ssh = false}: {duration: number; captureId: string; caption: string; ssh?: boolean}) => (
-  <Scene duration={duration}>
+  <Scene duration={duration} fadeOut={ssh}>
     <Caption>{caption}</Caption>
     <div style={styles.fullTui}>
       <TerminalWindow captureId={captureId} title="m5dev — embassy tui" width={1776} height={824} fontSize={29} cameraColumn={0} accent={AMBER} />
