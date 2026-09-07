@@ -11,6 +11,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 - README Status section rewritten as two short lists: what works today, and what Embassy deliberately does not promise.
+- `embassy skills install|status` documented in the operations, configuration and security docs and the site quick start; the 3.x reset procedure is removed from the docs (there are no pre-4.x installations to migrate).
+- Demo project under `demo/` re-cut: illustrated agents, native wake, SSH and receipts scenes with newcomer-friendly wording.
 
 ## [4.5.0] - 2026-09-07
 

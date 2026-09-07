@@ -173,6 +173,15 @@ values, and `XDG_STATE_HOME`. It copies no other shell state or arbitrary
 `PATH`; operators must not place secrets in an `EMBASSY_*` variable.
 `embassy serve` stays foreground and does not daemonize.
 
+`embassy skills install` is the one command that writes outside the state
+directory. It writes only `~/.claude/skills/embassy-peer` and
+`~/.codex/skills/embassy-peer`, after checking that `HOME`, each parent
+directory and each destination is a real, current-user-owned path rather than
+a symbolic link; files are opened without following links, written to a
+private temporary file and renamed into place with mode 0600, and unrelated
+files in those directories are left alone. It does not contact the broker or
+read any provider configuration.
+
 Claude registry failures quarantine Claude operations rather than authorizing a
 guess. Embassy validates each consumed peer-protocol-1 field while tolerating
 unknown top-level registry fields. Unsafe controller-owned state may refuse the
@@ -214,11 +223,9 @@ protocol channel. Operational hints use bounded safe codes and stderr.
 
 Private state is schema 7; a valid schema-6 document from an earlier 4.x
 release is read forward with its rows retained. Schemas ≤5 and unknown state
-refuse before mutation; there is no 3.x converter or removed-command alias.
-Back up state before upgrading, because an earlier 4.x binary refuses schema
-7 and rollback requires that pre-upgrade backup. Upgrading from 3.x requires
-inspecting unsettled work with the old binary and resetting state while keeping
-`nodes.json`.
+refuse before mutation; there is no converter for older schemas and no
+removed-command alias. Back up state before upgrading, because an earlier 4.x
+binary refuses schema 7 and rollback requires that pre-upgrade backup.
 
 Reset invalidates all old routes, receipts, and conversation references. The
 only rollback is the preserved old binary with its untouched old state. Embassy

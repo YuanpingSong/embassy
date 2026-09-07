@@ -44,6 +44,21 @@ general delivery list. Retirement confirmation shows the full endpoint identity
 and the consequences for unsettled work. Without an interactive terminal,
 `tui` prints the local status text once and exits without SSH.
 
+## Agent skills
+
+```sh
+embassy skills install
+embassy skills status
+```
+
+`install` copies the packaged `embassy-peer` skill into `~/.claude/skills` and
+`~/.codex/skills`, updating a stale copy and leaving a current one alone;
+`status` reports `absent`, `current` or `stale` per provider. Add
+`--claude-only` or `--codex-only` to touch one provider. Run it once per
+machine and again after upgrading Embassy; agents never install skills
+themselves. Details and refusal codes are in
+[CONFIGURATION.md](CONFIGURATION.md#agent-skills).
+
 ## Receipts and delivery status
 
 A successful `embassy send` returns `result.deliveryToken` and a conversation

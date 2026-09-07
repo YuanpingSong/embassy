@@ -234,32 +234,39 @@ The foreground alternative is `embassy serve`. It does not daemonize or open
 a network listener. Both forms acquire the same fixed host-wide advisory lease
 before provider setup, so only one broker can run.
 
+## Agent skills
+
+`embassy skills install` copies the packaged `embassy-peer` skill into
+`~/.claude/skills/embassy-peer` and `~/.codex/skills/embassy-peer`, creating
+the parent directories with mode 0700 when absent; `embassy skills status`
+reports each copy as `absent`, `current` or `stale`. `--claude-only` and
+`--codex-only` limit either command to one provider. The command resolves the
+skill relative to the running CLI installation, never through a package
+manager at runtime, and does not contact the broker. It refuses with
+`SKILLS_TARGET_UNSAFE` when `HOME`, a skill parent directory or a destination is
+a symbolic link or is not owned by the current user, and it leaves unrelated
+files in those directories untouched. Agents never run it; the operator does,
+once per machine and again after upgrading Embassy.
+
 ## Private state reset
 
 `gateway-state.json` is written as schema 7. A valid schema-6 document from an
 earlier 4.x release is read forward with every existing row retained; no reset
 is required, but back up state before upgrading, because an earlier 4.x binary
-refuses schema 7 and rollback requires the pre-upgrade backup. There is no 3.x
-converter. Schema ≤5 or unknown schemas refuse with
+refuses schema 7 and rollback requires the pre-upgrade backup. There is no
+converter for anything older than schema 6. Schema ≤5 or unknown schemas refuse with
 `GATEWAY_STATE_SCHEMA_UNSUPPORTED`; malformed accepted schemas refuse with
 `CORRUPT_GATEWAY_STATE`. Refusal does not mutate the installed file.
 
-Reset procedure:
+Reset procedure, for state the current release refuses:
 
-1. Before replacing a 3.x installation, use its matching CLI to inspect and
-   settle or explicitly abandon pending work.
-2. Stop a launchd broker with `embassy service uninstall` (or stop the foreground
+1. Stop a launchd broker with `embassy service uninstall` (or stop the foreground
    serve process) and confirm it is stopped with `embassy service status`.
-3. Back up and move aside only `gateway-state.json` in that broker's state
+2. Back up and move aside only `gateway-state.json` in that broker's state
    directory. Keep the valid `nodes.json`.
-4. Install the current release, then run `embassy service install`. The
-   broker creates fresh schema-7 state.
-5. Let current Codex agents be discovered. Use fallback registration only for
+3. Run `embassy service install`. The broker creates fresh schema-7 state.
+4. Let current Codex agents be discovered. Use fallback registration only for
    non-native harnesses. Claude endpoints are recorded on discovery or use.
-
-All state produced by Embassy 3.x is unsupported; preserve the matching old
-binary as well as its old state if rollback may be needed, and never run the
-old and new brokers together.
 
 A reset abandons unsettled work and invalidates delivery tokens and
 conversation references. Rollback means stopping the current broker and
