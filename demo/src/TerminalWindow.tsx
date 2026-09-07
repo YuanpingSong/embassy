@@ -46,6 +46,7 @@ type TerminalWindowProps = Readonly<{
   viewportColumns?: number;
   highlightPattern?: string;
   accent?: string;
+  focusRows?: readonly number[];
 }>;
 
 export const TerminalWindow = ({
@@ -64,6 +65,7 @@ export const TerminalWindow = ({
   viewportColumns,
   highlightPattern,
   accent = "#f4a259",
+  focusRows,
 }: TerminalWindowProps) => {
   const currentFrame = useCurrentFrame();
   const {fps} = useVideoConfig();
@@ -107,6 +109,7 @@ export const TerminalWindow = ({
               style={{
                 ...styles.line,
                 height: `${lineHeight}em`,
+                opacity: focusRows && !focusRows.includes(index) ? 0.12 : 1,
                 ...(highlightPattern && index === highlightedRow ? {minWidth: 0, width: viewportColumns ? `${viewportColumns}ch` : width - 38, background: `${accent}12`, boxShadow: `inset 0 0 0 2px ${accent}`} : {}),
               }}
             >
