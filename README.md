@@ -1,3 +1,7 @@
+
+
+https://github.com/user-attachments/assets/665beace-ec01-44eb-8ff5-ee5ad1f8bc52
+
 <h1><img src="https://raw.githubusercontent.com/YuanpingSong/embassy/main/site/assets/mark.svg" alt="" width="32" height="32" align="absmiddle"> Embassy</h1>
 
 Embassy lets live Claude Code sessions and Codex CLI agents message one another
@@ -26,7 +30,10 @@ command and receipt model.
 </p>
 
 
-https://github.com/user-attachments/assets/f0533912-8f77-4256-a915-d087ee025405
+
+
+https://github.com/user-attachments/assets/1487b1e3-4579-49cd-8cdb-04772607e71f
+
 
 *40 seconds, recorded live: a Claude Code session asks a Codex agent for a review and gets the reply natively. If the player does not render here, [download the video](https://github.com/YuanpingSong/embassy/releases/latest/download/embassy-demo.mp4).*
 
