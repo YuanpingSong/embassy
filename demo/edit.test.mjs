@@ -51,6 +51,13 @@ test("edit list selects only actual frames, retimes intervals, crops rows, and r
   assert.equal(provenance.outputs["tui-overview"].segments[0].sourceSha256, hash(sourceBytes));
   assert.deepEqual(provenance.outputs["tui-overview"].segments.map((segment) => segment.anchorTimeMs), [0, 200]);
   assert.equal(JSON.parse(await readFile(join(output, "provenance.json"), "utf8")).outputs["tui-overview"].durationMs, 400);
+
+  specification.segments[1].crop = {top: 0, bottom: 1};
+  await writeFile(planPath, JSON.stringify(plan));
+  const recropped = await editCaptures(planPath, output);
+  const alternate = JSON.parse(await readFile(join(output, "tui-overview.json"), "utf8"));
+  assert.deepEqual(alternate.frames.slice(-2).map((frame) => frame.rows[0][0].text), ["top-200", "top-300"]);
+  assert.deepEqual(recropped.outputs["tui-overview"].segments[1].crop, {top: 0, bottom: 1});
 });
 
 test("edit list requires all five outputs and keeps sources inside the plan directory", async () => {

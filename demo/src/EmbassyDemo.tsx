@@ -42,8 +42,8 @@ const EndCard = () => {
   return (
     <AbsoluteFill style={{...styles.end, opacity}}>
       <div style={styles.mark}>E</div>
-      <h1>Embassy</h1>
-      <p>Claude Code ↔ Codex CLI</p>
+      <h1 style={{fontSize: 88, margin: "0 0 24px", letterSpacing: "-0.04em"}}>Embassy</h1>
+      <p style={{fontSize: 44, margin: "0 0 18px"}}>Claude Code ↔ Codex CLI</p>
       <p style={styles.tagline}>by name, on your machines.</p>
     </AbsoluteFill>
   );
@@ -86,5 +86,5 @@ const styles: Record<string, CSSProperties> = {
   caption: {fontSize: 48, lineHeight: 1.08, letterSpacing: "-0.025em", fontWeight: 760},
   end: {alignItems: "center", justifyContent: "center", textAlign: "center", background: "radial-gradient(circle at center, #173756, #090d13 58%)"},
   mark: {width: 110, height: 110, borderRadius: 28, display: "grid", placeItems: "center", background: "#66d9ef", color: "#081019", fontSize: 62, fontWeight: 900, marginBottom: 34},
-  tagline: {color: "#9ca8b9", marginTop: 10},
+  tagline: {color: "#9ca8b9", marginTop: 10, fontSize: 34},
 };
