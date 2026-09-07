@@ -1,4 +1,4 @@
-# Embassy demo video — v2
+# Embassy demo video — v3
 
 This isolated Remotion project turns sanitized, real terminal captures into the
 Embassy demo. It is development-only and is intentionally absent from the root
@@ -9,6 +9,15 @@ Codex reply, Claude arrival, a real SSH host-pane switch, then the ledger.
 It uses the site's mark and ink/amber palette, with recorded ANSI colors left
 unchanged. There is no logo end card or new GIF. Explicit camera crops keep
 terminal content at 28 px or larger; the editor never rewrites terminal rows.
+
+V3 replaces the simultaneous three-lane layout with an active-terminal close-up.
+The opener first shows readable native name crops, then moves into the full
+endpoint list. A persistent amber path carries the request and reply across
+scene transitions. The closing crop highlights the actual two settled rows;
+it does not remove or alter other deliveries in the source recording.
+All composition, editing, frame inspection, and rendering for v3 were done by
+the primary engineer, without delegation. The verified v2 recordings and their
+masking are reused unchanged; no new provider activity was needed.
 
 ## Capture contract
 
@@ -113,6 +122,6 @@ keyframes, for example:
 npx remotion still src/index.ts EmbassyDemo out/keyframe-overview.png --frame=120
 ```
 
-Current outputs: `out/embassy-demo-v2.mp4` and `out/poster.png`. The original
-v1 MP4/GIF are preserved locally. Neither recording nor rendering uploads media
+Current outputs: `out/embassy-demo-v3.mp4` and `out/poster-v3.png`. The original
+v1/v2 outputs are preserved locally. Neither recording nor rendering uploads media
 or changes README, broker state, or provider configuration.
