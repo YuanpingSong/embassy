@@ -4,11 +4,26 @@ import {mkdtemp, readFile, writeFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import test from "node:test";
-import {editCaptures} from "./edit.mjs";
+import {editCaptures, redactEndpointAliases} from "./edit.mjs";
 
 const names = ["tui-overview", "claude-send", "codex-wake", "claude-reply", "tui-settled"];
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const row = (text) => [{text}];
+
+test("laptop alias masking preserves columns, styles, host chips and other hosts", () => {
+  const prefix = "  dormant     ";
+  const alias = "codex-private-task".padEnd(27);
+  const suffix = "codex      7 delivered";
+  const frame = {timeMs: 123, rows: [row("● m5dev · healthy   ● [this-mac · healthy]"),
+    [{text: prefix}, {text: alias, bold: true}, {text: suffix, fg: "green"}]]};
+  const masked = redactEndpointAliases(frame, "this-mac");
+  assert.deepEqual(masked.rows[0], frame.rows[0]);
+  assert.equal(masked.rows[1].map((run) => run.text).join(""), prefix + "codex-…@this-mac".padEnd(27) + suffix);
+  assert.equal(masked.rows[1][1].bold, true);
+  assert.deepEqual(masked.rows[1][2], frame.rows[1][2]);
+  assert.equal(frame.rows[1][1].text, alias);
+  assert.equal(redactEndpointAliases(frame, "m5dev"), frame);
+});
 
 test("edit list selects only actual frames, retimes intervals, crops rows, and records provenance", async () => {
   const directory = await mkdtemp(join(tmpdir(), "embassy-edit-"));

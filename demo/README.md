@@ -26,6 +26,10 @@ commands. The opener uses a 90×40 TUI recording so both provider groups are
 visible at once. Native views are camera-cropped to name columns, excluding
 unrelated task previews and paths.
 
+For the SSH scene, the edit plan sets `redactEndpointAliasesForHost: "this-mac"`.
+This masks Endpoint names in that host's recorded pane, preserving the fixed
+column widths, styles, counts, and host chips. It does not rename live tasks.
+
 Each file is a complete terminal recording:
 
 ```json
