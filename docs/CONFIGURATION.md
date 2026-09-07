@@ -123,19 +123,18 @@ the ID is not a command argument or public output. A fallback registration is
 the same endpoint kind as discovery, and a matching native identity cannot
 create a duplicate. Each delivery independently attests the current App Server
 interface and exact task before authorization.
-Explicit registration sets a private retention marker, so older roots remain
-listed after restart even outside the discovery window. Window aging preserves
-automatic rows referenced by pending work, but drops unused automatic rows to
-release capacity. No retirement, suppression or settlement occurs. A returning
-root keeps its ID while retained/pending; after pruning it receives a fresh ID,
-and old receipts never retarget. An unnamed root gets a new generated alias
-after pruning. The existing 128-endpoint bound remains.
-No discovered/registered badge is exposed.
-Explicitly registered rows keep their registered aliases through native scans;
-native names drive automatic rows only. A later explicit registration can rename
-the retained row without moving its identity or admitted work.
-The ellipsis in `--alias ...` is a substitution: use the task's chosen
-`codex-` name with this machine's exact `@host` suffix.
+Explicit registration sets a private retention marker, so registered roots
+remain listed after restart even outside the discovery window, and keep their
+registered aliases through native scans; native names drive automatic rows
+only. A later explicit registration can rename the retained row without moving
+its identity or admitted work. Window aging preserves automatic rows referenced
+by pending work but drops unused automatic rows to release capacity, without
+retirement, suppression or settlement. A returning root keeps its ID while
+retained or pending; after pruning it receives a fresh ID (and, if unnamed, a
+new generated alias), and old receipts never retarget. The 128-endpoint bound
+applies to discovered and registered rows alike, and public output carries no
+discovered/registered badge. The ellipsis in `--alias ...` is a substitution:
+use the task's chosen `codex-` name with this machine's exact `@host` suffix.
 
 `register-codex --succeeds <old-alias>` atomically retires a predecessor and
 installs the caller. It never reanchors pending work to a new identity.
@@ -237,11 +236,11 @@ before provider setup, so only one broker can run.
 
 ## Private state reset
 
-This release reads valid schema-6 `gateway-state.json` forward, treating every
-existing row as retained; new writes use schema 7. The retention marker is the
-only added field. Back up state before upgrading 4.2.0; no reset is required,
-but 4.2.0 refuses schema 7 and rollback requires the pre-upgrade backup.
-There is no 3.x converter. Schema ≤5 or unknown schemas refuse with
+`gateway-state.json` is written as schema 7. A valid schema-6 document from an
+earlier 4.x release is read forward with every existing row retained; no reset
+is required, but back up state before upgrading, because an earlier 4.x binary
+refuses schema 7 and rollback requires the pre-upgrade backup. There is no 3.x
+converter. Schema ≤5 or unknown schemas refuse with
 `GATEWAY_STATE_SCHEMA_UNSUPPORTED`; malformed accepted schemas refuse with
 `CORRUPT_GATEWAY_STATE`. Refusal does not mutate the installed file.
 
@@ -253,20 +252,20 @@ Reset procedure:
    serve process) and confirm it is stopped with `embassy service status`.
 3. Back up and move aside only `gateway-state.json` in that broker's state
    directory. Keep the valid `nodes.json`.
-4. Install the current discovery-enabled 4.x release, then run
-   `embassy service install`.
-5. The broker creates fresh schema-7 state.
-6. Let current Codex agents be discovered. Use fallback registration only for
-   non-native harnesses. Claude endpoints are recorded on discovery/use.
+4. Install the current release, then run `embassy service install`. The
+   broker creates fresh schema-7 state.
+5. Let current Codex agents be discovered. Use fallback registration only for
+   non-native harnesses. Claude endpoints are recorded on discovery or use.
 
-All state produced by Embassy 3.x is unsupported by 4.x; preserve the matching
-old binary as well as its old state if rollback may be needed, and never run
-the old and new brokers together.
+All state produced by Embassy 3.x is unsupported; preserve the matching old
+binary as well as its old state if rollback may be needed, and never run the
+old and new brokers together.
 
 A reset abandons unsettled work and invalidates delivery tokens and
-conversation references. Rollback means stopping v4 and restoring both the old
-binary and its untouched old state. Never hand-edit either schema.
-After v4 has accepted work, the old backup does not contain that work. Before
-rolling back, inspect and drain or explicitly abandon v4 deliveries, and keep
-a separate backup of the v4 state. Restoring v3 is not a rollback of those
-delivery effects and must never silently discard unsettled v4 work.
+conversation references. Rollback means stopping the current broker and
+restoring both the old binary and its untouched old state. Never hand-edit
+either schema. Work accepted after the upgrade is absent from the old backup:
+before rolling back, inspect and drain or explicitly abandon those deliveries
+and keep a separate backup of the current state. Restoring the old binary is
+not a rollback of those delivery effects and must never silently discard
+unsettled work.

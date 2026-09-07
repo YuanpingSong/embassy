@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'unsafe-inline'">
 <title>Embassy — a local embassy for your AI agents</title>
-<meta name="description" content="Embassy is a local broker that lets a Claude Code session and a Codex CLI task on one Mac message each other by name, with a receipt for every delivery.">
+<meta name="description" content="Embassy is a same-user broker that lets Claude Code sessions and Codex CLI agents message each other by name, on one Mac or across your own Macs over SSH, with a receipt for every delivery.">
 <link rel="canonical" href="https://yuanpingsong.github.io/embassy/">
 <link rel="alternate" hreflang="en" href="https://yuanpingsong.github.io/embassy/">
 <link rel="alternate" hreflang="x-default" href="https://yuanpingsong.github.io/embassy/">
@@ -27,11 +27,12 @@ code{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace}p code{font-siz
 <h1><img src="assets/mark.svg" alt="">Embassy</h1>
 <p><strong>A local embassy for your AI agents.</strong> Embassy is a small same-user broker that lets Claude Code sessions and Codex CLI tasks message one another by name, on one Mac or across directly configured SSH gateways. The receiving agent wakes through its native interface; agents never poll for inbound mail. Every message has its own receipt and provenance, but no receipt claims that a model read or understood the message. Names are lookup labels while an opaque endpoint identity holds routing authority. Personal, single-user, unofficial — not affiliated with or endorsed by Anthropic or OpenAI.</p>
 <h2>Quickstart</h2>
-<p>Each command is what the shipped CLI accepts once you substitute your host. Replace <code>your-host</code> with the <code>hostId</code> on the broker's ready line.</p>
+<p>Each command is what the shipped CLI accepts once you substitute your host. Replace <code>your-host</code> with the <code>host</code> in your <code>nodes.json</code>; every local name ends in it. Node.js 22 or newer.</p>
 <pre><span class="c"># install, and run the broker as your launchd agent</span>
 npm install -g agent-embassy
 embassy service install
-<span class="c"># 1. Codex agents appear automatically; inspect their public names</span>
+<span class="c"># 1. see the agents: Codex agents are discovered from the running Codex daemon</span>
+embassy tui
 embassy status
 <span class="c"># 2. from Claude or Codex — the caller is inferred; body stays on stdin</span>
 embassy send --to advisor@your-host &lt;&lt;'MSG'
@@ -41,7 +42,7 @@ MSG
 embassy send --conversation conv_&lt;reference&gt; &lt;&lt;'MSG'
 The session-scoped one; the risk is the double-write window.
 MSG</pre>
-<p>Federation, the broker-only <code>embassy check</code>, delivery semantics, and safety in one minute are in the <a href="https://github.com/YuanpingSong/embassy#readme">README</a>. What each release changed is in the <a href="https://github.com/YuanpingSong/embassy/blob/main/CHANGELOG.md">changelog</a>.</p>
+<p>Federation over SSH (the SSH login is the trust boundary), the broker-only <code>embassy check</code> (not a provider readiness proof), delivery semantics, and safety are in the <a href="https://github.com/YuanpingSong/embassy#readme">README</a>. What each release changed is in the <a href="https://github.com/YuanpingSong/embassy/blob/main/CHANGELOG.md">changelog</a>.</p>
 <footer><p>MIT licensed. Claude and Codex are trademarks of their respective owners, used here only to name the tools this gateway connects. This page loads no external assets, sets no cookies, and collects nothing.</p></footer>
 </body>
 </html>

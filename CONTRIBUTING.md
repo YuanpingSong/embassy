@@ -21,7 +21,7 @@ and must never run in CI.
 
 ## Core shape
 
-Keep changes inside the v4 architecture:
+Keep changes inside the shipped architecture:
 
 - `ledger.ts` owns pure synchronous state transitions;
 - `owned-state.ts` owns private atomic persistence;

@@ -13,7 +13,7 @@ federation, and delivery settlement as security-sensitive boundaries.
 - Optimize for concrete progress and maintainable code. Avoid ticket ceremony,
   per-commit accounting, freeze rituals, status reports, and extra gates that
   do not improve the release candidate.
-- The v4 implementation is engineer-led. Contact the PM only for a decision
+- Implementation is engineer-led. Contact the PM only for a decision
   that changes the signed contract, a blocker only the PM/founder can clear, or
   the final release-candidate handoff. Use Embassy as the exclusive PM channel.
 - Use subagents for substantial independent work or hard review, with explicit
@@ -24,10 +24,10 @@ federation, and delivery settlement as security-sensitive boundaries.
 
 ## Required verification
 
-Run `TMPDIR=/tmp npm run check` after source or test changes and before the RC.
-Use the soak suite for scheduling, restart, native transport, or settlement
-changes. Keep CI green when practical during development; CI must be green at
-the RC.
+Run `TMPDIR=/tmp npm run check` after source or test changes and before a
+release candidate. Use the soak suite for scheduling, restart, native
+transport, or settlement changes. Keep CI green when practical during
+development; CI must be green at a release candidate.
 
 Routine tests use test-owned temporary directories, fake Claude sockets, fake
 App Server transports, and fake SSH processes. They must not inspect the live
@@ -121,23 +121,25 @@ propose a contract change rather than expanding the boundary through a test.
 - `health` describes local control. `check` proves only the broker's loopback
   ledger/coordinator/receipt path. Neither proves provider readiness, model
   comprehension, or cross-machine delivery.
-- State schema 7 adds only a private retained-registration marker. Valid schema 6
-  reads forward with existing rows retained; writes use 7. Schemas ≤5 and
-  unknown state refuse without mutation. Private control 6 needs a matching CLI/broker. A reset invalidates routes, receipts,
-  and conversations; rollback requires the untouched old state and matching
-  old binary.
+- Private state is schema 7; a valid schema-6 document reads forward with
+  existing rows retained. Schemas ≤5 and unknown state refuse without
+  mutation. Private control protocol 6 needs a matching CLI and broker. A
+  reset invalidates routes, receipts, and conversations; rollback requires the
+  untouched old state and matching old binary.
 - Preserve exact current-user ownership, modes, symlink, inode, lease, and
   used-artifact generation checks for every owned/executed path. Unsafe Claude
   registry evidence may quarantine Claude; unsafe broker-owned authority may
   refuse startup.
 
-## Removed responsibilities
+## Out of scope
 
-Do not reintroduce native Claude sending advertisements/helpers, shell-peer
-registration/token/mailbox/await, automatic Codex-output forwarding, synthetic
-reply callbacks, persisted remote mirrors, pair/selection graphs,
-dashboard/watch streams, delivery-notice modes, general counters/journals, or
-old-state conversion. The broker-only loopback check is not a user endpoint.
+Embassy has no native Claude sending advertisement or helper process, no
+shell-peer registration, token, mailbox or await command, no automatic
+Codex-output forwarding, no synthetic reply callbacks, no persisted remote
+mirrors, no pair/selection graphs, no dashboard or watch streams, no
+delivery-notice modes, no general counters or journals, and no old-state
+conversion. Do not add any of them without a contract change. The broker-only
+loopback check is not a user endpoint.
 
 ## PM communication failures
 

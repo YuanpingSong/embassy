@@ -29,13 +29,13 @@ body:
     attributes:
       label: Scope acknowledgment
       description: >-
-        Embassy is deliberately scoped: local, single-user, non-hosted, and
-        no wider than the daily path. See the README's "Safety in one
-        minute".
+        Embassy is deliberately scoped: same-user, non-hosted, one Mac or
+        the user's own Macs over SSH, and no wider than the daily path. See
+        the README's "Safety" section and `docs/DECLINED.md`.
       options:
         - label: >-
-            This request keeps Embassy local-only, single-user, and
-            non-hosted.
+            This request keeps Embassy same-user, non-hosted, and without a
+            network listener.
           required: true
 
   - type: textarea

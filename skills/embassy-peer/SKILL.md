@@ -100,4 +100,4 @@ For operator-authorized removal use `embassy retire --alias <local-alias>`. It r
 
 When a name collides, operator-authorized `embassy retire --endpoint <public-id>` removes just that local endpoint using its opaque ID from status. Use exactly one of `--alias` or `--endpoint`; never substitute a native session ID. A partial discovery cannot clear a known collision; exact user-supplied UUID addressing remains available until a complete scan proves uniqueness.
 
-There is no shell-peer mailbox, await command, native sending advertisement, automatic output forwarding, reply alias, or unregister-codex command in v4. Do not fall back to removed commands or direct provider sockets; report the precise refusal.
+The commands above are the whole public CLI (`embassy --help` lists them). Do not fall back to a command that is not listed there or to direct provider sockets; report the precise refusal.

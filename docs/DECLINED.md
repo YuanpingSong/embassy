@@ -1,40 +1,46 @@
 # Declined decisions
 
-This file records what Embassy considered and chose not to build, because a
-product that documents its refusals is making the same promise its dashboard
-makes: the truth over the appearance of completeness. Changing a decision here
-means addressing its reason, not ignoring it.
+This file records what Embassy has considered and chooses not to build, so
+the product documents its refusals as carefully as its features. Changing a
+decision here means addressing its reason, not ignoring it.
 
-## v1.5
-
-- **Metadata "doctor" view** — Superseded in v1.7.1 after a live split-brain
-  incident proved that status and dashboard evidence alone did not name the
-  actionable Desktop attachment failure.
-- **Consulates (multi-host federation)** — Deferred indefinitely because
-  Embassy is deliberately one user, one machine.
-- **Codex write-attestation probe** — Creating probe threads has UI side effects
-  in the user's Codex app, so this needs its own design pass; it is a v1.6
-  candidate, not declined forever.
-- **Codex write activation from read probes** — Declined permanently because
-  initialize/thread-list evidence never grants `turn/start` authority.
-- **Automatic re-anchor promises in alerts** — Superseded in v1.8 when Codex
-  endpoint re-anchoring was removed. The dashboard still states only current
-  operation facts, never hoped-for recovery.
-- **Cosmetic backlog held out of v1.4/v1.5** (stale `live-*` state-directory
-  sweep; dashboard `GET /?query` → `404`; leading-zero port parse) — Correctness
-  and honesty shipped first; these wait without shame.
-- **Cross-layer launcher-banner provenance policy** — Superseded in v1.8 when
-  Embassy stopped inspecting the unused Claude launcher; current routing uses
-  only actual registry, socket, PID, workspace, and state-root evidence.
-- **Claude endpoint-generation deleted-as-churn via constant sentinel** —
-  Superseded by native state schema 3, which removed persisted endpoint
-  generations instead of adding another compatibility sentinel.
-- **Native stall-notice prose kept one hop from the remedy** — The native
-  notice states when queued mail arrives and points onward; the dashboard owns
-  the full remedy prose.
-
-## v1.7.1
-
-- **Automatic Desktop relaunch after Codex attachment failure** — Declined
-  because relaunching can terminate or replace the user's open Desktop windows;
-  Embassy diagnoses the condition and prints the exact opt-in remedy instead.
+- **Native Claude sending advertisement or helper process** — Declined.
+  Sending is one `embassy send` command from the calling session; Embassy
+  installs nothing into Claude's native agent list and forks no helper. The
+  native socket is used only to wake the receiving session.
+- **Shell-peer registration, tokens, mailboxes, or an `await` command** —
+  Declined. Receiving is native and never polled; an agent that cannot be
+  woken natively is not an endpoint.
+- **Automatic forwarding of Codex output as a reply** — Declined. A reply is
+  an explicit `embassy send --conversation` from the recipient, so every
+  message has one deliberate author and one identity-bound receipt.
+- **A native provider queue or replay of an uncertain write** — Declined.
+  Ordinary Codex work waits in Embassy's own bounded queue until an immediate
+  idle observation; an armed or accepted write whose outcome is unknown is
+  recorded as ambiguous or unconfirmed and never replayed, because the App
+  Server response cannot distinguish a steer from a fresh turn.
+- **`turn/interrupt`, answering approvals, or changing a task's sandbox or
+  approval policy** — Declined permanently. `STEER:` uses only the accepted
+  operation's `turn/steer` at a safe tool-call boundary; Embassy never forces
+  delivery by interrupting a generation or acting on the user's behalf.
+- **Codex write activation from read probes** — Declined permanently.
+  Discovery metadata (initialize, thread listing, status) never grants
+  `turn/start` authority; every delivery resumes and attests the exact task
+  immediately before the write.
+- **Codex write-attestation probe threads** — Declined. Creating probe
+  threads has visible side effects in the user's Codex app, so `embassy check`
+  exercises only broker loopback and is documented as not a provider readiness
+  proof.
+- **Dashboards, watch streams, activity journals, and general counters** —
+  Declined. `status` and `tui` render one closed, body-free snapshot; recent
+  terminal evidence is bounded by count, bytes, and time and is not an
+  analytics feed.
+- **Persisted remote route mirrors and multi-hop routing** — Declined. Remote
+  catalogs are bounded memory-only observations; named and exact routing always
+  asks the owner over a directly configured SSH login.
+- **A separate federation identity mode** — Declined. The plain same-user SSH
+  login is the trust boundary; a forced command, per-node key, or host-label
+  attestation would add configuration without changing who is trusted.
+- **Old-state migration or a compatibility reader** — Declined. Schemas
+  Embassy does not write refuse before mutation; rollback is the preserved old
+  binary with its untouched old state.

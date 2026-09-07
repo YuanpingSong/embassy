@@ -6,12 +6,12 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for filing a bug. Embassy is a local, single-user gateway
-        between Claude Code sessions and a Codex CLI task — please do
-        not paste message bodies, prompts, replies, credentials, OAuth
-        material, or raw provider output into this form. `embassy status`
-        output may contain message bodies, aliases, and hosts — redact it
-        before pasting.
+        Thanks for filing a bug. Embassy is a same-user gateway between
+        Claude Code sessions and Codex CLI agents — please do not paste
+        message bodies, prompts, replies, credentials, OAuth material, or
+        raw provider output into this form. `embassy status` output never
+        contains bodies or native IDs, but it does show aliases, hosts, and
+        timestamps — review it before pasting.
 
   - type: textarea
     id: description
@@ -28,9 +28,9 @@ body:
       description: Exact commands run, and the order they were run in.
       placeholder: |
         1. embassy service install
-        2. embassy register-codex --alias codex-reviewer@your-host
-        3. embassy status  (to read the Claude session's current name)
-        4. printf '%s\n' '[BODY REDACTED]' | embassy send --from codex-reviewer@your-host --to advisor@your-host
+        2. embassy status  (to read the current agent names; Codex agents are discovered)
+        3. printf '%s\n' '[BODY REDACTED]' | embassy send --to advisor@your-host  (run from the agent's own shell)
+        4. embassy delivery-status --token dlv_REDACTED
     validations:
       required: true
 
@@ -88,7 +88,7 @@ body:
     id: node-version
     attributes:
       label: Node version
-      description: "`node --version` (Embassy requires Node.js ≥ 20)."
+      description: "`node --version` (Embassy requires Node.js 22 or newer)."
     validations:
       required: true
 
@@ -97,22 +97,27 @@ body:
     attributes:
       label: "`embassy status` output"
       description: >-
-        `embassy status` shows retained message bodies as well as aliases,
-        hosts, states, and timestamps; redact the bodies and any personal
-        metadata before pasting. Credentials and raw provider identifiers
-        never appear in it.
+        `embassy status` shows aliases, hosts, states, safe codes, and
+        timestamps; redact any personal metadata before pasting. Message
+        bodies, credentials, and native provider identifiers never appear
+        in it.
       render: text
 
   - type: dropdown
     id: delivery-state
     attributes:
       label: Delivery state observed
-      description: Which delivery/receipt state did the message end up in?
+      description: >-
+        Which phase or terminal outcome did `embassy delivery-status` (or
+        `status`) report for the message?
       options:
         - delivered
+        - failed
+        - cancelled
         - expired
-        - queued
-        - abandoned
+        - ambiguous
+        - unconfirmed
+        - queued / reserved / armed / accepted (still pending)
         - other / not applicable
     validations:
       required: true

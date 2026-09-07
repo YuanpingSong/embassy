@@ -8,10 +8,8 @@ pairs are supported. Sending is one `embassy send` command; receiving wakes the
 target through its native interface. A receipt proves delivery machinery, not
 model comprehension.
 
-The design optimizes for this steady state and deliberately excludes native
-Claude `SendMessage` advertisement helpers, shell-peer mailboxes, automatic
-Codex output forwarding, persistent remote mirrors, general activity streams,
-and migration compatibility.
+The design optimizes for this steady state; everything it deliberately leaves
+out is listed under [Responsibility exclusions](#responsibility-exclusions).
 
 ## Topology
 
@@ -31,8 +29,8 @@ Claude/Codex CLI
                                       remote broker ledger
 ```
 
-There is one broker per login user and host. The broker owns one schema-7 JSON
-document and one private control socket. It does not listen on a network port.
+There is one broker per login user and host. The broker owns one private JSON
+state document and one private control socket. It does not listen on a network port.
 launchd may supervise the same foreground `serve` entry point.
 
 ## Endpoint directory
@@ -139,8 +137,8 @@ guessing. The live host lease is checked before a transaction, before
 persistence, and immediately before rename.
 
 No-op transactions write nothing. Unsupported or corrupt state refuses before
-mutation. Valid schema 6 reads forward with all existing rows retained; writes use 7.
-The only added field is the private retention marker. Schema ≤5 still needs a reset.
+mutation. A valid schema-6 document from an earlier 4.x release reads forward
+with all existing rows retained; schema ≤5 needs a reset.
 
 ## Coordinator
 
@@ -239,9 +237,8 @@ reset.
 
 ## Local control and CLI
 
-The private control protocol is version 6. Each connection carries one bounded
-JSON request and one closed JSON response over the expected private Unix
-socket. A mutating request whose reply is lost after write reports
+Each private control connection carries one bounded JSON request and one
+closed JSON response over the expected private Unix socket. A mutating request whose reply is lost after write reports
 `CONTROL_WRITE_OUTCOME_AMBIGUOUS`; the CLI does not retry it.
 
 The public CLI is:
@@ -283,7 +280,7 @@ Startup order is ownership-sensitive:
 1. load the private node inventory, or derive a transient first-boot default,
    and load configuration;
 2. acquire the fixed host-wide kernel lease;
-3. open and validate schema-7 state without changing the inventory;
+3. open and validate the private state without changing the inventory;
 4. atomically install and reload the default inventory when first boot needs
    one;
 5. construct native and SSH adapters;
@@ -314,10 +311,11 @@ each use boundary. Version or build metadata is never routing authority.
 
 ## Responsibility exclusions
 
-The v4 core intentionally has no shell-peer registration/token/mailbox/await
+The core intentionally has no shell-peer registration/token/mailbox/await
 system, no native Claude advertisement helper, no automatic provider-output
 reply capture, no persisted remote route mirror, no pair/selection graph, no
-dashboard/watch event system, no notice-mode machinery, and no v3 migration
-reader. The responsibilities that remain are endpoint identity, bounded
+dashboard/watch event system, no notice-mode machinery, and no old-state
+migration reader. Its responsibilities are endpoint identity, bounded
 delivery, native wake, exact replies, direct federation, status, retirement,
-service supervision, and loopback verification.
+service supervision, and loopback verification. The reasons are recorded in
+the repository's `docs/DECLINED.md`.

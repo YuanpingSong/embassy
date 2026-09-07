@@ -19,8 +19,9 @@ body:
       label: Which quickstart step failed?
       options:
         - "embassy service install / embassy serve (starting the broker)"
-        - "embassy health / embassy status"
-        - "embassy register-codex"
+        - "embassy health / embassy status / embassy tui"
+        - "Codex agent not discovered (Codex daemon / App Server)"
+        - "embassy register-codex (fallback registration)"
         - "embassy send --to (sending by name)"
         - "embassy send --conversation (answering)"
         - "Native delivery waking Claude Code"
@@ -81,6 +82,7 @@ body:
     id: node-version
     attributes:
       label: Node version
+      description: "`node --version` (Embassy requires Node.js 22 or newer)."
     validations:
       required: true
 

@@ -2,9 +2,9 @@
 
 ## Supported versions
 
-Security fixes are provided for the current release line. Private schema 6 is
-read forward into 7; schema ≤5 still requires a reset. Private control peers
-must use the same protocol version.
+Security fixes are provided for the current release line. The CLI and broker
+must come from one installation, and federated peers must run the same
+federation protocol.
 
 ## Reporting a vulnerability
 
@@ -200,8 +200,9 @@ commit boundary remain uncertain and are never replayed automatically.
 Public JSON is a closed projection. It may contain opaque Embassy endpoint IDs,
 aliases, providers, hosts, queue depths, safe codes, phases/outcomes, ages,
 recent retirement times, and bounded remote catalog rows and observation times.
-Codex rows may additionally contain observed busy, waiting, idle, dormant or unknown state.
-The explicit-registration retention marker remains private.
+Codex rows may additionally contain the observed busy, waiting, idle, dormant,
+systemError or unknown state. The explicit-registration retention marker
+remains private.
 It must never contain native IDs or handles, socket paths, message bodies,
 delivery/conversation secrets, credentials, exceptions, raw diagnostics, or
 provider histories. Human output is derived from the same validated shape.
@@ -211,12 +212,13 @@ protocol channel. Operational hints use bounded safe codes and stderr.
 
 ## State reset and rollback
 
-Private state writes schema 7 and reads valid schema 6 forward, retaining its
-existing rows. Control protocol is 6. Schemas ≤5 and unknown state refuse before
-mutation; no 3.x converter or removed-command alias exists. Before upgrading
-4.2.0, stop the broker and back up its state; 4.2.0 refuses schema 7, so rollback
-requires that pre-upgrade backup. Upgrading from 3.x still requires inspecting
-unsettled work with the old binary and resetting state while keeping `nodes.json`.
+Private state is schema 7; a valid schema-6 document from an earlier 4.x
+release is read forward with its rows retained. Schemas ≤5 and unknown state
+refuse before mutation; there is no 3.x converter or removed-command alias.
+Back up state before upgrading, because an earlier 4.x binary refuses schema
+7 and rollback requires that pre-upgrade backup. Upgrading from 3.x requires
+inspecting unsettled work with the old binary and resetting state while keeping
+`nodes.json`.
 
 Reset invalidates all old routes, receipts, and conversation references. The
 only rollback is the preserved old binary with its untouched old state. Embassy

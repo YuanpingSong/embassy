@@ -8,7 +8,7 @@
 
 ## Checks
 
-- [ ] `npm run check` passes (typecheck, build, deterministic test suite)
+- [ ] `TMPDIR=/tmp npm run check` passes (typecheck, build, deterministic test suite)
 - [ ] `npm pack --dry-run` contains only the intended Embassy package files
 
 ## Security-invariant checklist
@@ -20,13 +20,13 @@
       persisted; message bodies and delivery status live only in the bounded
       mode-0600 private state
 - [ ] No provider version fact becomes routing authority, and no protocol or
-      schema number (state schema 5, control protocol 3, peer protocol 2,
-      helper protocol 2, Claude peer protocol 1) changes without explicit
+      schema number (state schema 7, private control protocol 6, federation
+      protocol 3, consumed Claude peer protocol 1) changes without explicit
       review
-- [ ] The permission model is unchanged: the OS boundary plus an exact alias
-      is the permission, a Claude route installs on its first use, a colliding
-      name is refused, and every routed body carries the provenance envelope
-      naming its sender
+- [ ] The permission model is unchanged: the same-user OS boundary plus an
+      exact endpoint identity is the permission, a Claude endpoint is recorded
+      on its first use, a colliding name is refused, and every routed body
+      carries the provenance envelope naming its sender
 - [ ] No Codex approval or sandbox policy is changed or overridden, and no
       approval request is answered by Embassy
 - [ ] Docs updated (README, `docs/GATEWAY-ARCHITECTURE.md`, `SECURITY.md`, or
