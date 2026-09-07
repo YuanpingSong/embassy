@@ -1,23 +1,26 @@
-# Embassy demo video — v3
+# Embassy demo video — v4
 
 This isolated Remotion project turns sanitized, real terminal captures into the
 Embassy demo. It is development-only and is intentionally absent from the root
 npm package allowlist.
 
-The current cut is 40 seconds: native agent views, Claude send, Codex wake,
-Codex reply, Claude arrival, a real SSH host-pane switch, then the ledger.
+The current cut is 40 seconds: an illustrated agent pair, Claude send, native
+Codex wake, Codex reply, Claude arrival, illustrated SSH federation, then receipts.
 It uses the site's mark and ink/amber palette, with recorded ANSI colors left
 unchanged. There is no logo end card or new GIF. Explicit camera crops keep
 terminal content at 28 px or larger; the editor never rewrites terminal rows.
 
-V3 replaces the simultaneous three-lane layout with an active-terminal close-up.
-The opener first shows readable native name crops, then moves into the full
-endpoint list. A persistent amber path carries the request and reply across
-scene transitions. The closing crop highlights the actual two settled rows;
-it does not remove or alter other deliveries in the source recording.
-All composition, editing, frame inspection, and rendering for v3 were done by
-the primary engineer, without delegation. The verified v2 recordings and their
-masking are reused unchanged; no new provider activity was needed.
+V4 balances recorded proof with illustration for newcomers. Real terminal
+excerpts show one command or acknowledgment; the wake scene emphasizes only
+the question and Working line, dimming the intervening recorded scaffolding.
+Two drawn Macs explain the SSH connection between brokers, with an envelope
+out and receipt back. This is labelled as illustration, not a new recorded
+cross-host exchange. A short send → accepted → delivered strip describes the
+successful demo outcome above its two real ledger rows, with the reminder
+that delivery is not proof of reading. Other outcomes still exist.
+All composition, editing, frame inspection, and rendering are done by the
+primary engineer, without delegation. The verified recordings and masking are
+reused; no new provider activity or invented terminal text is needed.
 
 ## Capture contract
 
@@ -122,6 +125,6 @@ keyframes, for example:
 npx remotion still src/index.ts EmbassyDemo out/keyframe-overview.png --frame=120
 ```
 
-Current outputs: `out/embassy-demo-v3.mp4` and `out/poster-v3.png`. The original
-v1/v2 outputs are preserved locally. Neither recording nor rendering uploads media
+Current outputs: `out/embassy-demo-v4.mp4` and `out/poster-v4.png`. The original
+v1/v2/v3 outputs are preserved locally. Neither recording nor rendering uploads media
 or changes README, broker state, or provider configuration.
