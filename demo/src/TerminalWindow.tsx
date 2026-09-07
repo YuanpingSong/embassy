@@ -34,7 +34,7 @@ const runStyle = (run: CellRun): CSSProperties => {
 // including when a recorded host suffix crosses a styling boundary.
 const maskMachineSuffixes = (row: readonly CellRun[]): readonly CellRun[] => {
   const text = row.map(run => run.text).join("");
-  const suffixes = [...text.matchAll(/@(?:m5dev|this-mac)\b/g)];
+  const suffixes = [...text.matchAll(/(?:@|-)(?:m5dev|this-mac)\b/g)];
   let offset = 0;
   return row.map(run => {
     const start = offset;
