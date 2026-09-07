@@ -1,4 +1,4 @@
 interface:
   display_name: "Embassy Peer Gateway"
   short_description: "Message named Claude and Codex sessions safely"
-  default_prompt: "Use $embassy-peer to register this task and send or reply to a named session through the gateway."
+  default_prompt: "Use $embassy-peer to send or reply to a named session through the gateway. This task is discovered automatically; register only for a non-native harness."

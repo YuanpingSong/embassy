@@ -6,6 +6,8 @@ wakes the receiving agent through its native interface; agents do not poll.
 Claude→Claude, Claude→Codex, Codex→Claude, and Codex→Codex all use the same
 command and receipt model.
 
+![Real Claude Code and Codex CLI messaging through Embassy](https://raw.githubusercontent.com/YuanpingSong/embassy/main/assets/demo.gif)
+
 The core is deliberately small: one private ledger, one delivery coordinator,
 and three write adapters (Claude socket, Codex App Server operation, and SSH
 handoff). Aliases are lookup names. Opaque endpoint IDs are the routing
