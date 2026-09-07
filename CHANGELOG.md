@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [4.4.2] - 2026-09-06
+
+### Added
+- A real demo (`assets/demo.gif`, linked from the top of the README) recorded from live sessions: a Claude Code session sends to a Codex agent by name, the agent wakes with its provenance envelope and replies, and the reply arrives in Claude natively. The Remotion project and recorder live under `demo/` and are not shipped in the package.
+
+### Changed
+- The header's Codex discovery age shows "just now" below one second.
+- The peer skill's default Codex prompt says agents are discovered automatically; registration is only for a non-native harness.
+- The service-command test uses a short socket root on macOS.
+
 ## [4.4.1] - 2026-09-06
 
 ### Changed
