@@ -20,6 +20,11 @@ command and receipt model.
   <a href="LICENSE"><img src="https://img.shields.io/npm/l/agent-embassy" alt="MIT license"></a>
 </p>
 
+<p align="center">
+  <a href="README.md"><img src="https://img.shields.io/badge/English-1a1a1e" alt="English"></a>
+  <a href="README_CN.md"><img src="https://img.shields.io/badge/简体中文-1a1a1e" alt="简体中文"></a>
+</p>
+
 
 https://github.com/user-attachments/assets/f0533912-8f77-4256-a915-d087ee025405
 
@@ -101,15 +106,26 @@ creates one from the short hostname. See
 
 ## Status
 
-Proven today: the offline suite (fake Claude sockets, fake App Server
-transports, fake SSH processes) runs on every change on macOS and Ubuntu; each
-release is drilled live on two Macs, including Codex discovery, dormant wake
-over SSH, steering, retirement and broker restart. Bounded by design: `health`
-and `check` prove the broker and are not a provider readiness proof, since
-neither shows that any agent can answer; a receipt proves
-transport, not comprehension; ordinary Codex delivery waits for an idle
-observation, and a competing client can start a turn in the gap, so the race
-is undetectable on the wire; SSH is the whole trust boundary between machines.
+What works today, and is tested on every change:
+
+- Claude→Codex, Codex→Claude, and same-provider messaging by name on one Mac.
+- Automatic discovery of Codex agents; Claude sessions are recorded when they
+  send.
+- Messaging across your own Macs over SSH.
+- Every release is exercised live on two Macs: discovery, waking a dormant
+  agent over SSH, steering, retirement, broker restart. The automated suite
+  runs on macOS and Ubuntu.
+
+What Embassy deliberately does not promise:
+
+- `health` and `check` tell you the broker works. They are not a provider
+  readiness proof: they do not show that any agent can answer.
+- A receipt proves the message was delivered, not that the agent read or
+  understood it.
+- Delivery to a busy Codex agent waits until it is idle. If something else
+  starts a turn in that instant, Embassy cannot tell; the receipt still means
+  the message was accepted.
+- Between machines, your SSH login is the entire trust boundary.
 
 ## How it works, briefly
 

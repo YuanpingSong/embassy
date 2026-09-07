@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Added
+- Simplified Chinese README (`README_CN.md`) with a language switcher under the badges.
+
+### Changed
+- README Status section rewritten as two short lists: what works today, and what Embassy deliberately does not promise.
+
 ## [4.5.0] - 2026-09-07
 
 ### Added
