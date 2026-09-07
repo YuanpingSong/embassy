@@ -57,10 +57,10 @@ const AgentsOverview = () => (
       </div>
       <div style={styles.centerPane}>
         <div style={styles.brokerLane}><span>Claude</span><b>→</b><Img src={staticFile("mark.svg")} style={{width: 44, height: 44}} /><b>→</b><span>Codex</span></div>
-        <TerminalWindow captureId="v2-tui-overview" title="m5dev — embassy tui" width={800} height={760} fontSize={28} lineHeight={1.02} viewportRow={5} viewportRows={23} accent={AMBER} />
+        <TerminalWindow captureId="v2-tui-overview" title="m5dev — embassy tui" width={850} height={760} fontSize={28} lineHeight={1.02} viewportRow={5} viewportRows={23} viewportColumns={47} accent={AMBER} />
       </div>
       <div style={styles.sidePane}>
-        <TerminalWindow captureId="v2-codex-agents" title="codex agents" width={430} height={760} fontSize={28} lineHeight={1.02} viewportRow={18} viewportRows={2} cameraColumn={4} />
+        <TerminalWindow captureId="v2-codex-agents" title="codex agents" width={430} height={760} fontSize={28} lineHeight={1.02} viewportRow={18} viewportRows={2} cameraColumn={4} viewportColumns={20} />
       </div>
     </div>
   </Scene>
@@ -158,7 +158,7 @@ const styles: Record<string, CSSProperties> = {
   captionArea: {height: 116, paddingRight: 240},
   eyebrow: {fontSize: 28, letterSpacing: "0.15em", textTransform: "uppercase", color: MUTED, fontWeight: 720, marginBottom: 10},
   caption: {fontSize: 48, lineHeight: 1.08, letterSpacing: "-0.025em", fontWeight: 760},
-  overviewGrid: {display: "grid", gridTemplateColumns: "430px 800px 430px", justifyContent: "space-between", alignItems: "end", height: 876},
+  overviewGrid: {display: "grid", gridTemplateColumns: "430px 850px 430px", justifyContent: "space-between", alignItems: "end", height: 876},
   sidePane: {position: "relative", opacity: 0.9},
   centerPane: {position: "relative"},
   brokerLane: {height: 74, display: "flex", justifyContent: "center", alignItems: "center", gap: 18, color: MUTED, fontSize: 28, fontWeight: 650},
