@@ -17,6 +17,23 @@ const integer = (value, label, minimum = 0) => {
 
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 
+export const redactEndpointAliases = (frame, host) => {
+  if (!frame.rows[0].map((run) => run.text).join("").includes(`[${host} ·`)) return frame;
+  return {...frame, rows: frame.rows.map((row) => {
+    const text = row.map((run) => run.text).join("");
+    const provider = text.slice(41, 47).trim();
+    if (provider !== "codex" && provider !== "claude") return row;
+    // Frozen 90-column TUI footage: Endpoint occupies columns 14 through 40.
+    const masked = text.slice(0, 14) + `${provider}-…@${host}`.padEnd(27) + text.slice(41);
+    let offset = 0;
+    return row.map((run) => {
+      const result = {...run, text: masked.slice(offset, offset + run.text.length)};
+      offset += run.text.length;
+      return result;
+    });
+  })};
+};
+
 const validateCapture = (value, label) => {
   if (!value || typeof value !== "object" || Array.isArray(value)) fail(`${label} must be an object`);
   if (value.version !== 1) fail(`${label}.version must be 1`);
@@ -128,7 +145,9 @@ export const editCaptures = async (planPath, outputDirectory) => {
       if (cropTop + cropBottom >= source.capture.rows) fail(`${name} crop removes every row`);
       maximumRows = Math.max(maximumRows, source.capture.rows - cropTop - cropBottom);
       const selected = selectFrames(source.capture, segment, `${name}.segments[${index}]`);
-      for (const frame of selected.frames) {
+      for (const recordedFrame of selected.frames) {
+        const frame = specification.redactEndpointAliasesForHost
+          ? redactEndpointAliases(recordedFrame, specification.redactEndpointAliasesForHost) : recordedFrame;
         const outputRows = source.capture.rows - cropTop - cropBottom;
         const cursor = frame.cursor ? {
           ...frame.cursor,
@@ -164,6 +183,7 @@ export const editCaptures = async (planPath, outputDirectory) => {
       columns: capture.columns,
       rows: capture.rows,
       durationMs: outputOffset,
+      ...(specification.redactEndpointAliasesForHost ? {redactEndpointAliasesForHost: specification.redactEndpointAliasesForHost} : {}),
       segments: segmentProofs,
     };
   }
