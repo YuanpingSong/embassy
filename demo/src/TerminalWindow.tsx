@@ -38,6 +38,8 @@ type TerminalWindowProps = Readonly<{
   fontSize?: number;
   lineHeight?: number;
   sourceStartMs?: number;
+  sourceEndMs?: number;
+  focusPattern?: string;
   viewportRow?: number;
   viewportRows?: number;
   cameraColumn?: number;
@@ -54,6 +56,8 @@ export const TerminalWindow = ({
   fontSize = 29,
   lineHeight = 1.04,
   sourceStartMs = 0,
+  sourceEndMs = Infinity,
+  focusPattern,
   viewportRow = 0,
   viewportRows,
   cameraColumn = 0,
@@ -64,12 +68,14 @@ export const TerminalWindow = ({
   const currentFrame = useCurrentFrame();
   const {fps} = useVideoConfig();
   const {capture, error} = useCapture(captureId as CaptureId);
-  const timeMs = sourceStartMs + (currentFrame / fps) * 1000;
+  const timeMs = Math.min(sourceEndMs, sourceStartMs + (currentFrame / fps) * 1000);
   const terminalFrame = capture ? frameAt(capture, timeMs) : undefined;
-  const rows = terminalFrame?.rows.slice(viewportRow, viewportRows ? viewportRow + viewportRows : undefined);
+  const focusRow = focusPattern ? terminalFrame?.rows.findIndex(row => row.map(run => run.text).join("").includes(focusPattern)) : -1;
+  const firstRow = focusRow !== undefined && focusRow >= 0 ? focusRow : viewportRow;
+  const rows = terminalFrame?.rows.slice(firstRow, viewportRows ? firstRow + viewportRows : undefined);
   const rowHeight = fontSize * lineHeight;
   const cursor = terminalFrame?.cursor;
-  const cursorRow = cursor ? cursor.row - viewportRow : -1;
+  const cursorRow = cursor ? cursor.row - firstRow : -1;
   const highlightedRow = rows?.findIndex((row) => row.map((run) => run.text).join("").includes(highlightPattern ?? "\u0000")) ?? -1;
 
   return (
@@ -101,7 +107,7 @@ export const TerminalWindow = ({
               style={{
                 ...styles.line,
                 height: `${lineHeight}em`,
-                ...(highlightPattern && index === highlightedRow ? {minWidth: 0, width: width - 38, background: `${accent}12`, boxShadow: `inset 0 0 0 2px ${accent}`} : {}),
+                ...(highlightPattern && index === highlightedRow ? {minWidth: 0, width: viewportColumns ? `${viewportColumns}ch` : width - 38, background: `${accent}12`, boxShadow: `inset 0 0 0 2px ${accent}`} : {}),
               }}
             >
               {row.map((run, runIndex) => <span key={runIndex} style={runStyle(run)}>{run.text}</span>)}
