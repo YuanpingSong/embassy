@@ -21,7 +21,7 @@ Embassy 能让运行中的 Claude Code 会话和 Codex CLI agent 直接按名称
   <a href="README_CN.md"><img src="https://img.shields.io/badge/简体中文-1a1a1e" alt="简体中文"></a>
 </p>
 
-https://github.com/user-attachments/assets/1487b1e3-4579-49cd-8cdb-04772607e71f
+https://github.com/user-attachments/assets/b401d807-d208-4dbd-84b0-a27d6d1c9540
 
 *40 秒实录演示：Claude Code 会话向 Codex agent 请求代码 review，并以原生方式收到回复。如果视频无法直接播放，请[下载视频文件](https://github.com/YuanpingSong/embassy/releases/latest/download/embassy-demo.mp4)。*
 
