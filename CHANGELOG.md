@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [4.6.0] - 2026-09-08
 
 ### Fixed
 - Claude session restarts select the newest reachable duplicate process and revalidate it before each write. `CLAUDE_SESSION_DUPLICATE` reports the selected, newest and other PIDs plus whether the newest or none of the sockets answered, so an uncertain probe never tells the operator to exit the new process.
