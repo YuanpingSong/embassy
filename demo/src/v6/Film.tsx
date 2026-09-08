@@ -34,7 +34,7 @@ function SendReply({f, reverse}: {f: number; reverse: boolean}) {
   return <>
     <DispatchCard x={reverse ? 360 : 120} y={320} width={reverse ? 1200 : 1680} height={166} product={reverse ? 'CODEX CLI' : 'CLAUDE CODE'} handle={reverse ? 'codex-reviewer' : 'embassy-demo'} provider={reverse ? 'codex' : 'claude'} oneLine style={enter(f, start + 6)}>
       <span>{masked(command, 0)}</span>{!reverse && f >= 170 && Math.floor(f / 15) % 2 === 0 && <span style={{background: p.paper, display: 'inline-block', width: '.6em', height: '1.05em', verticalAlign: 'middle'}}/>}
-      {reverse && <svg width={1128} height={60} style={{position: 'absolute', left: 32, top: 81, pointerEvents: 'none'}}><rect x={1} y={1} width={1126} height={58} rx={4} fill="none" stroke={p.amber} strokeWidth={2} pathLength={1} strokeDasharray={1} strokeDashoffset={1 - progress(f, 534, 542)}/></svg>}
+      {reverse && <svg width={958} height={60} style={{position: 'absolute', left: 32, top: 81, pointerEvents: 'none'}}><rect x={1} y={1} width={956} height={58} rx={12} fill="none" stroke={p.amber} strokeWidth={2} pathLength={1} strokeDasharray={1} strokeDashoffset={1 - progress(f, 534, 542)}/></svg>}
       {!reverse && <div style={{position: 'absolute', left: 40 + 18 * 19.2, top: 133, width: 14 * 19.2 * progress(f, 188, 196), height: 3, background: p.amber}}/>}
     </DispatchCard>
     <Route x1={120} x2={900} y={679} amount={reverse ? progress(f, b, end) : travel(f, a, b)} reverse={reverse} dashed={reverse}/><Route x1={1020} x2={1800} y={679} amount={reverse ? travel(f, a, b) : progress(f, b, end)} reverse={reverse} dashed={!reverse}/>
