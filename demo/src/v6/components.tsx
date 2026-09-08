@@ -23,4 +23,3 @@ export const DispatchCard = ({x, y, width, height, product, handle, provider, ch
   </header>
   <div style={{...type.mono, height: height - 56, boxSizing: 'border-box', position: 'relative', overflow: 'hidden', fontSize: oneLine ? 32 : 28, lineHeight: oneLine ? '46px' : '40px', padding: scrollBody ? 0 : bodyPadding ?? (oneLine ? '32px 40px' : '28px 40px 32px'), color: p.paper, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere'}}>{scrollBody ? children : <div style={{height: '100%', overflow: 'hidden', margin: '0 -40px', padding: '0 40px'}}>{children}</div>}</div>
 </section>;
-export const Mask = ({characters}: {characters: number}) => <span aria-label="redacted" style={{display: 'inline-block', width: `${characters}ch`, height: '.75em', borderRadius: 2, background: `repeating-linear-gradient(135deg, var(--mask-stripe, ${p.lineDark}) 0 3px, transparent 3px 7px)`}}/>;

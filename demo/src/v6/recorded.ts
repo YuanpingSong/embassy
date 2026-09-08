@@ -36,3 +36,11 @@ export const recorded = {
     '     1m ago delivered    embassy-demo@… -> codex-reviewer@…',
   ],
 } as const;
+
+// The same captured hint, wrapped to four hanging rows after hatch removal.
+export const claudeHintRows = [
+  '  <embassy-reply-hint conversation="conv_[redacted]"',
+  'reply-as="embassy-demo@…" from-provider="codex">Reply by running',
+  'embassy send --conversation conv_[redacted] with the reply body on stdin.',
+  'Caller, conversation, and route policy are rechecked.</embassy-reply-hint>',
+].join('\n');
