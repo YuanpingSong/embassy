@@ -93,9 +93,9 @@ function Receipts({f}: {f: number}) {
   return <>
     {['send', 'accepted', 'delivered'].map((name, i) => {
       const start = [1036, 1054, 1074][i];
-      return <div key={name} style={{...box(312 + i * 468, 456, 360, 96), display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 14, fontFamily: mono, fontSize: 32, fontWeight: 500, background: i === 2 ? p.amber : p.card, border: `2px solid ${p.amberInk}`, borderRadius: 6, opacity: f < start + 2 ? 0 : 1, transform: `scale(${stampScale(f, start)})`}}>{i === 2 && <Check size={30}/>} {name}</div>;
+      return <div key={name} style={{...box(312 + i * 468, 424, 360, 96), display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 14, fontFamily: mono, fontSize: 32, fontWeight: 500, background: i === 2 ? p.amber : p.card, border: `2px solid ${p.amberInk}`, borderRadius: 6, opacity: f < start + 2 ? 0 : 1, transform: `scale(${stampScale(f, start)})`}}>{i === 2 && <Check size={30}/>} {name}</div>;
     })}
-    {[696, 1164].map((x, i) => <svg key={x} width={80} height={24} style={{...box(x, 492), opacity: progress(f, 1046 + i * 18, 1052 + i * 18)}}><path d="M0 12H78M69 3L78 12L69 21" fill="none" stroke={p.dim} strokeWidth={2}/></svg>)}
+    {[696, 1164].map((x, i) => <svg key={x} width={80} height={24} style={{...box(x, 460), opacity: progress(f, 1046 + i * 18, 1052 + i * 18)}}><path d="M0 12H78M69 3L78 12L69 21" fill="none" stroke={p.dim} strokeWidth={2}/></svg>)}
     <DispatchCard x={120} y={560} width={1680} height={212} product="EMBASSY TUI" handle="deliveries" provider="tui" oneLine bodyPadding="26px 40px" style={enter(f, 1090)}>
       {recorded.ledger.map((line, i) => <div key={i} style={{opacity: progress(f, i ? 1104 : 1112, i ? 1112 : 1120), color: p.paper, ...(i === 0 ? {background: p.lineDark, margin: '0 -40px', padding: '0 40px', '--mask-stripe': '#4A434A'} : {})} as CSSProperties}>{line.split(/(delivered|^>|\d+[sm] ago)/).map((part, n) => <span key={n} style={{color: part === '>' ? p.amber : /ago$/.test(part) && i ? p.dimDark : part === 'delivered' && i ? p.moss : undefined, fontWeight: part === 'delivered' ? 500 : undefined}}>{ledgerNames(part)}</span>)}</div>)}
     </DispatchCard>
