@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "studio": "remotion studio src/index.ts",
-    "check": "node --test emulate.test.mjs edit.test.mjs && tsc --noEmit",
+    "check": "node --test emulate.test.mjs edit.test.mjs && node --experimental-strip-types --test v6.test.mjs && tsc --noEmit",
     "render": "remotion render src/index.ts EmbassyDemo out/embassy-demo-v4.mp4 --codec=h264 --crf=18",
     "render:poster": "remotion still src/index.ts EmbassyDemo out/poster-v4-full.png --frame=0 && ffmpeg -hide_banner -loglevel error -y -i out/poster-v4-full.png -vf scale=1280:-1 out/poster-v4.png"
   },

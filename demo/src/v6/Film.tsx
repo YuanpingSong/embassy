@@ -1,8 +1,9 @@
 import {useEffect, useState, type CSSProperties, type ReactNode} from 'react';
 import {AbsoluteFill, Easing, cancelRender, continueRender, delayRender, interpolate, interpolateColors, staticFile, useCurrentFrame} from 'remotion';
-import {DispatchCard, enter, Mask, Packet, progress, Route, travel} from './components';
+import {DispatchCard, enter, Packet, progress, Route, travel} from './components';
+import {carryPacket} from './carry';
 import {palette as p, scenes, type} from './design';
-import {recorded} from './recorded';
+import {recorded, claudeHintRows} from './recorded';
 
 const mono = type.mono.fontFamily;
 const box = (left: number, top: number, width?: number, height?: number): CSSProperties => ({position: 'absolute', left, top, width, height, boxSizing: 'border-box'});
@@ -12,7 +13,7 @@ const label = (left: number, top: number, width: number): CSSProperties => ({...
 const Node = ({y = 620, hot = false}: {y?: number; hot?: boolean}) => <><div style={{...box(900, y, 120, 120), display: 'grid', placeItems: 'center', background: p.card, border: `${hot ? 2 : 1}px solid ${hot ? p.amberInk : p.line}`, borderRadius: 12}}><Mark/></div><div style={label(850, y + (y === 480 ? 144 : 136), 220)}>EMBASSY</div></>;
 const Check = ({size = 28}: {size?: number}) => <svg width={size} height={size} viewBox="0 0 28 28"><path d="M4 15 L11 22 L24 6" fill="none" stroke={p.ink} strokeWidth={3} strokeLinecap="round" strokeLinejoin="round"/></svg>;
 const stampScale = (f: number, start: number) => interpolate(f, [start, start + 5, start + 8], [1.18, .97, 1], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'});
-const masked = (text: string, referenceWidth = 12): ReactNode => text.split(/(conv_\[redacted\]|[@-]…|<cross-session-message|^[•◦]|❯)/).map((part, i) => <span key={i} style={{color: part === '<cross-session-message' ? p.paper : /^[•◦]$/.test(part) ? p.moss : part === '❯' ? p.amber : undefined, fontWeight: part === '<cross-session-message' ? 500 : undefined}}>{part}{part === 'conv_[redacted]' ? <Mask characters={referenceWidth}/> : /[@-]…/.test(part) ? <Mask characters={4}/> : null}</span>);
+const masked = (text: string): ReactNode => text.split(/(^[•◦]|❯)/).map((part, i) => <span key={i} style={{color: /^[•◦]$/.test(part) ? p.moss : part === '❯' ? p.amber : undefined}}>{part}</span>);
 const ledgerNames = (text: string) => {
   const arrow = text.indexOf(' -> ');
   return arrow < 0 ? masked(text) : <>{masked(text.slice(0,arrow))}{text.slice(arrow)}</>;
@@ -20,7 +21,8 @@ const ledgerNames = (text: string) => {
 function Transcript({lines, f, start, emphasis = -1, answer = false}: {lines: readonly string[]; f: number; start: number; emphasis?: number; answer?: boolean}) {
   return <>{lines.map((line, i) => {
     const t = progress(f, start + i * 3, start + i * 3 + 8);
-    return <div key={i} style={{minHeight: line ? undefined : 40, whiteSpace: answer && line.includes('│') ? 'pre' : undefined, letterSpacing: answer && line.includes('│') ? '-0.35px' : undefined, opacity: t, transform: `translateY(${6 * (1 - t)}px)`, color: i === emphasis ? p.paper : answer && line.includes('│') && !line.includes('…') ? p.moss : line.includes('Working') || line.startsWith('@') || line.startsWith('• Ran') || line.startsWith('⏺') ? p.paper : p.dimDark, fontWeight: i === emphasis ? 500 : 400, ...(i === emphasis ? {background: p.band, margin: '0 -40px', padding: '0 40px'} : {})}}>{line.includes('Working') || line.includes('Creating') ? <><span style={{color: Math.floor(f / 10) % 2 ? p.dimDark : line.includes('Creating') ? p.ember : p.moss}}>{line[0]}</span>{masked(line.slice(1))}</> : masked(line)}</div>;
+    const hanging = line.includes('│') ? '4ch' : line.startsWith('  ') ? '2ch' : undefined;
+    return <div key={i} style={{minHeight: line ? undefined : 40, ...(hanging ? {paddingLeft:hanging,textIndent:`-${hanging}`} : {}), opacity: t, transform: `translateY(${6 * (1 - t)}px)`, color: i === emphasis ? p.paper : answer && line.includes('│') && !line.includes('…') ? p.moss : line.includes('Working') || line.startsWith('@') || line.startsWith('• Ran') || line.startsWith('⏺') ? p.paper : p.dimDark, fontWeight: i === emphasis ? 500 : 400, ...(i === emphasis ? {background: p.band, margin: '0 -40px', padding: '0 40px'} : {})}}>{line.includes('Working') || line.includes('Creating') ? <><span style={{color: Math.floor(f / 10) % 2 ? p.dimDark : line.includes('Creating') ? p.ember : p.moss}}>{line[0]}</span>{masked(line.slice(1))}</> : masked(line)}</div>;
   })}</>;
 }
 function Intro({f}: {f: number}) {
@@ -38,7 +40,7 @@ function SendReply({f, reverse}: {f: number; reverse: boolean}) {
   return <>
     <DispatchCard x={120} y={320} width={1680} height={reverse ? 166 : 192} product={reverse ? 'CODEX CLI' : 'CLAUDE CODE'} handle={reverse ? 'codex-reviewer' : 'embassy-demo'} provider={reverse ? 'codex' : 'claude'} oneLine={reverse} bodyPadding={reverse ? undefined : '28px 40px'} style={enter(f, start + 6)}>
       <span>{reverse ? <>{masked(command.split(" <<")[0])}<span style={{color:p.dimDark}}>{" <<'MESSAGE'"}</span></> : command}</span>{!reverse && f >= 170 && (f < 213 || Math.floor(f / 15) % 2 === 0) && <span style={{background: p.paper, display: 'inline-block', width: '.6em', height: '1.05em', verticalAlign: 'middle'}}/>}
-      {reverse && <svg width={1420} height={60} style={{position: 'absolute', left: 32, top: 25, pointerEvents: 'none'}}><rect x={1} y={1} width={1418} height={58} rx={12} fill="none" stroke={p.amber} strokeWidth={2} pathLength={1} strokeDasharray={1} strokeDashoffset={1 - progress(f, 534, 542)}/></svg>}
+      {reverse && <svg width={1190} height={60} style={{position: 'absolute', left: 32, top: 25, pointerEvents: 'none'}}><rect x={1} y={1} width={1188} height={58} rx={12} fill="none" stroke={p.amber} strokeWidth={2} pathLength={1} strokeDasharray={1} strokeDashoffset={1 - progress(f, 534, 542)}/></svg>}
       {!reverse && <div style={{position: 'absolute', left: 40 + 20 * 16.8, top: 109, width: 14 * 16.8 * progress(f, 214, 222), height: 3, background: p.amber}}/>}
     </DispatchCard>
     <Route x1={120} x2={900} y={679} amount={reverse ? progress(f, b, end) : travel(f, a, b)} reverse={reverse} dashed={reverse}/><Route x1={1020} x2={1800} y={679} amount={reverse ? travel(f, a, b) : progress(f, b, end)} reverse={reverse} dashed={!reverse}/>
@@ -46,27 +48,29 @@ function SendReply({f, reverse}: {f: number; reverse: boolean}) {
   </>;
 }
 function ClaudeScroll({f}: {f: number}) {
-  const counts = [1, 4, 5, 1, 1, 4];
-  const starts = Array.from({length:16}, (_, i) => i < 10 ? 740 + i * 3 : 770 + (i - 10) * 5);
+  const lines = [recorded.claudeExpanded[0],claudeHintRows,recorded.claudeExpanded[2],recorded.claudeExpanded[3],recorded.claudeExpanded[5]];
+  const counts = [1, 4, 5, 1, 4];
+  const starts = Array.from({length:15}, (_, i) => i < 10 ? 740 + i * 3 : 770 + (i - 10) * 5);
   const rowProgress = starts.map(start => Easing.bezier(.2,.7,.2,1)(progress(f, start, Math.min(start + 8,800))));
-  const scroll = Math.min(196, starts.slice(11).reduce((sum,start) => sum + 40 * Easing.bezier(.2,.7,.2,1)(progress(f,start,Math.min(start+12,800))),0));
+  const scroll = Math.min(156, starts.slice(11).reduce((sum,start) => sum + 40 * Easing.bezier(.2,.7,.2,1)(progress(f,start,Math.min(start+12,800))),0));
   let row = 0;
-  return <div style={{position:'absolute',left:40,right:40,top:28,transform:`translateY(${-scroll}px)`}}>{recorded.claudeExpanded.map((line,i)=>{
+  return <div style={{position:'absolute',left:40,right:40,top:28,transform:`translateY(${-scroll}px)`}}>{lines.map((line,i)=>{
     const offset=row; row+=counts[i];
     const visible=rowProgress.slice(offset,row).reduce((sum,t)=>sum+t,0)*40;
-    return <div key={i} style={{height:counts[i]*40,clipPath:`inset(0 0 ${Math.max(0,counts[i]*40-visible)}px 0)`, color:i===1 || i===4?p.dimDark:p.paper, ...(i===2?{background:p.band,margin:'0 -40px',padding:'0 40px 0 calc(40px + 2ch)',fontWeight:500}:{}), ...(i===4?{textAlign:'right',paddingRight:'6ch'}:{}), ...(i===5?{paddingLeft:'2ch',textIndent:'-2ch'}:{})} as CSSProperties}>{masked(line)}</div>;
+    return <div key={i} style={{height:counts[i]*40,clipPath:`inset(0 0 ${Math.max(0,counts[i]*40-visible)}px 0)`, color:i===1?p.dimDark:p.paper, ...(i===1?{paddingLeft:'2ch',textIndent:'-2ch'}:{}), ...(i===2?{background:p.band,margin:'0 -40px',padding:'0 40px 0 calc(40px + 2ch)',fontWeight:500}:{}), ...(i===4?{paddingLeft:'2ch',textIndent:'-2ch'}:{})} as CSSProperties}>{masked(line)}</div>;
   })}</div>;
 }
 function Receive({f, claude}: {f: number; claude: boolean}) {
   const start = claude ? 660 : 300, change = claude ? 732 : 420;
   const expanded = f >= change + 8;
-  const lines = claude ? expanded ? recorded.claudeExpanded : recorded.claudeArrival : expanded ? recorded.codexAnswer : recorded.codexArrival;
+  const arrival = [recorded.codexArrival[0], '⋯', recorded.codexArrival[2], recorded.codexArrival[4], '', recorded.codexArrival[6]];
+  const answer = recorded.codexAnswer.filter((_, i) => i !== 4 && i !== 5);
+  const lines = claude ? recorded.claudeArrival : expanded ? answer : arrival;
   return <>
     <DispatchCard x={120} y={296} width={1680} height={560} product={claude ? 'CLAUDE CODE' : 'CODEX CLI'} handle={claude ? 'embassy-demo' : 'codex-reviewer'} provider={claude ? 'claude' : 'codex'} scrollBody={claude && expanded} style={{...enter(f, start + 6), ...(f >= start + 18 ? claude ? {borderRightColor: p.amber} : {borderLeftColor: p.amber} : {})}}>
       {claude && expanded ? <ClaudeScroll f={f}/> : <div style={{opacity: !expanded ? 1 - progress(f, change, change + 8) : 1}}><Transcript lines={lines} f={f} start={expanded ? change + 8 : start + 24} emphasis={claude ? -1 : expanded ? -1 : 2} answer={!claude && expanded}/></div>}
     </DispatchCard>
-    <Packet x={claude ? 1980 - 208 * travel(f, start, start + 18) : -60 + 152 * travel(f, start, start + 18)} y={621} opacity={1 - progress(f, claude ? 806 : 496, claude ? 814 : 502)}/>
-    {claude && f >= 800 && <div style={{...box(806, 912, 398, 84), display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 18, background: p.amber, border: `2px solid ${p.amberInk}`, borderRadius: 6, fontSize: 40, fontWeight: 500, opacity: f < 802 ? 0 : 1, transform: `rotate(-2deg) scale(${stampScale(f, 800)})`}}><Check size={36}/>Reply received.</div>}
+    {claude && f >= 780 && <div style={{...box(806, 912, 398, 84), display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 18, background: p.amber, border: `2px solid ${p.amberInk}`, borderRadius: 6, fontSize: 40, fontWeight: 500, opacity: f < 782 ? 0 : 1, transform: `rotate(-2deg) scale(${stampScale(f, 780)})`}}><Check size={36}/>Reply received.</div>}
   </>;
 }
 function SSH({f}: {f: number}) {
@@ -89,9 +93,9 @@ function Receipts({f}: {f: number}) {
   return <>
     {['send', 'accepted', 'delivered'].map((name, i) => {
       const start = [1036, 1054, 1074][i];
-      return <div key={name} style={{...box(312 + i * 468, 336, 360, 96), display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 14, fontFamily: mono, fontSize: 32, fontWeight: 500, background: i === 2 ? p.amber : p.card, border: `2px solid ${p.amberInk}`, borderRadius: 6, opacity: f < start + 2 ? 0 : 1, transform: `scale(${stampScale(f, start)})`}}>{i === 2 && <Check size={30}/>} {name}</div>;
+      return <div key={name} style={{...box(312 + i * 468, 456, 360, 96), display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 14, fontFamily: mono, fontSize: 32, fontWeight: 500, background: i === 2 ? p.amber : p.card, border: `2px solid ${p.amberInk}`, borderRadius: 6, opacity: f < start + 2 ? 0 : 1, transform: `scale(${stampScale(f, start)})`}}>{i === 2 && <Check size={30}/>} {name}</div>;
     })}
-    {[696, 1164].map((x, i) => <svg key={x} width={80} height={24} style={{...box(x, 372), opacity: progress(f, 1046 + i * 18, 1052 + i * 18)}}><path d="M0 12H78M69 3L78 12L69 21" fill="none" stroke={p.dim} strokeWidth={2}/></svg>)}
+    {[696, 1164].map((x, i) => <svg key={x} width={80} height={24} style={{...box(x, 492), opacity: progress(f, 1046 + i * 18, 1052 + i * 18)}}><path d="M0 12H78M69 3L78 12L69 21" fill="none" stroke={p.dim} strokeWidth={2}/></svg>)}
     <DispatchCard x={120} y={560} width={1680} height={212} product="EMBASSY TUI" handle="deliveries" provider="tui" oneLine bodyPadding="26px 40px" style={enter(f, 1090)}>
       {recorded.ledger.map((line, i) => <div key={i} style={{opacity: progress(f, i ? 1104 : 1112, i ? 1112 : 1120), color: p.paper, ...(i === 0 ? {background: p.lineDark, margin: '0 -40px', padding: '0 40px', '--mask-stripe': '#4A434A'} : {})} as CSSProperties}>{line.split(/(delivered|^>|\d+[sm] ago)/).map((part, n) => <span key={n} style={{color: part === '>' ? p.amber : /ago$/.test(part) && i ? p.dimDark : part === 'delivered' && i ? p.moss : undefined, fontWeight: part === 'delivered' ? 500 : undefined}}>{ledgerNames(part)}</span>)}</div>)}
     </DispatchCard>
@@ -112,18 +116,14 @@ export function Film() {
   const leave = index === 6 ? 1 : 1 - progress(f, scene.end - 8, scene.end);
   const captionStart = [0, 222, 360, 548, 800, 876, 1136][index];
   const caption = index === 5 && f >= 966 ? 'A receipt comes back.' : scene.caption;
+  const packet = carryPacket(f, Easing.bezier(.45,0,.2,1));
   return <AbsoluteFill style={{background: p.ground, color: p.ink, fontFamily: 'IBM Plex Sans'}}>
-    <svg width={1920} height={1080} style={{position: 'absolute', inset: 0, opacity: .02, mixBlendMode: 'multiply', pointerEvents: 'none'}}><defs><filter id="paper-grain"><feTurbulence type="fractalNoise" baseFrequency=".75" numOctaves={3} seed={6}/><feColorMatrix type="saturate" values="0"/></filter></defs><rect width="100%" height="100%" filter="url(#paper-grain)"/></svg>
     <div style={{opacity: leave}}>
       <div style={index === 0 ? undefined : enter(f, scene.start)}><div style={{...box(120, 92), display: 'flex', alignItems: 'baseline', gap: 24, fontFamily: mono, fontSize: 24, lineHeight: '32px', letterSpacing: '.14em', fontWeight: 500, color: p.muted}}><span style={{color: p.amberInk, letterSpacing: '.06em'}}>{String(index + 1).padStart(2, '0')}</span>{scene.eyebrow}</div><div style={{...box(116, 140), ...type.headline, whiteSpace: 'nowrap', fontOpticalSizing: 'auto'}}>{scene.headline}</div></div>
       {index === 0 ? <Intro f={f}/> : index === 1 || index === 3 ? <SendReply f={f} reverse={index === 3}/> : index === 2 || index === 4 ? <Receive f={f} claude={index === 4}/> : index === 5 ? <SSH f={f}/> : <Receipts f={f}/>}
       {index !== 4 && <div style={{...box(260, 920, 1400), ...type.caption, textAlign: 'center', color: p.muted, opacity: index === 0 ? 1 : progress(f, captionStart, captionStart + 8)}}>{caption}</div>}
     </div>
-    {(index === 1 || index === 3) && (() => {
-      const reverse = index === 3, a = reverse ? 560 : 230, b = reverse ? 612 : 266, end = reverse ? 659 : 299;
-      const x = reverse ? f < b ? 1808 - 780 * travel(f, a, b) : 1028 - 1088 * progress(f, b, end) : f < b ? 92 + 780 * travel(f, a, b) : 872 + 1048 * progress(f, b, end);
-      return f >= a - 4 ? <Packet x={x} y={660} opacity={progress(f, a - 4, a)}/> : null;
-    })()}
+    {packet && <Packet {...packet}/>}
     <div style={{position: 'absolute', right: 120, top: 72, display: 'flex', gap: 12, alignItems: 'center', fontSize: 26, fontWeight: 500}}><Mark size={40}/>Embassy</div>
   </AbsoluteFill>;
 }
