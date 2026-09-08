@@ -1,0 +1,113 @@
+import {useEffect, useState, type CSSProperties, type ReactNode} from 'react';
+import {AbsoluteFill, cancelRender, continueRender, delayRender, interpolate, interpolateColors, staticFile, useCurrentFrame} from 'remotion';
+import {DispatchCard, enter, Mask, Packet, progress, Route, travel} from './components';
+import {palette as p, scenes, type} from './design';
+import {recorded} from './recorded';
+
+const mono = type.mono.fontFamily;
+const box = (left: number, top: number, width?: number, height?: number): CSSProperties => ({position: 'absolute', left, top, width, height, boxSizing: 'border-box'});
+const Mark = ({size = 64}: {size?: number}) => <svg width={size} height={size} viewBox="0 0 64 64" fill="none"><path d="M32 16 V5 L41 7.5 L32 10" fill={p.amber} stroke={p.amber} strokeWidth={1.5} strokeLinejoin="round"/><path d="M21.5 55 V32 C21.5 23 42.5 23 42.5 32 V55 Z" fill={p.amber}/><path d="M14 55 V30.5 C14 17 50 17 50 30.5 V55" stroke={p.ink} strokeWidth={3.4} strokeLinecap="round"/><path d="M10 55.5 H54" stroke={p.ink} strokeWidth={3} strokeLinecap="round"/></svg>;
+const pulse = (f: number, start: number) => interpolateColors(progress(f, start, start + 12), [0, .5, 1], [p.line, p.amberInk, p.line]);
+const label = (left: number, top: number, width: number): CSSProperties => ({...box(left, top, width), textAlign: 'center', fontFamily: mono, fontSize: 22, letterSpacing: '.08em', color: p.muted});
+const Node = ({y = 620, hot = false}: {y?: number; hot?: boolean}) => <><div style={{...box(900, y, 120, 120), display: 'grid', placeItems: 'center', background: p.card, border: `${hot ? 2 : 1}px solid ${hot ? p.amberInk : p.line}`, borderRadius: 12}}><Mark/></div><div style={label(850, y + (y === 480 ? 144 : 136), 220)}>EMBASSY</div></>;
+const Check = ({size = 28}: {size?: number}) => <svg width={size} height={size} viewBox="0 0 28 28"><path d="M4 15 L11 22 L24 6" fill="none" stroke={p.ink} strokeWidth={3} strokeLinecap="round" strokeLinejoin="round"/></svg>;
+const stampScale = (f: number, start: number) => interpolate(f, [start, start + 5, start + 8], [1.18, .97, 1], {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'});
+const masked = (text: string, referenceWidth = 12): ReactNode => text.split(/(conv_\[redacted\]|[@-]…|<cross-session-message|^[•◦]|❯)/).map((part, i) => <span key={i} style={{color: part === '<cross-session-message' ? p.paper : /^[•◦]$/.test(part) ? p.moss : part === '❯' ? p.amber : undefined, fontWeight: part === '<cross-session-message' ? 500 : undefined}}>{part}{part === 'conv_[redacted]' ? <Mask characters={referenceWidth}/> : /[@-]…/.test(part) ? <Mask characters={4}/> : null}</span>);
+function Transcript({lines, f, start, emphasis = -1, answer = false}: {lines: readonly string[]; f: number; start: number; emphasis?: number; answer?: boolean}) {
+  return <>{lines.map((line, i) => {
+    const t = progress(f, start + i * 3, start + i * 3 + 8);
+    return <div key={i} style={{minHeight: line ? undefined : 40, opacity: t, transform: `translateY(${6 * (1 - t)}px)`, color: i === emphasis ? p.paper : answer && line.includes('│') ? p.moss : line.includes('Working') || line.startsWith('@') || line.startsWith('• Ran') || line.startsWith('⏺') ? p.paper : p.dimDark, fontWeight: i === emphasis ? 500 : 400, ...(i === emphasis ? {background: p.band, margin: '0 -40px', padding: '0 40px'} : {})}}>{line.includes('Working') || line.includes('Creating') ? <><span style={{color: Math.floor(f / 10) % 2 ? p.dimDark : line.includes('Creating') ? p.ember : p.moss}}>{line[0]}</span>{masked(line.slice(1))}</> : masked(line)}</div>;
+  })}</>;
+}
+function Intro({f}: {f: number}) {
+  const t = travel(f, 46, 100);
+  return <><Route x1={760} x2={1160} y={539} amount={t}/>{[false, true].map((right) => <div key={String(right)} style={{...box(right ? 1160 : 120, 420, 640, 240), background: p.card, border: `${right && f >= 100 || !right && f >= 30 && f < 42 ? 2 : 1}px solid ${right && f >= 100 ? p.amberInk : !right ? pulse(f, 30) : p.line}`, borderRadius: 8, padding: '36px 40px'}}>
+    <div style={{fontFamily: mono, fontSize: 20, letterSpacing: '.14em', color: p.dim}}>AGENT</div>
+    <div style={{display: 'flex', gap: 18, alignItems: 'center', fontSize: 48, lineHeight: '56px', fontWeight: 600, marginTop: 20}}><span style={{width: 14, height: 14, borderRadius: '50%', background: right ? p.ink : p.emberInk}}/>{right ? 'Codex CLI' : 'Claude Code'}</div>
+    <div style={{fontFamily: mono, fontSize: 30, color: p.muted, marginTop: 12}}>{right ? 'codex-reviewer' : 'embassy-demo'}</div>
+  </div>)}<Node y={480} hot={f >= 70}/>{f >= 42 && <Packet x={732 + 372 * t} y={520} opacity={progress(f, 42, 46) * (1 - progress(f, 140, 146))}/>}</>;
+}
+function SendReply({f, reverse}: {f: number; reverse: boolean}) {
+  const start = reverse ? 510 : 150;
+  const a = reverse ? 560 : 214, b = reverse ? 612 : 262, end = reverse ? 659 : 299;
+  const command = reverse ? recorded.replyCommand : recorded.send.slice(0, Math.max(0, (f - 170) * 2));
+  return <>
+    <DispatchCard x={reverse ? 360 : 120} y={320} width={reverse ? 1200 : 1680} height={166} product={reverse ? 'CODEX CLI' : 'CLAUDE CODE'} handle={reverse ? 'codex-reviewer' : 'embassy-demo'} provider={reverse ? 'codex' : 'claude'} oneLine style={enter(f, start + 6)}>
+      <span>{masked(command, 0)}</span>{!reverse && f >= 170 && Math.floor(f / 15) % 2 === 0 && <span style={{background: p.paper, display: 'inline-block', width: '.6em', height: '1.05em', verticalAlign: 'middle'}}/>}
+      {reverse && <svg width={1128} height={60} style={{position: 'absolute', left: 32, top: 81, pointerEvents: 'none'}}><rect x={1} y={1} width={1126} height={58} rx={4} fill="none" stroke={p.amber} strokeWidth={2} pathLength={1} strokeDasharray={1} strokeDashoffset={1 - progress(f, 534, 542)}/></svg>}
+      {!reverse && <div style={{position: 'absolute', left: 40 + 18 * 19.2, top: 133, width: 14 * 19.2 * progress(f, 188, 196), height: 3, background: p.amber}}/>}
+    </DispatchCard>
+    <Route x1={120} x2={900} y={679} amount={reverse ? progress(f, b, end) : travel(f, a, b)} reverse={reverse} dashed={reverse}/><Route x1={1020} x2={1800} y={679} amount={reverse ? travel(f, a, b) : progress(f, b, end)} reverse={reverse} dashed={!reverse}/>
+    <Node hot={f >= b - 12}/><div style={{...label(120, 756, 300), textAlign: 'left', fontFamily: 'IBM Plex Sans', fontSize: 30, fontWeight: 500, letterSpacing: 0}}>Claude Code</div><div style={{...label(1500, 756, 300), textAlign: 'right', fontFamily: 'IBM Plex Sans', fontSize: 30, fontWeight: 500, letterSpacing: 0}}>Codex CLI</div>
+  </>;
+}
+function Receive({f, claude}: {f: number; claude: boolean}) {
+  const start = claude ? 660 : 300, change = claude ? 740 : 420;
+  const expanded = f >= change + 8;
+  const lines = claude ? expanded ? recorded.claudeExpanded : recorded.claudeArrival : expanded ? recorded.codexAnswer : recorded.codexArrival;
+  return <>
+    <DispatchCard x={120} y={296} width={1680} height={560} product={claude ? 'CLAUDE CODE' : 'CODEX CLI'} handle={claude ? 'embassy-demo' : 'codex-reviewer'} provider={claude ? 'claude' : 'codex'} style={{...enter(f, start + 6), ...(f >= start + 18 ? claude ? {borderRightColor: p.amber} : {borderLeftColor: p.amber} : {})}}>
+      <div style={{opacity: !expanded ? 1 - progress(f, change, change + 8) : 1, transform: claude && expanded ? `translateY(${-200 * travel(f, 784, 806)}px)` : undefined}}><Transcript lines={lines} f={f} start={expanded ? change + 8 : start + 24} emphasis={claude ? expanded ? 2 : -1 : expanded ? -1 : 2} answer={!claude && expanded}/></div>
+    </DispatchCard>
+    <Packet x={claude ? 1980 - 208 * travel(f, start, start + 18) : -60 + 152 * travel(f, start, start + 18)} y={621} opacity={1 - progress(f, claude ? 790 : 496, claude ? 798 : 502)}/>
+    {claude && f >= 776 && <div style={{...box(806, 912, 398, 84), display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 18, background: p.amber, border: `2px solid ${p.amberInk}`, borderRadius: 6, fontSize: 40, fontWeight: 500, opacity: f < 778 ? 0 : 1, transform: `rotate(-2deg) scale(${stampScale(f, 776)})`}}><Check size={36}/>Reply received.</div>}
+  </>;
+}
+function SSH({f}: {f: number}) {
+  const receipt = f >= 966;
+  return <>
+    <Route x1={760} x2={1160} y={579} dashed amount={travel(f, 888, 940)}/>
+    {[false, true].map(right => <div key={String(right)} style={{...box(right ? 1160 : 120, 340, 640, 320), ...enter(f, right ? 852 : 846), background: p.card, border: `1px solid ${pulse(f, right ? 940 : 1008)}`, borderRadius: 10, padding: '36px 40px'}}>
+      <div style={{fontSize: 40, lineHeight: '48px', fontWeight: 600}}>{right ? 'Another Mac' : 'This Mac'}</div>
+      <div style={{...box(180, 104, 280, 64), borderRadius: 32, border: `1px solid ${p.line}`, background: p.ground, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 14, fontSize: 28, fontWeight: 500}}><span style={{width: 12, height: 12, borderRadius: '50%', background: right ? p.ink : p.emberInk}}/>{right ? 'Codex agent' : 'Claude agent'}</div>
+      <div style={{...box(319, 168, 2, 40), background: p.line}}/>
+      <div style={{...box(232, 216), display: 'flex', gap: 12, alignItems: 'center', fontFamily: mono, fontSize: 22, letterSpacing: '.08em', color: p.muted}}><Mark size={40}/>EMBASSY</div>
+      <div style={{...box(64, 324, 512, 8), background: p.line, borderRadius: '0 0 6px 6px'}}/>
+    </div>)}
+    <div style={{...label(860, 510, 200), letterSpacing: '.2em', opacity: progress(f, 866, 874)}}>SSH</div>
+    <div style={{...box(1500, 700, 300), textAlign: 'right', fontFamily: mono, fontSize: 18, letterSpacing: '.12em', color: p.dim, opacity: progress(f, 870, 878)}}>ILLUSTRATION</div>
+    {f >= 884 && <Packet x={receipt ? 1104 - 400 * travel(f, 972, 1008) : 704 + 456 * travel(f, 888, 940)} y={560} receipt={receipt} opacity={receipt ? progress(f, 966, 970) : progress(f, 884, 888) * (1 - progress(f, 952, 960))}/>}
+  </>;
+}
+function Receipts({f}: {f: number}) {
+  return <>
+    {['send', 'accepted', 'delivered'].map((name, i) => {
+      const start = [1036, 1054, 1074][i];
+      return <div key={name} style={{...box(312 + i * 468, 336, 360, 96), display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 14, fontFamily: mono, fontSize: 32, fontWeight: 500, background: i === 2 ? p.amber : p.card, border: `2px solid ${p.amberInk}`, borderRadius: 6, opacity: f < start + 2 ? 0 : 1, transform: `scale(${stampScale(f, start)})`}}>{i === 2 && <Check size={30}/>} {name}</div>;
+    })}
+    {[696, 1164].map((x, i) => <svg key={x} width={80} height={24} style={{...box(x, 372), opacity: progress(f, 1046 + i * 18, 1052 + i * 18)}}><path d="M0 12H78M69 3L78 12L69 21" fill="none" stroke={p.dim} strokeWidth={2}/></svg>)}
+    <DispatchCard x={120} y={560} width={1680} height={212} product="EMBASSY TUI" handle="deliveries" provider="tui" oneLine style={enter(f, 1090)}>
+      {recorded.ledger.map((line, i) => <div key={i} style={{opacity: progress(f, i ? 1104 : 1112, i ? 1112 : 1120), color: p.paper, ...(i === 0 ? {background: p.lineDark, margin: '0 -40px', padding: '0 40px', '--mask-stripe': '#4A434A'} : {})} as CSSProperties}>{line.split(/(delivered|^>|\d+[sm] ago)/).map((part, n) => <span key={n} style={{color: part === '>' ? p.amber : /ago$/.test(part) ? p.dimDark : part === 'delivered' && i ? p.moss : undefined, fontWeight: part === 'delivered' ? 500 : undefined}}>{masked(part)}</span>)}</div>)}
+    </DispatchCard>
+  </>;
+}
+export function Film() {
+  const f = useCurrentFrame();
+  const [handle] = useState(() => delayRender('Load bundled design fonts'));
+  useEffect(() => {Promise.all([
+    new FontFace('Newsreader', `url(${staticFile('fonts/Newsreader.ttf')})`, {weight: '200 800'}),
+    new FontFace('IBM Plex Sans', `url(${staticFile('fonts/IBMPlexSans.ttf')})`, {weight: '100 700'}),
+    new FontFace('IBM Plex Mono', `url(${staticFile('fonts/IBMPlexMono-Regular.ttf')})`, {weight: '400'}),
+    new FontFace('IBM Plex Mono', `url(${staticFile('fonts/IBMPlexMono-Medium.ttf')})`, {weight: '500'}),
+    new FontFace('IBM Plex Mono', `url(${staticFile('fonts/IBMPlexMono-SemiBold.ttf')})`, {weight: '600'}),
+  ].map(async font => {await font.load(); document.fonts.add(font);})).then(() => continueRender(handle)).catch(cancelRender);}, [handle]);
+  const index = scenes.findIndex(scene => f >= scene.start && f < scene.end);
+  const scene = scenes[index];
+  const leave = index === 6 ? 1 : 1 - progress(f, scene.end - 8, scene.end);
+  const captionStart = [0, 196, 360, 548, 776, 876, 1136][index];
+  const caption = index === 5 && f >= 966 ? 'A receipt comes back.' : scene.caption;
+  return <AbsoluteFill style={{background: p.ground, color: p.ink, fontFamily: 'IBM Plex Sans'}}>
+    <svg width={1920} height={1080} style={{position: 'absolute', inset: 0, opacity: .02, mixBlendMode: 'multiply', pointerEvents: 'none'}}><defs><filter id="paper-grain"><feTurbulence type="fractalNoise" baseFrequency=".75" numOctaves={3} seed={6}/><feColorMatrix type="saturate" values="0"/></filter></defs><rect width="100%" height="100%" filter="url(#paper-grain)"/></svg>
+    <div style={{opacity: leave}}>
+      <div style={index === 0 ? undefined : enter(f, scene.start)}><div style={{...box(120, 92), display: 'flex', alignItems: 'baseline', gap: 24, fontFamily: mono, fontSize: 24, lineHeight: '32px', letterSpacing: '.14em', fontWeight: 500, color: p.muted}}><span style={{color: p.amberInk, letterSpacing: '.06em'}}>{String(index + 1).padStart(2, '0')}</span>{scene.eyebrow}</div><div style={{...box(116, 140), ...type.headline, whiteSpace: 'nowrap', fontOpticalSizing: 'auto'}}>{scene.headline}</div></div>
+      {index === 0 ? <Intro f={f}/> : index === 1 || index === 3 ? <SendReply f={f} reverse={index === 3}/> : index === 2 || index === 4 ? <Receive f={f} claude={index === 4}/> : index === 5 ? <SSH f={f}/> : <Receipts f={f}/>}
+      {index !== 4 && <div style={{...box(260, 920, 1400), ...type.caption, textAlign: 'center', color: p.muted, opacity: index === 0 ? 1 : progress(f, captionStart, captionStart + 8)}}>{caption}</div>}
+    </div>
+    {(index === 1 || index === 3) && (() => {
+      const reverse = index === 3, a = reverse ? 560 : 214, b = reverse ? 612 : 262, end = reverse ? 659 : 299;
+      const x = reverse ? f < b ? 1808 - 780 * travel(f, a, b) : 1028 - 1088 * progress(f, b, end) : f < b ? 92 + 780 * travel(f, a, b) : 872 + 1048 * progress(f, b, end);
+      return f >= a - 4 ? <Packet x={x} y={660} opacity={progress(f, a - 4, a)}/> : null;
+    })()}
+    <div style={{position: 'absolute', right: 120, top: 72, display: 'flex', gap: 12, alignItems: 'center', fontSize: 26, fontWeight: 500}}><Mark size={40}/>Embassy</div>
+  </AbsoluteFill>;
+}
