@@ -55,12 +55,13 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 test("Claude destination re-discovers exact identity and performs only after authorization", async () => {
   const events: string[] = [];
   let optionsSeen: unknown;
+  const selection = { targetId: claude.handle, alias: "advisor", kind: "interactive" as const,
+    status: "idle" as const, compatibility: "compatible" as const };
   const destination = new ClaudeDestination({
     host: "m5dev",
     stateRoot: "/private/test-state",
     peer: {
-      discover: async () => ({ peers: [{ targetId: claude.handle, alias: "advisor", kind: "interactive",
-        status: "idle", compatibility: "compatible" }], rejected: {}, truncated: false,
+      discover: async () => ({ peers: [selection], rejected: {}, truncated: false,
       entriesScanned: 1, parseableRecords: 1 }),
       assertTargetWorkspaceDisjoint: async (target, root) => {
         assert.deepEqual([target, root], [claude.handle, "/private/test-state"]);
@@ -97,7 +98,8 @@ test("Claude destination re-discovers exact identity and performs only after aut
   }));
   assert.deepEqual(result, { outcome: "delivered", code: "DELIVERED" });
   assert.deepEqual(events, ["workspace", "prepare", "reattest", "authorize", "write"]);
-  assert.deepEqual(Object.keys(optionsSeen as object), ["deadlineAt"]);
+  assert.deepEqual(Object.keys(optionsSeen as object), ["deadlineAt", "selection"]);
+  assert.equal((optionsSeen as { selection: unknown }).selection, selection);
 });
 
 test("Claude destination wakes a real test-owned native socket without reply artifacts", async (t) => {

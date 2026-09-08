@@ -335,7 +335,7 @@ test("duplicate live sessions select the newest process, probe without writing a
   const result = await current.adapter.discover();
   assert.equal(result.peers.length, 1);
   assert.equal(result.peers[0]?.alias, "first-record");
-  assert.deepEqual(result.peers[0]?.duplicate, { selectedPid: 41_103, stalePids: [41_104] });
+  assert.deepEqual(result.peers[0]?.duplicate, { selectedPid: 41_103, newestPid: 41_103, otherPids: [41_104], reason: "stale_older" });
   assert.deepEqual(result.rejected, { CLAUDE_SESSION_DUPLICATE: 1 });
   for (const address of [first.socketPath, second.socketPath])
     assert.deepEqual(await current.adapter.resolveReplyAddress(`uds:${address}`), result.peers[0]);
@@ -366,7 +366,7 @@ test("duplicate selection skips a non-listening socket and bounds a hanging prob
   const keepAlive = setInterval(() => {}, 1000);
   try {
     const found = await current.adapter.discover();
-    assert.deepEqual(found.peers[0]?.duplicate, { selectedPid: 41_103, stalePids: [41_104] });
+    assert.deepEqual(found.peers[0]?.duplicate, { selectedPid: 41_103, newestPid: 41_104, otherPids: [41_104], reason: "unreachable_newest" });
     assert.equal(sockets.length, 2);
   } finally { clearInterval(keepAlive); }
 });
@@ -385,6 +385,62 @@ test("a new duplicate after preparation invalidates the old selection before aut
   assert.deepEqual(writes, []);
 });
 
+test("duplicate probes share one deadline and a sixteen-socket concurrency bound across groups", async (t) => {
+  let active = 0, maximum = 0, probes = 0, ready!: () => void;
+  const batchReady = new Promise<void>((resolve) => { ready = resolve; });
+  const current = await fixture(t, { connectTimeoutMs: 10, connect: () => {
+    const socket = new EventEmitter() as net.Socket;
+    probes++; active++; maximum = Math.max(maximum, active);
+    socket.destroy = () => { active--; socket.emit("close"); return socket; };
+    socket.write = () => assert.fail("probe wrote a message");
+    if (probes === 16) ready();
+    return socket;
+  } });
+  for (let index = 0; index < 20; index++) {
+    const sessionId = `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`;
+    await addPeer(current, { pid: 42_000 + index * 2, sessionId });
+    await addPeer(current, { pid: 42_001 + index * 2, sessionId });
+  }
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  const discovery = current.adapter.discover();
+  await batchReady;
+  assert.equal(active, 16);
+  t.mock.timers.tick(10);
+  const found = await discovery;
+  assert.equal(maximum, 16);
+  assert.equal(probes, 16); // remaining groups do not buy another deadline
+  assert.equal(active, 0);
+  assert.equal(found.peers.length, 20);
+  assert.ok(found.peers.every((peer) => peer.duplicate?.reason === "all_unreachable"));
+  assert.equal(found.rejected.PID_NOT_LIVE, undefined);
+});
+
+test("native delivery reuses its selection and never probes a socket held by the write", async (t) => {
+  let connects = 0;
+  const current = await fixture(t, { connect: (socketPath) => {
+    connects++; return net.createConnection({ path: socketPath });
+  } });
+  await addPeer(current, { pid: 41_103, name: "advisor", startedAt: 100 });
+  let received!: () => void;
+  const arrival = new Promise<void>((resolve) => { received = resolve; });
+  await addPeer(current, { pid: 41_104, name: "advisor", startedAt: 200,
+    handler: (socket) => socket.on("data", () => received()) });
+  for (let index = 0; index < 10; index++) await addPeer(current, { pid: 45_000 + index,
+    sessionId: `00000000-0000-4000-9000-${String(index + 1).padStart(12, "0")}` });
+  let inspections = 0;
+  const get = current.processes.get.bind(current.processes);
+  current.processes.get = (pid) => { inspections++; return get(pid); };
+  const destination = new ClaudeDestination({ host: "local", stateRoot: current.stateDir, peer: current.adapter });
+  const result = await destination.deliver({ attempt: "attempt", target: {
+    id: "reg_advisor", host: "local", provider: "claude", handle: SESSION_ONE, alias: "advisor@local",
+  }, text: "real bounded fixture write", deadline: Date.now() + 10_000, steer: false, messages: [],
+    authorize: async () => true, accepted: async () => assert.fail("Claude does not emit an accepted callback") });
+  await arrival;
+  assert.deepEqual(result, { outcome: "delivered", code: "DELIVERED" });
+  assert.equal(inspections, 16); // 12 in discovery, 2 in this group, 2 exact checks
+  assert.equal(connects, 4); // 2 discovery probes, 1 other-process probe, 1 write
+});
+
 test("a newer daemon cannot hide an interactive duplicate or gain its caller eligibility", async (t) => {
   const current = await fixture(t);
   await addPeer(current, { pid: 41_103, name: "advisor", startedAt: 100 });
@@ -393,24 +449,76 @@ test("a newer daemon cannot hide an interactive duplicate or gain its caller eli
   await assert.rejects(current.adapter.resolveReplyAddress(`uds:${daemon.socketPath}`), { code: "CLAUDE_REPLY_ROUTE_MISMATCH" });
 });
 
-test("an incomplete scan cannot authorize a write whose newer process may be outside the bound", async (t) => {
-  const current = await fixture(t, { maxRegistryEntries: 1 });
-  await addPeer(current, { pid: 41_103 });
+test("300 unrelated stale registry files do not gate an exact prepared write or run unrelated ps checks", async (t) => {
+  const current = await fixture(t);
+  let received!: () => void;
+  const arrival = new Promise<void>((resolve) => { received = resolve; });
+  const live = await addPeer(current, { pid: 41_103, handler: (socket) => socket.on("data", () => received()) });
   await current.adapter.discover();
   await current.adapter.assertTargetWorkspaceDisjoint(SESSION_ONE, current.stateDir);
   const prepared = await current.adapter.prepareSend(SESSION_ONE, "bounded", { deadlineAt: Date.now() + 10_000 });
-  await addPeer(current, { pid: 41_104, startedAt: 1_786_148_833_000 });
-  await assert.rejects(prepared.perform(async () => assert.fail("incomplete selection authorized")), { code: "CLAUDE_PEER_TARGET_CHANGED" });
+  const template = JSON.parse(await readFile(live.registryPath, "utf8"));
+  for (let index = 0; index < 300; index++) await writeFile(path.join(current.sessionsDir, `${50_000 + index}.json`),
+    JSON.stringify({ ...template, pid: 50_000 + index, sessionId: SESSION_TWO }), { mode: 0o600 });
+  let inspections = 0;
+  const get = current.processes.get.bind(current.processes);
+  current.processes.get = (pid) => { inspections++; assert.equal(pid, 41_103); return get(pid); };
+  await prepared.perform(async () => true);
+  await arrival;
+  assert.equal(inspections, 3); // one group check and two exact-generation checks
+  const next = await current.adapter.prepareSend(SESSION_ONE, "newer beyond display window", { deadlineAt: Date.now() + 10_000 });
+  await addPeer(current, { pid: 60_000, startedAt: 1_786_148_833_000 });
+  current.processes.get = get;
+  await assert.rejects(next.perform(async () => assert.fail("missed newer duplicate beyond display bound")), { code: "CLAUDE_PEER_TARGET_CHANGED" });
+});
+
+test("a duplicate appearing at socket connect is checked without re-probing the held target", async (t) => {
+  let inject = false, inserted!: () => void;
+  const ready = new Promise<void>((resolve) => { inserted = resolve; });
+  let current: Fixture;
+  current = await fixture(t, { connect: (socketPath) => {
+    const socket = net.createConnection({ path: socketPath });
+    if (inject) {
+      inject = false;
+      // Delay this test transport's connect notification until the new
+      // registry record exists, not by wall-clock sleeps.
+      const emit = socket.emit.bind(socket);
+      socket.emit = ((event: string | symbol, ...args: unknown[]) => {
+        if (event === "connect") { void ready.then(() => emit(event, ...args)); return true; }
+        return emit(event, ...args);
+      }) as typeof socket.emit;
+      void addPeer(current, { pid: 41_104, startedAt: 200 }).then(inserted);
+    }
+    return socket;
+  } });
+  let bytes = 0;
+  await addPeer(current, { pid: 41_103, startedAt: 100, handler: (s) => s.on("data", (b) => { bytes += b.length; }) });
+  await current.adapter.discover();
+  await current.adapter.assertTargetWorkspaceDisjoint(SESSION_ONE, current.stateDir);
+  const prepared = await current.adapter.prepareSend(SESSION_ONE, "connect boundary", { deadlineAt: Date.now() + 10_000 });
+  inject = true;
+  await assert.rejects(prepared.perform(async () => assert.fail("old process authorized")), { code: "CLAUDE_PEER_TARGET_CHANGED" });
+  assert.equal(bytes, 0);
 });
 
 test("duplicate session warnings traverse real registry, broker and CLI; both directions deliver", async (t) => {
-  const current = await fixture(t);
-  const old = await addPeer(current, { pid: 41_103, name: "advisor", startedAt: 100,
+  let failedProbe: "none" | "newest" | "all" = "none";
+  const current = await fixture(t, { connect: (socketPath) => {
+    if (failedProbe === "all" || failedProbe === "newest" && socketPath.endsWith("41104.sock")) {
+      const socket = new net.Socket();
+      queueMicrotask(() => socket.emit("error", new Error("fixture listener unavailable")));
+      return socket;
+    }
+    return net.createConnection({ path: socketPath });
+  } });
+  const old = await addPeer(current, { pid: 41_103, name: "MyProj", startedAt: 100,
     handler: (socket) => socket.on("data", () => assert.fail("old process received message bytes")) });
   let received!: () => void;
   const arrival = new Promise<void>((resolve) => { received = resolve; });
-  await addPeer(current, { pid: 41_104, name: "advisor", startedAt: 200,
+  await addPeer(current, { pid: 41_104, name: "MyProj", startedAt: 200,
     handler: (socket) => socket.on("data", (bytes) => { assert.match(String(bytes), /hello advisor/); received(); }) });
+  await addPeer(current, { pid: 41_105, name: "Worker.1", kind: "daemon", sessionId: SESSION_THREE });
+  await addPeer(current, { pid: 41_106, name: "Worker.1", kind: "daemon", sessionId: SESSION_THREE });
   await writeFile(path.join(current.stateDir, "nodes.json"), JSON.stringify({ version: 1, host: "local", nodes: [] }), { mode: 0o600 });
   const store = new OwnedStateFile(current.stateDir, createLedgerCodec("local", ledgerDefaults));
   await store.initialize();
@@ -439,11 +547,12 @@ test("duplicate session warnings traverse real registry, broker and CLI; both di
     await cli(["register-codex", "--alias", "codex-builder@local"]);
     for (const command of [["refresh"], ["status", "--json"]]) {
       const { result, errors } = await cli(command);
-      assert.deepEqual(result.warnings, [{ code: "CLAUDE_SESSION_DUPLICATE", alias: "advisor@local", selectedPid: 41_104, stalePids: [41_103] }]);
-      assert.match(errors, /using PID 41104; stale PID\(s\) 41103.*Exit the old Claude process/);
-      assert.doesNotMatch(JSON.stringify(result), new RegExp(`${SESSION_ONE}|${current.socketDir}`));
+      assert.deepEqual(result.warnings, [{ code: "CLAUDE_SESSION_DUPLICATE", alias: "myproj@local", selectedPid: 41_104,
+        newestPid: 41_104, otherPids: [41_103], reason: "stale_older" }]);
+      assert.match(errors, /using newest PID 41104; older PID\(s\) 41103.*Exit the older Claude process/);
+      assert.doesNotMatch(JSON.stringify(result), new RegExp(`${SESSION_ONE}|${current.socketDir}|Worker|MyProj`));
     }
-    const sent = await cli(["send", "--to", "advisor@local"], false, "hello advisor");
+    const sent = await cli(["send", "--to", "myproj@local"], false, "hello advisor");
     assert.match(sent.errors, /CLAUDE_SESSION_DUPLICATE/);
     const target = (await store.snapshot()).endpoints.find((row) => row.provider === "claude")!;
     await coordinator.wake(target); await arrival;
@@ -454,6 +563,17 @@ test("duplicate session warnings traverse real registry, broker and CLI; both di
     assert.equal((await broker.delivery(reply.result.deliveryToken) as { state: string }).state, "delivered");
     assert.equal(writes.length, 1);
     assert.match(writes[0]!, /hello builder/);
+    failedProbe = "newest";
+    const fallback = await cli(["refresh"]);
+    assert.equal(fallback.result.warnings[0].reason, "unreachable_newest");
+    assert.match(fallback.errors, /newest PID 41104 was not confirmed reachable\. Check it before exiting anything/);
+    assert.doesNotMatch(fallback.errors, /Exit the older|stale PID/);
+    failedProbe = "all";
+    const unavailable = await cli(["refresh"]);
+    assert.equal(unavailable.result.warnings[0].reason, "all_unreachable");
+    assert.match(unavailable.errors, /none of the duplicate sockets for PID\(s\).*was confirmed reachable.*before exiting anything/);
+    assert.doesNotMatch(unavailable.errors, /PID_NOT_LIVE|Exit the older/);
+    failedProbe = "none";
     await unlink(old.registryPath);
     assert.equal((await cli(["refresh"])).result.warnings, undefined);
     assert.equal((await cli(["status", "--json"])).errors, "");

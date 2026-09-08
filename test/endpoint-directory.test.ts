@@ -88,11 +88,14 @@ test("caller identity comes only from an inherited Codex handle or Claude reply 
 
 test("partial Claude scans and caller observations retain duplicate diagnostics until a complete scan", async (t) => {
   const f = await fixture(t);
-  const selected = { ...peer(UUID_A, "advisor"), duplicate: { selectedPid: 123, stalePids: [122] } };
+  const selected = { ...peer(UUID_A, "advisor"), duplicate: {
+    selectedPid: 123, newestPid: 123, otherPids: [122], reason: "stale_older" as const,
+  } };
   f.claude.peers = [selected];
   await f.directory.refresh();
   const warning = f.directory.claudeWarnings();
-  assert.deepEqual(warning, [{ code: "CLAUDE_SESSION_DUPLICATE", alias: "advisor@local", selectedPid: 123, stalePids: [122] }]);
+  assert.deepEqual(warning, [{ code: "CLAUDE_SESSION_DUPLICATE", alias: "advisor@local",
+    selectedPid: 123, newestPid: 123, otherPids: [122], reason: "stale_older" }]);
   f.claude.truncated = true;
   f.claude.peers = [peer(UUID_A, "advisor")];
   await f.directory.refresh();
@@ -102,6 +105,24 @@ test("partial Claude scans and caller observations retain duplicate diagnostics 
   f.claude.truncated = false;
   await f.directory.refresh();
   assert.deepEqual(f.directory.claudeWarnings(), []);
+});
+
+test("duplicate warnings are limited to routable Claude sessions and use endpoint-safe aliases", async (t) => {
+  const f = await fixture(t);
+  f.claude.peers = [
+    { ...peer(UUID_A, "Worker.1", "daemon"), duplicate: {
+      selectedPid: 10, newestPid: 10, otherPids: [9], reason: "stale_older" as const,
+    } },
+    { ...peer(UUID_B, "MyProj"), duplicate: {
+      selectedPid: 20, newestPid: 21, otherPids: [21], reason: "unreachable_newest" as const,
+    } },
+  ];
+  const routes = await f.directory.refresh();
+  assert.deepEqual(routes.map((row) => row.alias), ["myproj@local"]);
+  assert.deepEqual(f.directory.claudeWarnings(), [{
+    code: "CLAUDE_SESSION_DUPLICATE", alias: "myproj@local", selectedPid: 20, newestPid: 21,
+    otherPids: [21], reason: "unreachable_newest",
+  }]);
 });
 
 test("fresh discovery represents duplicate Claude names, named send refuses, and each UUID remains exact", async (t) => {

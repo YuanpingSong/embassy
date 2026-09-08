@@ -108,8 +108,16 @@ reachable process (OS start time, then registry start time and PID for ties).
 Every write rechecks that choice and the prepared process/socket generation;
 a changed choice refuses before writing. Duplicate PIDs are operator diagnostics,
 not additional session identities.
-An incomplete bounded registry scan cannot prove the newest process; prepared
-writes defer until a complete scan can revalidate the choice.
+Prepared writes check the exact registry path even when the bounded discovery
+window is full; unrelated stale records do not block that check. After connection,
+a session-specific check reads up to 4096 registry entries independently of the
+256-entry default display window, attesting only matching UUIDs. It re-attests
+the held process/socket generation without probing that socket again. Duplicates
+beyond this bounded metadata check remain unobserved; truncation alone never
+turns a single-record session into a generation-change retry loop.
+Discovery shares one connect timeout across at most 16 concurrent zero-byte
+socket probes. Probe preparation consumes the ordinary delivery deadline; it
+never grants more time or authorizes replay after an uncertain write.
 
 Aliases may collide in discovered Claude state. In that case name lookup
 refuses; user-supplied exact UUID selection can identify a Claude target, but
@@ -221,9 +229,11 @@ recent retirement times, and bounded remote catalog rows and observation times.
 Codex rows may additionally contain the observed busy, waiting, idle, dormant,
 systemError or unknown state. The explicit-registration retention marker
 remains private.
-Duplicate Claude session warnings may expose the selected and stale process PIDs
-with the public alias, bounded to 128 warnings and 4096 PIDs. They disclose no
-native session UUID or socket path; partial scans retain prior warning evidence.
+Duplicate Claude session warnings may expose the selected, newest and other
+process PIDs with the normalized public alias and whether the newest or none of
+the sockets answered, bounded to 128 warnings and 4096 PIDs. Only routable
+interactive/background sessions produce these warnings. They disclose no native
+session UUID or socket path; partial scans retain prior warning evidence.
 It must never contain native IDs or handles, socket paths, message bodies,
 delivery/conversation secrets, credentials, exceptions, raw diagnostics, or
 provider histories. Human output is derived from the same validated shape.

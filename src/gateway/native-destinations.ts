@@ -1,4 +1,5 @@
 import { BridgeError } from "../errors.js";
+import { normalizeClaudeAlias } from "./claude-peer.js";
 import type { Destination, WakeInput, WakeResult } from "./coordinator.js";
 import type { Endpoint } from "./ledger.js";
 import type {
@@ -120,7 +121,7 @@ export class ClaudeDestination implements Destination {
     try {
       discovery = await this.options.peer.discover();
       const exact = discovery.peers.find((candidate) =>
-        candidate.targetId === input.target.handle && candidate.alias === name &&
+        candidate.targetId === input.target.handle && normalizeClaudeAlias(candidate.alias) === name &&
         (candidate.kind === "interactive" || candidate.kind === "bg"));
       if (exact === undefined) {
         throw new BridgeError(
@@ -135,6 +136,7 @@ export class ClaudeDestination implements Destination {
       );
       prepared = await this.options.peer.prepareSend(input.target.handle, input.text, {
         deadlineAt: input.deadline,
+        selection: exact,
       });
     } catch (error) {
       return claudePrewrite(error);

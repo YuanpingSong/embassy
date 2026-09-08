@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { BridgeError } from "../errors.js";
-import type { ClaudePeerAdapter, ClaudePeerDescriptor } from "./claude-peer.js";
+import { normalizeClaudeAlias, type ClaudePeerAdapter, type ClaudePeerDescriptor } from "./claude-peer.js";
 import type { CodexThread } from "./codex-discovery.js";
 import { Ledger, nativeKey, sameEndpoint, type Endpoint, type EndpointRef, type LedgerLimits, type LedgerState } from "./ledger.js";
 import type { OwnedStateFile } from "./owned-state.js";
@@ -24,7 +24,8 @@ export type CodexEndpointMetadata = Readonly<{
 }>;
 export type CodexReconciliation = Readonly<{ endpoints: readonly Endpoint[]; truncated: boolean }>;
 export type ClaudeSessionWarning = Readonly<{
-  code: "CLAUDE_SESSION_DUPLICATE"; alias: string; selectedPid: number; stalePids: readonly number[];
+  code: "CLAUDE_SESSION_DUPLICATE"; alias: string; selectedPid: number; newestPid: number;
+  otherPids: readonly number[]; reason: "stale_older" | "unreachable_newest" | "all_unreachable";
 }>;
 export type EndpointDirectoryOptions = Readonly<{
   host: string; limits: LedgerLimits; store: OwnedStateFile<LedgerState>;
@@ -61,14 +62,15 @@ export class EndpointDirectory {
   }
 
   #observeClaude(peer: ClaudePeerDescriptor): void {
-    if (!peer.duplicate) return; // Only a complete scan can clear prior evidence.
-    this.#claudeWarnings.delete(peer.targetId);
-    this.#claudeWarnings.set(peer.targetId, {
-      code: "CLAUDE_SESSION_DUPLICATE", alias: `${peer.alias}@${this.options.host}`, ...peer.duplicate,
+    if (!allowedClaude(peer) || !peer.duplicate) return; // Only a complete scan can clear prior evidence.
+    const handle = peer.targetId.toLowerCase();
+    this.#claudeWarnings.delete(handle);
+    this.#claudeWarnings.set(handle, {
+      code: "CLAUDE_SESSION_DUPLICATE", alias: `${normalizeClaudeAlias(peer.alias)}@${this.options.host}`, ...peer.duplicate,
     });
     // Match the public endpoint bound and the registry's maximum PID budget,
     // including warnings retained across partial scans or caller observations.
-    while (this.#claudeWarnings.size > 128 || [...this.#claudeWarnings.values()].reduce((sum, row) => sum + 1 + row.stalePids.length, 0) > 4096)
+    while (this.#claudeWarnings.size > 128 || [...this.#claudeWarnings.values()].reduce((sum, row) => sum + 1 + row.otherPids.length, 0) > 4096)
       this.#claudeWarnings.delete(this.#claudeWarnings.keys().next().value!);
   }
 
@@ -284,7 +286,7 @@ export class EndpointDirectory {
     if (!UUID.test(peer.targetId) || !allowedClaude(peer)) {
       throw new BridgeError("CLAUDE_ROUTE_MISMATCH", "The discovered Claude identity is invalid.");
     }
-    const alias = `${peer.alias}@${this.options.host}`;
+    const alias = `${normalizeClaudeAlias(peer.alias)}@${this.options.host}`;
     this.#assertAlias(alias, false);
     const handle = peer.targetId.toLowerCase();
     const existing = state.endpoints.find((row) => row.provider === "claude" && row.handle === handle);

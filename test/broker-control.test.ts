@@ -11,7 +11,8 @@ const now = "2026-09-05T12:00:00.000Z";
 const handoff = { target: endpoint, messages: [] };
 
 test("duplicate warnings are a bounded closed PID projection on status, refresh and send only", () => {
-  const warning = { code: "CLAUDE_SESSION_DUPLICATE", alias: "advisor@local", selectedPid: 12, stalePids: [11] };
+  const warning = { code: "CLAUDE_SESSION_DUPLICATE", alias: "advisor@local", selectedPid: 12,
+    newestPid: 12, otherPids: [11], reason: "stale_older" };
   const shapes = [
     ["send", { accepted: true, conversationId, deliveryToken }],
     ["refresh_discovery", { routes: [] }],
@@ -22,12 +23,17 @@ test("duplicate warnings are a bounded closed PID projection on status, refresh 
     for (const bad of [
       { ...warning, handle: uuid }, { ...warning, socketPath: "/private/socket" },
       { ...warning, hint: "raw diagnostics" }, { ...warning, selectedPid: -1 },
-      { ...warning, stalePids: [] }, { ...warning, stalePids: [12] },
-      { ...warning, stalePids: [11, 11] }, { ...warning, alias: "unsafe\ntext" },
+      { ...warning, newestPid: -1 }, { ...warning, otherPids: [] }, { ...warning, otherPids: [12] },
+      { ...warning, otherPids: [11, 11] }, { ...warning, alias: "unsafe\ntext" },
+      { ...warning, reason: "unreachable_newest" }, { ...warning, reason: "all_unreachable", selectedPid: 11 },
     ]) assert.equal(isBrokerResult(method, { ...result, warnings: [bad] }), false);
     assert.equal(isBrokerResult(method, { ...result, warnings: Array(129).fill(warning) }), false);
     assert.equal(isBrokerResult(method, { ...result, warnings: Array(128).fill({ ...warning,
-      stalePids: Array.from({ length: 32 }, (_, index) => index + 100) }) }), false);
+      otherPids: Array.from({ length: 32 }, (_, index) => index + 100) }) }), false);
+    assert.equal(isBrokerResult(method, { ...result, warnings: [{ ...warning, selectedPid: 11,
+      newestPid: 12, otherPids: [12], reason: "unreachable_newest" }] }), true);
+    assert.equal(isBrokerResult(method, { ...result, warnings: [{ ...warning,
+      reason: "all_unreachable" }] }), true);
   }
   assert.equal(isBrokerResult("peer_resolve", { ...endpoint, warnings: [warning] }), false);
 });

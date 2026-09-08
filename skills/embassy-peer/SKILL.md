@@ -68,6 +68,6 @@ embassy wait-delivery --token dlv_REPLACE_WITH_EXACT_TOKEN
 
 ## When a call is refused
 
-After restarting a Claude session, exit the old process. Never retire your own route to fix delivery: run `embassy refresh` when authorized and check for `CLAUDE_SESSION_DUPLICATE`; its hint names the selected PID and stale PIDs. A retired Claude session can reappear as a new endpoint, but old work and reply references never move to it.
+After restarting a Claude session, run `embassy refresh` when authorized and check for `CLAUDE_SESSION_DUPLICATE`. Exit older PIDs only when the hint says the newest process answered; if the newest or every duplicate socket was unreachable, check the named processes before exiting anything. Never retire your own route to repair delivery. A retired Claude session can reappear as a new endpoint, but old work and reply references never move to it.
 
 `embassy health` and `embassy check` prove the broker, not that any agent can answer. A sandboxed task needs read and write access to the broker's state directory; follow the denial guidance rather than relocating state or starting a second broker. On `CALLER_IDENTITY_CONFLICT`, strip only the unwanted identity at the call site — `env -u CLAUDE_CODE_MESSAGING_SOCKET embassy …` for a Codex call, `env -u CODEX_THREAD_ID embassy …` for a Claude call — without reading either value. `embassy --help` lists the whole public CLI; do not fall back to a command that is not listed there or to direct provider sockets; report the precise refusal.

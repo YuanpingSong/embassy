@@ -110,13 +110,20 @@ retired on their owning host. If departed sessions share a name, retire one
 exactly with `--endpoint` using its opaque public ID from `result.routes`;
 `--alias` and `--endpoint` are mutually exclusive.
 
-After restarting a Claude session (for example, to load an MCP), exit the old
-process. Never retire your own route to fix delivery: run `embassy refresh` and
-check for `CLAUDE_SESSION_DUPLICATE`. `refresh`, `status`, and successful sends
-report the selected PID and stale PIDs; Embassy uses the newest reachable process
-and revalidates it before each write. Exit the stale process, then refresh again.
+After restarting a Claude session (for example, to load an MCP), run
+`embassy refresh` and check for `CLAUDE_SESSION_DUPLICATE`. When the newest
+process answered, its warning names the older PID(s) that can be exited. If the
+newest process did not answer, check it before exiting anything; if none of the
+duplicate sockets answered, check all of the named processes. `refresh`,
+`status`, and successful sends report the selected and newest PIDs, and Embassy
+revalidates the selected process before each write. Never retire your own route
+to repair delivery.
 Retiring Claude cancels/fences the old endpoint, not the live session: rediscovery
 can give that session a new endpoint ID immediately. Old replies cannot follow it.
+
+Duplicate-session warnings require private control protocol 7. Upgrade the CLI
+and broker together; after replacing the installed CLI, restart the broker before
+retrying a control-version mismatch.
 
 ## Other Macs
 

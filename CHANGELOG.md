@@ -7,7 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Fixed
-- Claude session restarts select the newest reachable duplicate process, revalidate before each write, and report `CLAUDE_SESSION_DUPLICATE` with selected/stale PIDs in status, refresh and sends.
+- Claude session restarts select the newest reachable duplicate process and revalidate it before each write. `CLAUDE_SESSION_DUPLICATE` reports the selected, newest and other PIDs plus whether the newest or none of the sockets answered, so an uncertain probe never tells the operator to exit the new process.
 - A retired Claude session can reappear with a fresh endpoint ID immediately; old deliveries and replies remain fenced. Codex retirement is unchanged.
 
 ### Changed

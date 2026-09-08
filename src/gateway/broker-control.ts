@@ -40,10 +40,15 @@ const codexMetadata = (x: unknown): boolean => exact(x, ["state"]) &&
   ["dormant", "idle", "busy", "waiting", "systemError", "unknown"].includes(String(x.state));
 const pid = (x: unknown) => Number.isSafeInteger(x) && (x as number) > 0 && (x as number) <= 2_147_483_647;
 const warnings = (x: unknown): boolean => x === undefined || rows(x, 128, (row) =>
-  exact(row, ["code", "alias", "selectedPid", "stalePids"]) && row.code === "CLAUDE_SESSION_DUPLICATE" && alias(row.alias) &&
-  pid(row.selectedPid) && rows(row.stalePids, 4095, pid) && (row.stalePids as number[]).length > 0 &&
-  !(row.stalePids as number[]).includes(row.selectedPid as number) && new Set(row.stalePids as number[]).size === (row.stalePids as number[]).length) &&
-  (x as { stalePids: number[] }[]).reduce((sum, row) => sum + 1 + row.stalePids.length, 0) <= 4096;
+  exact(row, ["code", "alias", "selectedPid", "newestPid", "otherPids", "reason"]) &&
+  row.code === "CLAUDE_SESSION_DUPLICATE" && alias(row.alias) && pid(row.selectedPid) && pid(row.newestPid) &&
+  rows(row.otherPids, 4095, pid) && (row.otherPids as number[]).length > 0 &&
+  !(row.otherPids as number[]).includes(row.selectedPid as number) &&
+  new Set(row.otherPids as number[]).size === (row.otherPids as number[]).length &&
+  (row.reason === "stale_older" && row.selectedPid === row.newestPid ||
+    row.reason === "unreachable_newest" && row.selectedPid !== row.newestPid && (row.otherPids as number[]).includes(row.newestPid as number) ||
+    row.reason === "all_unreachable" && row.selectedPid === row.newestPid)) &&
+  (x as { otherPids: number[] }[]).reduce((sum, row) => sum + 1 + row.otherPids.length, 0) <= 4096;
 
 /** One public projection contract, used before emission and after transport. Native
  * handles and arbitrary adapter fields can never hitchhike in a valid result. */
