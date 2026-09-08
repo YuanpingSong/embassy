@@ -110,6 +110,14 @@ retired on their owning host. If departed sessions share a name, retire one
 exactly with `--endpoint` using its opaque public ID from `result.routes`;
 `--alias` and `--endpoint` are mutually exclusive.
 
+After restarting a Claude session (for example, to load an MCP), exit the old
+process. Never retire your own route to fix delivery: run `embassy refresh` and
+check for `CLAUDE_SESSION_DUPLICATE`. `refresh`, `status`, and successful sends
+report the selected PID and stale PIDs; Embassy uses the newest reachable process
+and revalidates it before each write. Exit the stale process, then refresh again.
+Retiring Claude cancels/fences the old endpoint, not the live session: rediscovery
+can give that session a new endpoint ID immediately. Old replies cannot follow it.
+
 ## Other Macs
 
 `embassy refresh` observes local Claude and Codex sessions and every configured

@@ -316,7 +316,7 @@ model interrupt.
 | Surface | Version | Compatibility policy |
 |---|---:|---|
 | Private state (`gateway-state.json`) | 7 | A valid schema-6 document is read forward with rows retained; ≤5 and unknown refuse without mutation (reset) |
-| Private control (CLI ↔ broker) | 6 | CLI and broker must come from one installation |
+| Private control (CLI ↔ broker) | 7 | CLI and broker must come from one installation |
 | Federation (`peer-stdio`) | 3 | Exact version and host handshake; no compatibility mode |
 | Consumed Claude peer protocol | 1 | Incompatible records are rejected in isolation |
 

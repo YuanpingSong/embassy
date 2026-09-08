@@ -64,7 +64,9 @@ export class MessagingBroker {
       steer: this.options.steeringEnabled !== false && source.provider === "claude" && target.provider === "codex" && body.startsWith("STEER:"),
     }));
     this.kick();
-    return { accepted: true as const, conversationId: admitted.delivery.reply, deliveryToken: admitted.delivery.token };
+    const warnings = this.options.directory.claudeWarnings([source, target]);
+    return { accepted: true as const, conversationId: admitted.delivery.reply, deliveryToken: admitted.delivery.token,
+      ...(warnings.length ? { warnings } : {}) };
   }
 
   async retire(selector: string | { endpoint: string }) {
@@ -123,16 +125,20 @@ export class MessagingBroker {
     ]);
     this.kick();
     const codex = (await this.options.store.snapshot()).endpoints.filter((row) => row.provider === "codex");
-    return { routes: this.options.directory.listed([...codex, ...endpoints.filter((row) => row.provider !== "codex")]).map(publicEndpoint) };
+    const warnings = this.options.directory.claudeWarnings();
+    return { routes: this.options.directory.listed([...codex, ...endpoints.filter((row) => row.provider !== "codex")]).map(publicEndpoint),
+      ...(warnings.length ? { warnings } : {}) };
   }
 
   async status() {
     await this.change((ledger) => ledger.expire());
     const state = await this.options.store.snapshot();
     const alias = (ref: EndpointRef) => state.endpoints.find((e) => e.id === ref.id && e.host === ref.host)?.alias;
+    const warnings = this.options.directory.claudeWarnings();
     return {
       health: this.fault ? "degraded" : "healthy", ...(this.fault ? { safeErrorCode: this.fault } : {}),
       revision: state.commit.sequence,
+      ...(warnings.length ? { warnings } : {}),
       ...(this.options.codexDiscovery ? { codex: this.options.codexDiscovery.observation() } : {}),
       ...(this.options.federation ? { federation: this.options.federation.snapshot() } : {}),
       routes: this.options.directory.listed(state.endpoints).map((e) => ({ ...publicEndpoint(e),

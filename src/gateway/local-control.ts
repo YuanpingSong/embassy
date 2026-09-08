@@ -9,7 +9,7 @@ const DEFAULT_TIMEOUT_MS = 3_000;
 const MAX_SOCKET_PATH_BYTES = 100;
 const MAX_CONNECTIONS = 32;
 const MAX_DOCUMENT_BYTES = 8 * 1024 * 1024;
-export const LOCAL_CONTROL_VERSION = 6 as const;
+export const LOCAL_CONTROL_VERSION = 7 as const;
 
 const MESSAGES: Readonly<Record<string, string>> = Object.freeze({
   UNSUPPORTED_PLATFORM: "Unix-domain gateway control sockets are unavailable.",

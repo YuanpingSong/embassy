@@ -84,7 +84,8 @@ export class Ledger {
     const owned = this.state.endpoints.find((e) => e.id === endpoint.id);
     if (owned && (!sameEndpoint(owned, endpoint) || owned.handle !== endpoint.handle)) reject("ROUTE_BINDING_MISMATCH");
     if (this.state.endpoints.some((e) => e.provider === endpoint.provider && e.handle === endpoint.handle && e.id !== endpoint.id)) reject("ROUTE_BINDING_MISMATCH");
-    if (this.state.retirements.some((r) => sameEndpoint(r.endpoint, endpoint) || r.nativeKey === nativeKey(endpoint))) reject("ROUTE_UNREGISTERED");
+    if (this.state.retirements.some((r) => sameEndpoint(r.endpoint, endpoint) ||
+      (endpoint.provider === "codex" && r.nativeKey === nativeKey(endpoint)))) reject("ROUTE_UNREGISTERED");
     if (!owned && this.state.endpoints.length >= this.limits.endpoints) reject("ROUTE_CAPACITY_EXCEEDED");
     if (owned) { owned.alias = endpoint.alias; if (endpoint.retained) owned.retained = true; }
     else this.state.endpoints.push({ ...endpoint });

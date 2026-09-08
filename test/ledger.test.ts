@@ -51,9 +51,23 @@ test("rename changes one endpoint only; queued authority and durable replies sta
   assert.deepEqual(restarted.replyTarget(d.reply, f.target), d.source);
   assert.throws(() => restarted.replyTarget(d.reply, endpoint("stranger", "claude")), /refused/);
   restarted.retire(f.source);
-  restarted.register({ ...endpoint("successor", "claude"), alias: "renamed@local" });
+  restarted.register({ ...endpoint("successor", "claude"), alias: "renamed@local", handle: f.source.handle });
   assert.throws(() => restarted.replyTarget(d.reply, f.target), { code: "ROUTE_UNREGISTERED" });
   assert.throws(() => restarted.replyTarget(d.reply, endpoint("successor", "claude")), { code: "ROUTE_BINDING_MISMATCH" });
+});
+
+test("Claude retirement fences one endpoint while Codex retirement fences its native identity", () => {
+  const f = fixture();
+  f.ledger().retire(f.source);
+  assert.throws(() => f.ledger().register(f.source), { code: "ROUTE_UNREGISTERED" });
+  const returningClaude = { ...endpoint("returning", "claude"), handle: f.source.handle };
+  assert.doesNotThrow(() => f.ledger().register(returningClaude));
+  assert.equal(f.ledger().endpoint(f.source), undefined);
+  assert.deepEqual(f.ledger().endpoint(returningClaude), returningClaude);
+
+  f.ledger().retire(f.target);
+  const returningCodex = { ...endpoint("returning-codex", "codex"), handle: f.target.handle };
+  assert.throws(() => f.ledger().register(returningCodex), { code: "ROUTE_UNREGISTERED" });
 });
 
 test("duplicate display names are unresolvable without hiding either exact identity", () => {

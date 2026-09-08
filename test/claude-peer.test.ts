@@ -16,7 +16,18 @@ import {
 } from "node:fs/promises";
 import net, { type Server } from "node:net";
 import path from "node:path";
+import { Readable, Writable } from "node:stream";
 import { test, type TestContext } from "node:test";
+import { MessagingBroker } from "../src/gateway/broker.js";
+import { handleBrokerCommand } from "../src/gateway/broker-control.js";
+import { Coordinator, type Destination } from "../src/gateway/coordinator.js";
+import { runCoreCli } from "../src/gateway/core-cli.js";
+import { EndpointDirectory } from "../src/gateway/endpoint-directory.js";
+import { bodyHash, ledgerDefaults } from "../src/gateway/ledger.js";
+import { createLedgerCodec } from "../src/gateway/ledger-codec.js";
+import { serveLocalControl } from "../src/gateway/local-control.js";
+import { ClaudeDestination } from "../src/gateway/native-destinations.js";
+import { OwnedStateFile } from "../src/gateway/owned-state.js";
 
 import { BridgeError } from "../src/errors.js";
 import {
@@ -143,6 +154,7 @@ async function addPeer(
   current: Fixture,
   input: {
     pid: number;
+    startedAt?: number;
     sessionId?: string;
     name?: string;
     kind?: string;
@@ -174,7 +186,7 @@ async function addPeer(
       pid: input.recordPid ?? input.pid,
       sessionId: input.sessionId ?? SESSION_ONE,
       cwd: input.cwd ?? current.workspace,
-      startedAt: 1_786_148_832_556,
+      startedAt: input.startedAt ?? 1_786_148_832_556,
       procStart: "Sat Aug  8 00:27:11 2026",
       ...(input.omitVersion
         ? {}
@@ -298,22 +310,154 @@ test("discovery returns stable session UUID targets and never treats names as au
   assert.ok(!JSON.stringify(result).includes("41101"));
 });
 
-test("discovery rejects duplicate live records for one session UUID", async (t) => {
+test("duplicate live sessions select the newest process, probe without writing and resolve both callers", async (t) => {
   const current = await fixture(t);
-  await addPeer(current, {
+  const writes: string[] = [];
+  let received!: () => void;
+  const messageReceived = new Promise<void>((resolve) => { received = resolve; });
+  const first = await addPeer(current, {
     pid: 41_103,
     sessionId: SESSION_ONE,
     name: "first-record",
+    startedAt: 100,
+    handler: (socket) => socket.on("data", (data) => { writes.push(`first:${data}`); received(); }),
   });
-  await addPeer(current, {
+  const second = await addPeer(current, {
     pid: 41_104,
     sessionId: SESSION_ONE,
     name: "second-record",
+    startedAt: 200,
+    handler: (socket) => socket.on("data", (data) => writes.push(`second:${data}`)),
   });
-
+  // OS process age, not PID order or the registry's timestamps, wins.
+  current.processes.set(41_103, { uid: UID, generation: "Tue Sep  8 12:00:02 2026" });
+  current.processes.set(41_104, { uid: UID, generation: "Tue Sep  8 12:00:01 2026" });
   const result = await current.adapter.discover();
-  assert.deepEqual(result.peers, []);
-  assert.deepEqual(result.rejected, { SESSION_ID_COLLISION: 1 });
+  assert.equal(result.peers.length, 1);
+  assert.equal(result.peers[0]?.alias, "first-record");
+  assert.deepEqual(result.peers[0]?.duplicate, { selectedPid: 41_103, stalePids: [41_104] });
+  assert.deepEqual(result.rejected, { CLAUDE_SESSION_DUPLICATE: 1 });
+  for (const address of [first.socketPath, second.socketPath])
+    assert.deepEqual(await current.adapter.resolveReplyAddress(`uds:${address}`), result.peers[0]);
+  assert.deepEqual(writes, []);
+  await current.adapter.assertTargetWorkspaceDisjoint(SESSION_ONE, current.stateDir);
+  const prepared = await current.adapter.prepareSend(SESSION_ONE, "selected only", { deadlineAt: Date.now() + 10_000 });
+  await prepared.perform(async () => true);
+  await messageReceived;
+  assert.equal(writes.length, 1);
+  assert.match(writes[0]!, /^first:.*selected only/);
+  await unlink(second.registryPath);
+  assert.equal((await current.adapter.discover()).peers[0]?.duplicate, undefined);
+});
+
+test("duplicate selection skips a non-listening socket and bounds a hanging probe without writing", async (t) => {
+  const sockets: EventEmitter[] = [];
+  const current = await fixture(t, { connectTimeoutMs: 10, connect: (socketPath) => {
+    const socket = new EventEmitter() as net.Socket;
+    socket.destroy = () => { socket.emit("close"); return socket; };
+    socket.write = () => { assert.fail("liveness probe wrote data"); };
+    sockets.push(socket);
+    if (socketPath.endsWith("41103.sock")) queueMicrotask(() => socket.emit("connect"));
+    return socket;
+  } });
+  await addPeer(current, { pid: 41_103, startedAt: 100 });
+  await addPeer(current, { pid: 41_104, startedAt: 200 });
+  // Keep an owned handle alive while the adapter's unref'ed deadline fires.
+  const keepAlive = setInterval(() => {}, 1000);
+  try {
+    const found = await current.adapter.discover();
+    assert.deepEqual(found.peers[0]?.duplicate, { selectedPid: 41_103, stalePids: [41_104] });
+    assert.equal(sockets.length, 2);
+  } finally { clearInterval(keepAlive); }
+});
+
+test("a new duplicate after preparation invalidates the old selection before authorization", async (t) => {
+  const current = await fixture(t);
+  const writes: string[] = [];
+  await addPeer(current, { pid: 41_103, startedAt: 100, handler: (s) => s.on("data", (b) => writes.push(String(b))) });
+  await current.adapter.discover();
+  await current.adapter.assertTargetWorkspaceDisjoint(SESSION_ONE, current.stateDir);
+  const prepared = await current.adapter.prepareSend(SESSION_ONE, "old prepared message", { deadlineAt: Date.now() + 10_000 });
+  await addPeer(current, { pid: 41_104, startedAt: 200, handler: (s) => s.on("data", (b) => writes.push(String(b))) });
+  let authorized = false;
+  await assert.rejects(prepared.perform(async () => { authorized = true; return true; }), { code: "CLAUDE_PEER_TARGET_CHANGED" });
+  assert.equal(authorized, false);
+  assert.deepEqual(writes, []);
+});
+
+test("a newer daemon cannot hide an interactive duplicate or gain its caller eligibility", async (t) => {
+  const current = await fixture(t);
+  await addPeer(current, { pid: 41_103, name: "advisor", startedAt: 100 });
+  const daemon = await addPeer(current, { pid: 41_104, name: "worker", kind: "daemon", startedAt: 200 });
+  assert.equal((await current.adapter.discover()).peers[0]?.alias, "advisor");
+  await assert.rejects(current.adapter.resolveReplyAddress(`uds:${daemon.socketPath}`), { code: "CLAUDE_REPLY_ROUTE_MISMATCH" });
+});
+
+test("an incomplete scan cannot authorize a write whose newer process may be outside the bound", async (t) => {
+  const current = await fixture(t, { maxRegistryEntries: 1 });
+  await addPeer(current, { pid: 41_103 });
+  await current.adapter.discover();
+  await current.adapter.assertTargetWorkspaceDisjoint(SESSION_ONE, current.stateDir);
+  const prepared = await current.adapter.prepareSend(SESSION_ONE, "bounded", { deadlineAt: Date.now() + 10_000 });
+  await addPeer(current, { pid: 41_104, startedAt: 1_786_148_833_000 });
+  await assert.rejects(prepared.perform(async () => assert.fail("incomplete selection authorized")), { code: "CLAUDE_PEER_TARGET_CHANGED" });
+});
+
+test("duplicate session warnings traverse real registry, broker and CLI; both directions deliver", async (t) => {
+  const current = await fixture(t);
+  const old = await addPeer(current, { pid: 41_103, name: "advisor", startedAt: 100,
+    handler: (socket) => socket.on("data", () => assert.fail("old process received message bytes")) });
+  let received!: () => void;
+  const arrival = new Promise<void>((resolve) => { received = resolve; });
+  await addPeer(current, { pid: 41_104, name: "advisor", startedAt: 200,
+    handler: (socket) => socket.on("data", (bytes) => { assert.match(String(bytes), /hello advisor/); received(); }) });
+  await writeFile(path.join(current.stateDir, "nodes.json"), JSON.stringify({ version: 1, host: "local", nodes: [] }), { mode: 0o600 });
+  const store = new OwnedStateFile(current.stateDir, createLedgerCodec("local", ledgerDefaults));
+  await store.initialize();
+  const directory = new EndpointDirectory({ host: "local", store, limits: ledgerDefaults, claude: current.adapter });
+  const writes: string[] = [];
+  const codex: Destination = { close: async () => {}, deliver: async (input) => {
+    assert.equal(await input.authorize({ bytes: Buffer.byteLength(input.text), sha256: bodyHash(input.text) }), true);
+    writes.push(input.text); return { outcome: "delivered", code: "DELIVERED" };
+  } };
+  const coordinator = new Coordinator({ host: "local", store, limits: ledgerDefaults, resolve: (ref) => directory.exact(ref),
+    claude: new ClaudeDestination({ host: "local", stateRoot: current.stateDir, peer: current.adapter }), codex, ssh: codex });
+  const broker = new MessagingBroker({ host: "local", store, directory, coordinator, limits: ledgerDefaults });
+  const control = await serveLocalControl({ stateDir: current.stateDir, socketPath: path.join(current.stateDir, "control.sock"), handle: async (input) => {
+    return handleBrokerCommand(input, { broker, validateHandoff: () => false, check: async () => ({}) });
+  } });
+  const cli = async (args: string[], fromClaude = false, body = "") => {
+    let output = "", errors = "";
+    const status = await runCoreCli(args, { env: { EMBASSY_STATE_DIR: current.stateDir,
+      ...(fromClaude ? { CLAUDE_CODE_MESSAGING_SOCKET: old.socketPath } : { CODEX_THREAD_ID: SESSION_TWO }) },
+      stdin: Readable.from([body]), stdout: new Writable({ write(chunk, _, done) { output += chunk; done(); } }),
+      stderr: new Writable({ write(chunk, _, done) { errors += chunk; done(); } }) });
+    assert.equal(status, 0, output + errors);
+    return { result: JSON.parse(output).result, errors };
+  };
+  try {
+    await cli(["register-codex", "--alias", "codex-builder@local"]);
+    for (const command of [["refresh"], ["status", "--json"]]) {
+      const { result, errors } = await cli(command);
+      assert.deepEqual(result.warnings, [{ code: "CLAUDE_SESSION_DUPLICATE", alias: "advisor@local", selectedPid: 41_104, stalePids: [41_103] }]);
+      assert.match(errors, /using PID 41104; stale PID\(s\) 41103.*Exit the old Claude process/);
+      assert.doesNotMatch(JSON.stringify(result), new RegExp(`${SESSION_ONE}|${current.socketDir}`));
+    }
+    const sent = await cli(["send", "--to", "advisor@local"], false, "hello advisor");
+    assert.match(sent.errors, /CLAUDE_SESSION_DUPLICATE/);
+    const target = (await store.snapshot()).endpoints.find((row) => row.provider === "claude")!;
+    await coordinator.wake(target); await arrival;
+    assert.equal((await broker.delivery(sent.result.deliveryToken) as { state: string }).state, "delivered");
+    const reply = await cli(["send", "--conversation", sent.result.conversationId], true, "hello builder");
+    assert.match(reply.errors, /CLAUDE_SESSION_DUPLICATE/);
+    await coordinator.wake((await store.snapshot()).endpoints.find((row) => row.provider === "codex")!);
+    assert.equal((await broker.delivery(reply.result.deliveryToken) as { state: string }).state, "delivered");
+    assert.equal(writes.length, 1);
+    assert.match(writes[0]!, /hello builder/);
+    await unlink(old.registryPath);
+    assert.equal((await cli(["refresh"])).result.warnings, undefined);
+    assert.equal((await cli(["status", "--json"])).errors, "");
+  } finally { await control.close(); await broker.close(); await store.close(); }
 });
 
 test("discovery isolates mixed real-world records across a Claude Code patch upgrade", async (t) => {

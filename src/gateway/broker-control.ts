@@ -38,6 +38,12 @@ const endpoints = (x: unknown, accepts = endpoint): boolean => rows(x, 128, acce
   new Set((x as Obj[]).map((row) => JSON.stringify([row.host, row.id]))).size === (x as Obj[]).length;
 const codexMetadata = (x: unknown): boolean => exact(x, ["state"]) &&
   ["dormant", "idle", "busy", "waiting", "systemError", "unknown"].includes(String(x.state));
+const pid = (x: unknown) => Number.isSafeInteger(x) && (x as number) > 0 && (x as number) <= 2_147_483_647;
+const warnings = (x: unknown): boolean => x === undefined || rows(x, 128, (row) =>
+  exact(row, ["code", "alias", "selectedPid", "stalePids"]) && row.code === "CLAUDE_SESSION_DUPLICATE" && alias(row.alias) &&
+  pid(row.selectedPid) && rows(row.stalePids, 4095, pid) && (row.stalePids as number[]).length > 0 &&
+  !(row.stalePids as number[]).includes(row.selectedPid as number) && new Set(row.stalePids as number[]).size === (row.stalePids as number[]).length) &&
+  (x as { stalePids: number[] }[]).reduce((sum, row) => sum + 1 + row.stalePids.length, 0) <= 4096;
 
 /** One public projection contract, used before emission and after transport. Native
  * handles and arbitrary adapter fields can never hitchhike in a valid result. */
@@ -46,10 +52,10 @@ export function isBrokerResult(method: BrokerCommand["method"], value: unknown):
     case "health": return exact(value, ["status"]) && ["healthy", "degraded"].includes(String(value.status));
     case "check": return exact(value, ["status", "scope"]) && value.status === "ok" && value.scope === "broker-loopback";
     case "register_codex": return endpoint(value);
-    case "send": return exact(value, ["accepted", "conversationId", "deliveryToken"]) && value.accepted === true &&
+    case "send": return exact(value, ["accepted", "conversationId", "deliveryToken"], ["warnings"]) && warnings(value.warnings) && value.accepted === true &&
       token(value.conversationId, "conv_", "16,64") && token(value.deliveryToken, "dlv_", "24");
     case "retire_route": return exact(value, ["cancelled", "ambiguous", "unconfirmed"]) && Object.values(value).every(count);
-    case "refresh_discovery": return exact(value, ["routes"]) && endpoints(value.routes);
+    case "refresh_discovery": return exact(value, ["routes"], ["warnings"]) && warnings(value.warnings) && endpoints(value.routes);
     case "peer_catalog": return endpoints(value);
     case "peer_resolve": return value === null || endpoint(value);
     case "peer_handoff": return exact(value, ["accepted"]) && value.accepted === true ||
@@ -58,7 +64,7 @@ export function isBrokerResult(method: BrokerCommand["method"], value: unknown):
       exact(value, ["found", "state", "terminal", "deadlineAt"], ["pendingForMs", "safeErrorCode"]) && value.found === true && date(value.deadlineAt) &&
       (value.terminal === true ? outcomes.includes(String(value.state)) && code(value.safeErrorCode) && value.pendingForMs === undefined
         : value.terminal === false && ["queued", "reserved", "armed", "accepted"].includes(String(value.state)) && count(value.pendingForMs) && value.safeErrorCode === undefined);
-    case "list_snapshot": return exact(value, ["health", "revision", "routes", "messages", "retirements"], ["safeErrorCode", "federation", "codex"]) &&
+    case "list_snapshot": return exact(value, ["health", "revision", "routes", "messages", "retirements"], ["safeErrorCode", "federation", "codex", "warnings"]) && warnings(value.warnings) &&
       ["healthy", "degraded"].includes(String(value.health)) && count(value.revision) &&
       (value.safeErrorCode === undefined || code(value.safeErrorCode)) &&
       (value.codex === undefined || exact(value.codex, ["truncated", "complete"], ["observedAt", "safeErrorCode"]) &&

@@ -23,6 +23,9 @@ export type CodexEndpointMetadata = Readonly<{
   state: CodexThread["status"];
 }>;
 export type CodexReconciliation = Readonly<{ endpoints: readonly Endpoint[]; truncated: boolean }>;
+export type ClaudeSessionWarning = Readonly<{
+  code: "CLAUDE_SESSION_DUPLICATE"; alias: string; selectedPid: number; stalePids: readonly number[];
+}>;
 export type EndpointDirectoryOptions = Readonly<{
   host: string; limits: LedgerLimits; store: OwnedStateFile<LedgerState>;
   automaticCodex?: boolean;
@@ -38,6 +41,7 @@ export class EndpointDirectory {
   readonly #createRegistrationId: (provider: "claude" | "codex", handle: string) => string;
   readonly #collidingAliases = new Set<string>();
   readonly #observedClaudeAliases = new Set<string>();
+  readonly #claudeWarnings = new Map<string, ClaudeSessionWarning>();
   #codexMetadata = new Map<string, CodexThread>();
   #automaticCodex: boolean;
   #codexProofIncomplete = false;
@@ -48,6 +52,31 @@ export class EndpointDirectory {
     this.#automaticCodex = options.automaticCodex ?? false;
     if (!HOST.test(options.host)) throw new BridgeError("INVALID_GATEWAY_CONFIGURATION", "The endpoint host is invalid.");
     this.#createRegistrationId = options.createRegistrationId ?? (() => `reg_${randomUUID()}`);
+  }
+
+  claudeWarnings(endpoints?: readonly Endpoint[]): readonly ClaudeSessionWarning[] {
+    return [...this.#claudeWarnings.entries()]
+      .filter(([handle]) => !endpoints || endpoints.some((row) => row.host === this.options.host && row.provider === "claude" && row.handle === handle))
+      .map(([, warning]) => warning);
+  }
+
+  #observeClaude(peer: ClaudePeerDescriptor): void {
+    if (!peer.duplicate) return; // Only a complete scan can clear prior evidence.
+    this.#claudeWarnings.delete(peer.targetId);
+    this.#claudeWarnings.set(peer.targetId, {
+      code: "CLAUDE_SESSION_DUPLICATE", alias: `${peer.alias}@${this.options.host}`, ...peer.duplicate,
+    });
+    // Match the public endpoint bound and the registry's maximum PID budget,
+    // including warnings retained across partial scans or caller observations.
+    while (this.#claudeWarnings.size > 128 || [...this.#claudeWarnings.values()].reduce((sum, row) => sum + 1 + row.stalePids.length, 0) > 4096)
+      this.#claudeWarnings.delete(this.#claudeWarnings.keys().next().value!);
+  }
+
+  async #discoverClaude() {
+    const discovery = await this.options.claude.discover();
+    if (!discovery.truncated) this.#claudeWarnings.clear();
+    for (const peer of discovery.peers) this.#observeClaude(peer);
+    return discovery;
   }
 
   async registerCodex(handle: string, alias: string, succeeds?: string): Promise<Endpoint> {
@@ -155,7 +184,7 @@ export class EndpointDirectory {
 
   async named(selector: string): Promise<Endpoint | undefined> {
     if (UUID.test(selector)) {
-      const peer = (await this.options.claude.discover()).peers.find((row) =>
+      const peer = (await this.#discoverClaude()).peers.find((row) =>
         row.targetId.toLowerCase() === selector.toLowerCase() && allowedClaude(row));
       if (peer === undefined) return undefined;
       const endpoint = await this.#recordClaude(peer);
@@ -208,7 +237,7 @@ export class EndpointDirectory {
     }
     const endpoint = (await this.options.store.snapshot()).endpoints.find((row) => sameEndpoint(row, identity));
     if (endpoint === undefined || endpoint.provider === "codex") return endpoint;
-    const peer = (await this.options.claude.discover()).peers.find((row) =>
+    const peer = (await this.#discoverClaude()).peers.find((row) =>
       row.targetId.toLowerCase() === endpoint.handle && allowedClaude(row));
     if (peer === undefined) return undefined;
     const current = await this.#recordClaude(peer);
@@ -218,7 +247,7 @@ export class EndpointDirectory {
   }
 
   async refresh(): Promise<Endpoint[]> {
-    const discovery = await this.options.claude.discover();
+    const discovery = await this.#discoverClaude();
     const peers = discovery.peers.filter(allowedClaude);
     const refreshed = await this.options.store.transact((state, now) => {
       const ledger = new Ledger(state, this.options.host, this.options.limits, now.getTime());
@@ -261,7 +290,7 @@ export class EndpointDirectory {
     const existing = state.endpoints.find((row) => row.provider === "claude" && row.handle === handle);
     const endpoint: Endpoint = { id: existing?.id ?? this.#id("claude", handle), host: this.options.host,
       provider: "claude", alias, handle };
-    if (state.retirements.some((row) => sameEndpoint(row.endpoint, endpoint) || row.nativeKey === nativeKey(endpoint))) {
+    if (state.retirements.some((row) => sameEndpoint(row.endpoint, endpoint))) {
       if (skipRetired) return undefined;
       throw new BridgeError("ROUTE_UNREGISTERED", "The Claude endpoint was retired.");
     }
@@ -270,6 +299,7 @@ export class EndpointDirectory {
   }
 
   async #recordClaude(peer: ClaudePeerDescriptor): Promise<Endpoint> {
+    this.#observeClaude(peer);
     return await this.options.store.transact((state, now) => {
       const endpoint = this.#upsertClaude(
         new Ledger(state, this.options.host, this.options.limits, now.getTime()), state, peer,

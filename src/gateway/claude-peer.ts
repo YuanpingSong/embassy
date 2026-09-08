@@ -43,7 +43,7 @@ export const claudePeerRejectionCodes = [
   "SOCKET_OUTSIDE_ROOT",
   "SOCKET_NOT_SOCKET",
   "SELF_TARGET",
-  "SESSION_ID_COLLISION",
+  "CLAUDE_SESSION_DUPLICATE",
 ] as const;
 export type ClaudePeerRejectionCode =
   (typeof claudePeerRejectionCodes)[number];
@@ -52,6 +52,7 @@ export type ClaudePeerDescriptor = {
   targetId: string; // Stable session UUID; names and sockets are coordinates.
   alias: string; kind: ClaudePeerKind; status: ClaudePeerStatus;
   compatibility: "compatible";
+  duplicate?: Readonly<{ selectedPid: number; stalePids: readonly number[] }>;
 };
 export type ClaudePeerDiscovery = {
   peers: ClaudePeerDescriptor[];
@@ -87,7 +88,7 @@ type FileGeneration = { dev: number; ino: number; size: number; mtimeMs: number 
 type SocketGeneration = { dev: bigint; ino: bigint; ctimeNs: bigint };
 
 type ParsedRegistryRecord = {
-  pid: number; sessionId: string; cwd: string; kind: ClaudePeerKind;
+  pid: number; sessionId: string; cwd: string; kind: ClaudePeerKind; startedAt: number;
   messagingSocketPath: string; name: string; status: ClaudePeerStatus;
 };
 type TargetBinding = Readonly<{
@@ -279,6 +280,7 @@ function parseRegistryRecord(
 
   return {
     pid: expectedPid,
+    startedAt: value.startedAt as number,
     sessionId: value.sessionId.toLowerCase(),
     cwd: value.cwd,
     kind: value.kind as ClaudePeerKind,
@@ -636,11 +638,11 @@ export class ClaudePeerAdapter {
     stateRoot: string,
   ): Promise<void> {
     try {
-      await this.#validateRoots();
-      const current = await this.#bindingFromRegistry(
-        expected.registryPath,
-        expected.record.pid,
-      );
+      const { targets, discovery } = await this.#scan();
+      if (discovery.truncated) throw new Error("incomplete newest-process evidence");
+      const selected = targets.get(expected.targetId);
+      if (!selected || selected.registryPath !== expected.registryPath) throw new Error("selected Claude process changed");
+      const current = await this.#bindingFromRegistry(selected.registryPath, selected.record.pid);
       if (
         current.targetId !== expected.targetId ||
         current.record.cwd !== expected.record.cwd ||
@@ -665,10 +667,33 @@ export class ClaudePeerAdapter {
     }
   }
 
-  async discover(): Promise<ClaudePeerDiscovery> {
+  // A duplicate is the only discovery case that needs a connection probe.
+  // It sends zero bytes, has the ordinary connect deadline, and always closes.
+  async #socketLive(binding: TargetBinding): Promise<boolean> {
+    return new Promise((resolve) => {
+      let socket: Socket;
+      try { socket = this.#connect(binding.record.messagingSocketPath); }
+      catch { resolve(false); return; }
+      let settled = false;
+      const finish = (live: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        socket.destroy();
+        resolve(live);
+      };
+      const timer = setTimeout(() => finish(false), this.#limits.connectTimeoutMs);
+      timer.unref();
+      socket.once("connect", () => finish(true));
+      socket.once("error", () => finish(false));
+      socket.once("close", () => finish(false));
+    });
+  }
+
+  async #scan(): Promise<{ discovery: ClaudePeerDiscovery; targets: Map<string, TargetBinding> }> {
     await this.#validateRoots();
     const nextTargets = new Map<string, TargetBinding>();
-    const collidedSessionIds = new Set<string>();
+    const candidates = new Map<string, TargetBinding[]>();
     const rejected: Partial<Record<ClaudePeerRejectionCode, number>> = {};
     const reject = (code: ClaudePeerRejectionCode): void => {
       rejected[code] = (rejected[code] ?? 0) + 1;
@@ -710,27 +735,9 @@ export class ClaudePeerAdapter {
             parseableRecords += 1;
           },
         );
-        if (
-          collidedSessionIds.has(binding.targetId) ||
-          nextTargets.has(binding.targetId)
-        ) {
-          nextTargets.delete(binding.targetId);
-          collidedSessionIds.add(binding.targetId);
-          const prior = peers.findIndex(
-            (candidate) => candidate.targetId === binding.targetId,
-          );
-          if (prior >= 0) peers.splice(prior, 1);
-          reject("SESSION_ID_COLLISION");
-          continue;
-        }
-        nextTargets.set(binding.targetId, binding);
-        peers.push({
-          targetId: binding.targetId,
-          alias: binding.alias,
-          kind: binding.record.kind,
-          status: binding.record.status,
-          compatibility: "compatible",
-        });
+        const group = candidates.get(binding.targetId) ?? [];
+        group.push(binding);
+        candidates.set(binding.targetId, group);
       } catch (error) {
         const code =
           error instanceof BridgeError
@@ -746,17 +753,36 @@ export class ClaudePeerAdapter {
         }
       }
     }
+    for (const observed of candidates.values()) {
+      // A daemon record cannot hide a routable interactive/background session.
+      const routable = observed.filter((row) => row.record.kind === "interactive" || row.record.kind === "bg");
+      const group = routable.length ? routable : observed;
+      // OS start time is primary; the same-user registry resolves sub-second
+      // ties. PID is only a deterministic final tie-break, never a start clock.
+      const start = (binding: TargetBinding) => Date.parse(binding.processGeneration) || binding.record.startedAt;
+      group.sort((a, b) => start(b) - start(a) || b.record.startedAt - a.record.startedAt || b.record.pid - a.record.pid);
+      const live = group.length === 1 ? [true] : await Promise.all(group.map((binding) => this.#socketLive(binding)));
+      const binding = group.find((_, index) => live[index]);
+      if (!binding) { reject("PID_NOT_LIVE"); continue; }
+      nextTargets.set(binding.targetId, binding);
+      if (group.length > 1) reject("CLAUDE_SESSION_DUPLICATE");
+      peers.push({ targetId: binding.targetId, alias: binding.alias, kind: binding.record.kind,
+        status: binding.record.status, compatibility: "compatible",
+        ...(group.length > 1 ? { duplicate: { selectedPid: binding.record.pid,
+          stalePids: group.filter((row) => row !== binding).map((row) => row.record.pid) } } : {}),
+      });
+    }
+    return { targets: nextTargets, discovery: { peers, rejected, truncated,
+      entriesScanned: bounded.length, parseableRecords } };
+  }
+
+  async discover(): Promise<ClaudePeerDiscovery> {
+    const { targets: nextTargets, discovery } = await this.#scan();
     this.#targets.clear();
     for (const [targetId, binding] of nextTargets) {
       this.#targets.set(targetId, binding);
     }
-    return {
-      peers,
-      rejected,
-      truncated,
-      entriesScanned: bounded.length,
-      parseableRecords,
-    };
+    return discovery;
   }
 
   async #attestOwnedDirectory(
@@ -889,13 +915,11 @@ export class ClaudePeerAdapter {
    */
   async resolveReplyAddress(address: string): Promise<ClaudePeerDescriptor> {
     const binding = await this.#resolveReplyAddress(address);
-    return {
-      targetId: binding.targetId,
-      alias: binding.alias,
-      kind: binding.record.kind,
-      status: binding.record.status,
-      compatibility: "compatible",
-    };
+    if (binding.record.kind !== "interactive" && binding.record.kind !== "bg")
+      throw new BridgeError("CLAUDE_REPLY_ROUTE_MISMATCH", "Only interactive/background Claude sessions may send.");
+    const peer = (await this.discover()).peers.find((row) => row.targetId === binding.targetId);
+    if (!peer) throw new BridgeError("CLAUDE_PEER_TARGET_UNKNOWN", "The Claude session has no live binding.", true);
+    return peer;
   }
 
   async prepareSend(
@@ -924,8 +948,8 @@ export class ClaudePeerAdapter {
 
     // Preparation positively resolves every replaceable coordinate and exact
     // workspace generation. The resulting operation owns only immutable wire
-    // bytes and the already-validated socket path; it performs no connection
-    // or write until its one-shot perform function is invoked.
+    // bytes and the already-validated socket path. Duplicate liveness probes
+    // send no bytes; the only message write is the one-shot perform function.
     await this.discover();
     const target = this.#targets.get(targetId);
     if (target === undefined) {

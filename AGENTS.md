@@ -123,7 +123,7 @@ propose a contract change rather than expanding the boundary through a test.
   comprehension, or cross-machine delivery.
 - Private state is schema 7; a valid schema-6 document reads forward with
   existing rows retained. Schemas ≤5 and unknown state refuse without
-  mutation. Private control protocol 6 needs a matching CLI and broker. A
+  mutation. Private control protocol 7 needs a matching CLI and broker. A
   reset invalidates routes, receipts, and conversations; rollback requires the
   untouched old state and matching old binary.
 - Preserve exact current-user ownership, modes, symlink, inode, lease, and

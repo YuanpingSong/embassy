@@ -250,6 +250,10 @@ export async function runCoreCli(args: readonly string[], dependencies: CoreCliD
     }
     if (command === "status" && !json && stdout.isTTY) stdout.write(renderStatus(result));
     else write(command, result);
+    if (object(result) && Array.isArray(result.warnings)) {
+      for (const warning of result.warnings.filter(object)) stderr.write(
+        `[embassy] ${warning.code}: ${warning.alias}; using PID ${warning.selectedPid}; stale PID(s) ${(warning.stalePids as number[]).join(", ")}. Exit the old Claude process, then run embassy refresh. Do not retire your own route to fix delivery.\n`);
+    }
     if (command === "wait-delivery") return object(result) && result.found === true ? result.state === "delivered" ? 0 : 6 : 3;
     return 0;
   } catch (error) {

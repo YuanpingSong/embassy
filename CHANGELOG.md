@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Fixed
+- Claude session restarts select the newest reachable duplicate process, revalidate before each write, and report `CLAUDE_SESSION_DUPLICATE` with selected/stale PIDs in status, refresh and sends.
+- A retired Claude session can reappear with a fresh endpoint ID immediately; old deliveries and replies remain fenced. Codex retirement is unchanged.
+
+### Changed
+- Private control protocol 7 adds bounded duplicate-session warnings; update the CLI and broker together. Private state and federation protocols are unchanged.
+
 ## [4.5.2] - 2026-09-07
 
 ### Changed

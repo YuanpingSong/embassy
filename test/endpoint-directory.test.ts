@@ -86,6 +86,24 @@ test("caller identity comes only from an inherited Codex handle or Claude reply 
     { code: "CLAUDE_REPLY_ROUTE_MISMATCH" });
 });
 
+test("partial Claude scans and caller observations retain duplicate diagnostics until a complete scan", async (t) => {
+  const f = await fixture(t);
+  const selected = { ...peer(UUID_A, "advisor"), duplicate: { selectedPid: 123, stalePids: [122] } };
+  f.claude.peers = [selected];
+  await f.directory.refresh();
+  const warning = f.directory.claudeWarnings();
+  assert.deepEqual(warning, [{ code: "CLAUDE_SESSION_DUPLICATE", alias: "advisor@local", selectedPid: 123, stalePids: [122] }]);
+  f.claude.truncated = true;
+  f.claude.peers = [peer(UUID_A, "advisor")];
+  await f.directory.refresh();
+  f.claude.replies.set("uds:/private/123.sock", f.claude.peers[0]!);
+  await f.directory.caller({ kind: "claude", address: "uds:/private/123.sock" });
+  assert.deepEqual(f.directory.claudeWarnings(), warning);
+  f.claude.truncated = false;
+  await f.directory.refresh();
+  assert.deepEqual(f.directory.claudeWarnings(), []);
+});
+
 test("fresh discovery represents duplicate Claude names, named send refuses, and each UUID remains exact", async (t) => {
   const f = await fixture(t);
   f.claude.peers = [peer(UUID_A, "twins"), peer(UUID_B, "twins", "bg"), peer(UUID_C, "ignored", "daemon")];
@@ -114,19 +132,23 @@ test("same Claude UUID renames one row while exact resolution never falls back b
   assert.equal(await f.directory.exact(reference(renamed!)), undefined);
 });
 
-test("retirement fences the same native identity when discovery sees it again", async (t) => {
-  const f = await fixture(t);
+test("a live Claude session reappears after retirement under a fresh endpoint identity", async (t) => {
+  const f = await fixture(t, undefined, { randomIds: true });
   f.claude.peers = [peer(UUID_A, "retired")];
   const installed = await f.directory.named("retired@local");
   assert.ok(installed);
   await f.store.transact((state, now) =>
     new Ledger(state, HOST, ledgerDefaults, now.getTime()).retire(reference(installed)));
-  await assert.rejects(f.directory.named("retired@local"), { code: "ROUTE_UNREGISTERED" });
+  const replacement = await f.directory.named("retired@local");
+  assert.ok(replacement);
+  assert.notEqual(replacement.id, installed.id);
+  assert.equal(replacement.handle, installed.handle);
+  assert.equal(await f.directory.exact(reference(installed)), undefined);
   f.claude.replies.set("uds:/private/retired.sock", peer(UUID_A, "retired"));
-  await assert.rejects(f.directory.caller({ kind: "claude", address: "uds:/private/retired.sock" }),
-    { code: "ROUTE_UNREGISTERED" });
-  assert.deepEqual(await f.directory.refresh(), []);
-  assert.deepEqual((await f.store.snapshot()).endpoints, []);
+  assert.equal((await f.directory.caller({ kind: "claude", address: "uds:/private/retired.sock" })).id,
+    replacement.id);
+  assert.deepEqual((await f.directory.refresh()).map((row) => row.id), [replacement.id]);
+  assert.deepEqual((await f.store.snapshot()).endpoints.map((row) => row.id), [replacement.id]);
 });
 
 test("Claude discovery failure cannot block an unambiguous registered Codex name", async (t) => {

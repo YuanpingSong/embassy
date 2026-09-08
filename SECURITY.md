@@ -102,13 +102,22 @@ which must be an absolute path. The path may become an in-memory `uds:`
 capability only; it is never a CLI argument, public output, or persisted field.
 Claude native session UUIDs are stored only in closed private route state.
 Discovery accepts only compatible interactive/background same-user records and
-checks the exact record and socket again before use.
+checks the exact record and socket again before use. If a restart leaves multiple
+live records for one session UUID, zero-byte socket probes select the newest
+reachable process (OS start time, then registry start time and PID for ties).
+Every write rechecks that choice and the prepared process/socket generation;
+a changed choice refuses before writing. Duplicate PIDs are operator diagnostics,
+not additional session identities.
+An incomplete bounded registry scan cannot prove the newest process; prepared
+writes defer until a complete scan can revalidate the choice.
 
 Aliases may collide in discovered Claude state. In that case name lookup
 refuses; user-supplied exact UUID selection can identify a Claude target, but
 Embassy never publishes a UUID. A retired or replaced endpoint remains fenced
-while its bounded retirement evidence is retained. Re-enrollment after that
-evidence expires receives a fresh opaque ID, never the retired ID. Public
+while its bounded retirement evidence is retained. A live Claude session may
+re-enroll immediately with a fresh opaque ID, even with the same native UUID;
+old deliveries and reply references remain fenced to the retired ID. Codex's
+native-identity retirement fence is unchanged. Public
 endpoint IDs can select exact local operator retirement without exposing a
 native ID or authorizing remote mutation.
 
@@ -212,6 +221,9 @@ recent retirement times, and bounded remote catalog rows and observation times.
 Codex rows may additionally contain the observed busy, waiting, idle, dormant,
 systemError or unknown state. The explicit-registration retention marker
 remains private.
+Duplicate Claude session warnings may expose the selected and stale process PIDs
+with the public alias, bounded to 128 warnings and 4096 PIDs. They disclose no
+native session UUID or socket path; partial scans retain prior warning evidence.
 It must never contain native IDs or handles, socket paths, message bodies,
 delivery/conversation secrets, credentials, exceptions, raw diagnostics, or
 provider histories. Human output is derived from the same validated shape.

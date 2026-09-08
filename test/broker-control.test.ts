@@ -10,6 +10,28 @@ const deliveryToken = "dlv_abcdefghijklmnopqrstuvwx";
 const now = "2026-09-05T12:00:00.000Z";
 const handoff = { target: endpoint, messages: [] };
 
+test("duplicate warnings are a bounded closed PID projection on status, refresh and send only", () => {
+  const warning = { code: "CLAUDE_SESSION_DUPLICATE", alias: "advisor@local", selectedPid: 12, stalePids: [11] };
+  const shapes = [
+    ["send", { accepted: true, conversationId, deliveryToken }],
+    ["refresh_discovery", { routes: [] }],
+    ["list_snapshot", { health: "healthy", revision: 0, routes: [], messages: [], retirements: [] }],
+  ] as const;
+  for (const [method, result] of shapes) {
+    assert.equal(isBrokerResult(method, { ...result, warnings: [warning] }), true);
+    for (const bad of [
+      { ...warning, handle: uuid }, { ...warning, socketPath: "/private/socket" },
+      { ...warning, hint: "raw diagnostics" }, { ...warning, selectedPid: -1 },
+      { ...warning, stalePids: [] }, { ...warning, stalePids: [12] },
+      { ...warning, stalePids: [11, 11] }, { ...warning, alias: "unsafe\ntext" },
+    ]) assert.equal(isBrokerResult(method, { ...result, warnings: [bad] }), false);
+    assert.equal(isBrokerResult(method, { ...result, warnings: Array(129).fill(warning) }), false);
+    assert.equal(isBrokerResult(method, { ...result, warnings: Array(128).fill({ ...warning,
+      stalePids: Array.from({ length: 32 }, (_, index) => index + 100) }) }), false);
+  }
+  assert.equal(isBrokerResult("peer_resolve", { ...endpoint, warnings: [warning] }), false);
+});
+
 const commands: readonly unknown[] = [
   { method: "health", params: {} }, { method: "list_snapshot", params: {} },
   { method: "refresh_discovery", params: {} }, { method: "check", params: {} },
