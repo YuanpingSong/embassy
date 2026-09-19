@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [4.7.0] - 2026-09-19
 
 ### Fixed
 - Explicit same-thread Codex registration can recover a retired endpoint after fresh loaded/live attestation; automatic discovery stays fenced and old work/replies never retarget.
