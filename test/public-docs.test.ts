@@ -11,6 +11,19 @@ const read = async (relative: string): Promise<string> =>
   await readFile(path.join(root, relative), "utf8");
 const squash = (value: string): string => value.replace(/\s+/g, " ");
 
+test("fallback registration docs name the exact alias rule and replaceable host placeholder", async () => {
+  for (const file of ["README.md", "skills/embassy-peer/SKILL.md"]) {
+    const text = squash(await read(file));
+    assert.match(text, /register-codex --alias codex-reviewer@your-host/);
+    assert.match(text, /Codex aliases must use `codex-<name>@<host>`: lowercase letters, digits, underscore and dash before `@`/);
+    assert.match(text, /dots are allowed only in the host/);
+    assert.match(text, /Replace `your-host` with the `host` value from this broker's `nodes.json`/);
+  }
+  const chinese = await read("README_CN.md");
+  assert.match(chinese, /`codex-<name>@<host>`/);
+  assert.match(chinese, /`your-host`.*`nodes.json`.*`host`/);
+});
+
 const currentDocs = [
   "AGENTS.md",
   "README.md",

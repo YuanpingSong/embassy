@@ -46,6 +46,24 @@ test("CLI register, named send, retained reply and broker check traverse the rea
   let running = runCoreRuntime({ env: { EMBASSY_STATE_DIR: stateDir }, signal: stop.signal, onReady: () => ready.resolve() }, deps);
   t.after(async () => { stop.abort(); await running; await rm(root, { recursive: true, force: true }); });
   await ready.promise;
+  for (const alias of ["career-helper@local", "career-helper", "codex-career-helper@elsewhere",
+    "codex-reviewer@your-host", "codex-career.helper@local", "CODEX-helper@local"]) {
+    const output = sink(), errors = sink();
+    assert.equal(await runCoreCli(["register-codex", "--alias", alias], {
+      env: { EMBASSY_STATE_DIR: stateDir, CODEX_THREAD_ID: a }, stdout: output.stream, stderr: errors.stream,
+    }), 3);
+    assert.deepEqual(JSON.parse(output.read()), { ok: false, command: "register-codex", error: { code: "INVALID_ALIAS" } });
+    assert.match(errors.read(), /where <host> is local, e.g. codex-career-helper@local/);
+    assert.match(errors.read(), /dots are allowed only in the host/);
+    assert.match(errors.read(), /Replace your-host with the host from nodes.json/);
+  }
+  const badConfig = sink(), configHint = sink();
+  assert.equal(await runCoreCli(["register-codex", "--alias", "codex-career-helper@local"], {
+    env: { EMBASSY_STATE_DIR: stateDir, CODEX_THREAD_ID: a, EMBASSY_MAX_ROUTES: "129" },
+    stdout: badConfig.stream, stderr: configHint.stream,
+  }), 3);
+  assert.equal(JSON.parse(badConfig.read()).error.code, "INVALID_GATEWAY_CONFIGURATION");
+  assert.doesNotMatch(configHint.read(), /Codex aliases must/);
   const cli = async (args: string[], handle = a, input = "") => {
     const output = sink(), errors = sink();
     const code = await runCoreCli(args, { env: { EMBASSY_STATE_DIR: stateDir, CODEX_THREAD_ID: handle },
@@ -53,6 +71,7 @@ test("CLI register, named send, retained reply and broker check traverse the rea
     assert.equal(code, 0, errors.read());
     return JSON.parse(output.read()) as { ok: boolean; result: Record<string, unknown> };
   };
+  assert.deepEqual((await cli(["status", "--json"])).result.routes, [], "refused aliases never register an endpoint");
   await cli(["register-codex", "--alias", "codex-a@local"], a);
   await cli(["register-codex", "--alias", "codex-b@local"], b);
   const sent = await cli(["send", "--to", "codex-b@local"], a, "hello from A");

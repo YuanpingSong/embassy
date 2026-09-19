@@ -99,6 +99,12 @@ Embassy 刻意不承诺的：
 
 **发现机制。** `embassy tui` 和 `embassy status` 可以查看所有端点及其运行状态、队列深度以及各本地路由最近一次原生操作。`status --json` 会输出单行闭合 JSON：`{"ok":true,"command":"status","result":{...}}`，路由数据位于 `.result.routes`。`embassy refresh` 会执行经授权的实时发现流程。对于没有原生 daemon 集成的 agent 运行环境（harness），可以用 `embassy register-codex` 作为兜底注册方式。
 
+```sh
+embassy register-codex --alias codex-reviewer@your-host
+```
+Codex 别名必须使用 `codex-<name>@<host>`：`@` 前只允许小写字母、数字、下划线和短横线（包括 `codex-` 在内最多 32 个字符）；点号仅允许出现在主机名中。
+请将 `your-host` 替换为当前中转服务 `nodes.json` 中的 `host` 值，而不是另一台机器的名称。
+
 **会话管理。** 接收提示（reply hint）中包含一个绑定身份的会话引用（conversation reference）。会话引用与身份严格绑定，并非别名；只要账本保留行与两侧确切端点依然有效，会话引用就能在中转服务重启后继续可用。一旦发生端点退役、替换、过期、淘汰或状态重置，会话引用便会失效。
 
 **消息投递。** 一次原生唤醒可以携带一批有大小上限的消息。持久化状态流转包括：queued、reserved、armed、accepted 和 terminal；对于状态不确定的 armed 或 accepted 写入，绝不会盲目重试。从 Claude 发往 Codex 且以 `STEER:` 精确开头的消息，会在 Codex 当前处于 accepted 状态的操作遇到下一个安全的 tool-call 边界时触发转向（steer），绝不会打断正在进行的生成；该特性的紧急停用开关为 `EMBASSY_STEERING_ENABLED=0`。你可以通过 `embassy delivery-status --token dlv_example` 查看单次投递状态，或用 `embassy wait-delivery --token dlv_example` 阻塞等待其完成。详细规范见 [Delivery](docs/DELIVERY.md)。

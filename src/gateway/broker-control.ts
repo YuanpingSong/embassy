@@ -103,8 +103,12 @@ export function parseBrokerCommand(input: unknown, validateHandoff: (x: unknown)
   let valid = false;
   switch (input.method) {
     case "health": case "list_snapshot": case "refresh_discovery": case "check": valid = exact(p, []); break;
-    case "register_codex": valid = exact(p, ["caller", "alias"], ["succeeds"]) && caller(p.caller) && p.caller.kind === "codex" && alias(p.alias) &&
-      (p.succeeds === undefined || alias(p.succeeds)); break;
+    case "register_codex":
+      valid = exact(p, ["caller", "alias"], ["succeeds"]) && caller(p.caller) && p.caller.kind === "codex" &&
+        typeof p.alias === "string" && (p.succeeds === undefined || typeof p.succeeds === "string");
+      if (valid && object(p) && (!alias(p.alias) || p.succeeds !== undefined && !alias(p.succeeds)))
+        throw new BridgeError("INVALID_ALIAS", "The registration alias is invalid.");
+      break;
     case "send": valid = exact(p, ["caller", "body"], ["to", "conversation"]) && caller(p.caller) && typeof p.body === "string" &&
       p.body.trim().length > 0 && !p.body.includes("\0") && Buffer.byteLength(p.body) <= 16_384 &&
       (Object.hasOwn(p, "to") !== Object.hasOwn(p, "conversation")) &&

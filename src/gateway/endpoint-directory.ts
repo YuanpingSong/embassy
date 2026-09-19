@@ -82,8 +82,8 @@ export class EndpointDirectory {
   }
 
   async registerCodex(handle: string, alias: string, succeeds?: string): Promise<Endpoint> {
-    this.#assertAlias(alias, true);
-    if (succeeds !== undefined) this.#assertAlias(succeeds, true);
+    this.#assertAlias(alias, true, "INVALID_ALIAS");
+    if (succeeds !== undefined) this.#assertAlias(succeeds, true, "INVALID_ALIAS");
     if (!UUID.test(handle)) {
       throw new BridgeError("INVALID_GATEWAY_CONFIGURATION", "The Codex registration is invalid.");
     }
@@ -327,9 +327,9 @@ export class EndpointDirectory {
       !endpoint.handle.includes("\0");
   }
 
-  #assertAlias(alias: string, codex: boolean): void {
+  #assertAlias(alias: string, codex: boolean, code = "INVALID_GATEWAY_CONFIGURATION"): void {
     if (!ALIAS.test(alias) || !alias.endsWith(`@${this.options.host}`) || codex && !alias.startsWith("codex-")) {
-      throw new BridgeError("INVALID_GATEWAY_CONFIGURATION", "The endpoint alias is invalid.");
+      throw new BridgeError(code, "The endpoint alias is invalid.");
     }
   }
 

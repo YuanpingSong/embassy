@@ -20,6 +20,8 @@ Every local name ends in `@host`, the `host` value in the broker's `nodes.json`.
 ```sh
 embassy register-codex --alias codex-reviewer@your-host
 ```
+Codex aliases must use `codex-<name>@<host>`: lowercase letters, digits, underscore and dash before `@` (at most 32 characters including `codex-`); dots are allowed only in the host.
+Replace `your-host` with the `host` value from this broker's `nodes.json`, not the name of another machine.
 
 ## Send
 

@@ -141,6 +141,12 @@ so route rows are at `.result.routes`. `embassy refresh` runs authorized live
 discovery. `embassy register-codex` is the fallback for a harness without
 native daemon integration.
 
+```sh
+embassy register-codex --alias codex-reviewer@your-host
+```
+Codex aliases must use `codex-<name>@<host>`: lowercase letters, digits, underscore and dash before `@` (at most 32 characters including `codex-`); dots are allowed only in the host.
+Replace `your-host` with the `host` value from this broker's `nodes.json`, not the name of another machine.
+
 **Conversations.** A reply hint carries an identity-bound conversation
 reference. Conversation references are identity-bound, are not aliases, and
 may survive a broker restart while their retained ledger row and both exact

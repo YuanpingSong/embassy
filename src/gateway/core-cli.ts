@@ -94,7 +94,8 @@ async function body(input: Readable): Promise<string> {
   return value;
 }
 
-function hint(command: string, code: string, stateDir: string): string {
+function hint(command: string, code: string, stateDir: string, host?: string): string {
+  if (code === "INVALID_ALIAS") return `Codex aliases must match codex-<name>@<host> where <host> is ${host ?? "the host in nodes.json"}, e.g. codex-career-helper@${host ?? "your-host"}. Before @: lowercase letters, digits, underscore, dash (at most 32 characters including codex-); dots are allowed only in the host. Replace your-host with the host from nodes.json.`;
   if (code === "SKILLS_TARGET_UNSAFE") return "Check that HOME and the selected skill paths are owned by this user and are real directories/files, not symlinks. Do not use sudo.";
   if (code === "SKILLS_PACKAGE_INVALID") return "Reinstall the Embassy CLI package; its bundled embassy-peer skill is missing or invalid.";
   if (code === "SKILLS_FILESYSTEM_FAILED") return "Check filesystem permissions, then run embassy skills status; some files may already have been updated. Do not use sudo.";
@@ -145,6 +146,7 @@ export async function runCoreCli(args: readonly string[], dependencies: CoreCliD
   const verbs = ["--help", "--version", "serve", "service", "skills", "send", "register-codex", "retire", "status", "tui", "refresh", "health", "check", "delivery-status", "wait-delivery", "peer-stdio"];
   const command = args[0] === undefined ? "--help" : verbs.includes(args[0]) ? args[0] : "unknown";
   let stateDir = "the configured state directory";
+  let localHost: string | undefined;
   try {
     if (command === "--help" && args.length <= 1) { stdout.write(HELP); return 0; }
     if (command === "--version" && args.length === 1) { stdout.write(`embassy ${CORE_VERSION}\n`); return 0; }
@@ -172,6 +174,7 @@ export async function runCoreCli(args: readonly string[], dependencies: CoreCliD
       return 0;
     }
     const inventory = await loadGatewayNodeInventory(stateDir);
+    localHost = inventory.host;
     const config = loadGatewayConfig(env, inventory);
     const call = async (request: BrokerCommand): Promise<unknown> => {
       const mutating = commandMutates(request.method);
@@ -195,8 +198,8 @@ export async function runCoreCli(args: readonly string[], dependencies: CoreCliD
         terminal: { noColor: env.NO_COLOR !== undefined, dumb: env.TERM === "dumb" },
         remote: { hosts: inventory.nodes, call: ssh.call, close: ssh.close },
         hint: (code, host) => host && host !== inventory.host
-          ? `On ${host}: ${hint("tui", code, "the configured state directory on that host")}`
-          : hint("tui", code, stateDir),
+          ? `On ${host}: ${hint("tui", code, "the configured state directory on that host", host)}`
+          : hint("tui", code, stateDir, localHost),
         ...(dependencies.signal ? { signal: dependencies.signal } : {}) });
       return 0;
     }
@@ -267,7 +270,7 @@ export async function runCoreCli(args: readonly string[], dependencies: CoreCliD
     const code = error instanceof BridgeError || error instanceof LocalControlError ? error.code : "INTERNAL_ERROR";
     stdout.write(`${JSON.stringify({ ok: false, command, error: { code } })}\n`);
     stderr.write(`[embassy] ${code}\n`);
-    const guidance = hint(command, code, stateDir);
+    const guidance = hint(command, code, stateDir, localHost);
     if (guidance) stderr.write(`[embassy] ${guidance}\n`);
     return code === "INVALID_ARGUMENTS" || code === "INVALID_REQUEST" ? 2 : 3;
   }

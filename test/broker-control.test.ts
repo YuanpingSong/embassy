@@ -10,6 +10,14 @@ const deliveryToken = "dlv_abcdefghijklmnopqrstuvwx";
 const now = "2026-09-05T12:00:00.000Z";
 const handoff = { target: endpoint, messages: [] };
 
+test("registration alias text gets INVALID_ALIAS while malformed requests remain INVALID_REQUEST", () => {
+  const params = { caller: { kind: "codex", handle: uuid }, alias: endpoint.alias };
+  for (const patch of [{ alias: "bare" }, { alias: "codex-X@local" }, { succeeds: "no-host" }])
+    assert.throws(() => parseBrokerCommand({ method: "register_codex", params: { ...params, ...patch } }, () => false), { code: "INVALID_ALIAS" });
+  for (const patch of [{ alias: 42 }, { caller: { kind: "codex", handle: "not-an-id" } }, { extra: true }, { succeeds: 42 }])
+    assert.throws(() => parseBrokerCommand({ method: "register_codex", params: { ...params, ...patch } }, () => false), { code: "INVALID_REQUEST" });
+});
+
 test("duplicate warnings are a bounded closed PID projection on status, refresh and send only", () => {
   const warning = { code: "CLAUDE_SESSION_DUPLICATE", alias: "advisor@local", selectedPid: 12,
     newestPid: 12, otherPids: [11], reason: "stale_older" };
