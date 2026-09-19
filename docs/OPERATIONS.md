@@ -118,6 +118,7 @@ duplicate sockets answered, check all of the named processes. `refresh`,
 `status`, and successful sends report the selected and newest PIDs, and Embassy
 revalidates the selected process before each write. Never retire your own route
 to repair delivery.
+Claude display names such as `compressor-pm (2)` normalize to `compressor-pm-2@host`; punctuation-only names get a stable generated alias, and colliding normalized names still refuse with `PEER_ALIAS_COLLISION`—use the alias shown in status, not a ledger reset.
 Retiring Claude cancels/fences the old endpoint, not the live session: rediscovery
 can give that session a new endpoint ID immediately. Old replies cannot follow it.
 

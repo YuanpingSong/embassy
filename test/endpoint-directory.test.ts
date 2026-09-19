@@ -137,6 +137,16 @@ test("fresh discovery represents duplicate Claude names, named send refuses, and
   assert.deepEqual(f.claude.attested, [UUID_A, UUID_B]);
 });
 
+test("auto-renamed display names retain collision refusal after alias normalization", async (t) => {
+  const f = await fixture(t);
+  f.claude.peers = [peer(UUID_A, "compressor-pm (2)"), peer(UUID_B, "compressor-pm-2")];
+  const routes = await f.directory.refresh();
+  assert.equal(routes.length, 2);
+  assert.ok(routes.every((row) => row.alias === "compressor-pm-2@local"));
+  await assert.rejects(f.directory.named("compressor-pm-2@local"), { code: "PEER_ALIAS_COLLISION" });
+  assert.notEqual((await f.directory.named(UUID_A))?.id, (await f.directory.named(UUID_B))?.id);
+});
+
 test("same Claude UUID renames one row while exact resolution never falls back by name", async (t) => {
   const f = await fixture(t);
   f.claude.peers = [peer(UUID_A, "before")];

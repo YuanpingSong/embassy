@@ -18,7 +18,6 @@ export const CLAUDE_PEER_COMPATIBILITY = Object.freeze({ peerProtocol: 1 });
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const ALIAS_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const REGISTRY_FILE_PATTERN = /^([1-9][0-9]{0,9})\.json$/;
 const SOCKET_FILE_PATTERN = /^([1-9][0-9]{0,9})\.sock$/;
 const MAX_PID = 2_147_483_647;
@@ -69,7 +68,8 @@ export type ClaudeProcessInspector = (
 export type ClaudePeerConnect = (socketPath: string) => Socket;
 /** Same public spelling for directory rows, warnings and destination checks. */
 export function normalizeClaudeAlias(name: string): string {
-  const normalized = name.toLowerCase().replace(/[^a-z0-9_-]/g, "-");
+  const normalized = name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+  if (!/[a-z0-9]/.test(normalized)) return `claude-${createHash("sha256").update(name).digest("hex").slice(0, 12)}`;
   return (/^[a-z]/.test(normalized) ? normalized : `claude-${normalized}`).slice(0, 32);
 }
 export type ClaudePeerAdapterOptions = {
@@ -272,7 +272,7 @@ function parseRegistryRecord(
   }
   if (
     typeof value.name !== "string" ||
-    !ALIAS_PATTERN.test(value.name)
+    value.name.length === 0 || value.name.length > 64 || value.name.includes("\0")
   ) {
     return undefined;
   }

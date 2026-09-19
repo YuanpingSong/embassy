@@ -32,6 +32,7 @@ import { OwnedStateFile } from "../src/gateway/owned-state.js";
 import { BridgeError } from "../src/errors.js";
 import {
   ClaudePeerAdapter,
+  normalizeClaudeAlias,
   encodeClaudePeerUserFrame,
   type ClaudePeerAdapterOptions,
   type ClaudePeerAdapterTestOverrides,
@@ -441,6 +442,28 @@ test("native delivery reuses its selection and never probes a socket held by the
   assert.equal(connects, 4); // 2 discovery probes, 1 other-process probe, 1 write
 });
 
+test("display names accept bounded Unicode while genuinely malformed registry fields still refuse", async (t) => {
+  const current = await fixture(t);
+  const peer = await addPeer(current, { pid: 41_103 });
+  const record = JSON.parse(await readFile(peer.registryPath, "utf8"));
+  for (const name of ["a".repeat(64), "界".repeat(64), " ", "name (2)"]) {
+    await writeFile(peer.registryPath, JSON.stringify({ ...record, name }));
+    assert.equal((await current.adapter.discover()).peers[0]?.alias, name);
+    assert.match(normalizeClaudeAlias(name), /^[a-z][a-z0-9_-]{0,31}$/);
+  }
+  for (const patch of [{ name: "" }, { name: "a".repeat(65) }, { name: "bad\0name" },
+    { name: 12 }, { name: null }, { name: undefined }, { peerProtocol: 99 }, { cwd: null }]) {
+    await writeFile(peer.registryPath, JSON.stringify({ ...record, ...patch }));
+    const result = await current.adapter.discover();
+    assert.deepEqual(result.peers, []);
+    assert.equal(result.rejected.REGISTRY_INVALID_SCHEMA, 1);
+    await assert.rejects(current.adapter.resolveReplyAddress(`uds:${peer.socketPath}`), { code: "REGISTRY_INVALID_SCHEMA" });
+  }
+  assert.equal(normalizeClaudeAlias("compressor-pm (2)"), "compressor-pm-2");
+  assert.equal(normalizeClaudeAlias("?!"), normalizeClaudeAlias("?!"));
+  assert.notEqual(normalizeClaudeAlias("?!"), normalizeClaudeAlias("!!!"));
+});
+
 test("a newer daemon cannot hide an interactive duplicate or gain its caller eligibility", async (t) => {
   const current = await fixture(t);
   await addPeer(current, { pid: 41_103, name: "advisor", startedAt: 100 });
@@ -501,7 +524,9 @@ test("a duplicate appearing at socket connect is checked without re-probing the 
   assert.equal(bytes, 0);
 });
 
-test("duplicate session warnings traverse real registry, broker and CLI; both directions deliver", async (t) => {
+for (const displayName of ["compressor-pm (2)", "?! 🐇"]) test(`display name ${JSON.stringify(displayName)} traverses registry, broker and CLI in both directions`, async (t) => {
+  const publicName = displayName === "compressor-pm (2)" ? "compressor-pm-2" : normalizeClaudeAlias(displayName);
+  assert.match(publicName, /^[a-z][a-z0-9_-]{0,31}$/);
   let failedProbe: "none" | "newest" | "all" = "none";
   const current = await fixture(t, { connect: (socketPath) => {
     if (failedProbe === "all" || failedProbe === "newest" && socketPath.endsWith("41104.sock")) {
@@ -511,11 +536,11 @@ test("duplicate session warnings traverse real registry, broker and CLI; both di
     }
     return net.createConnection({ path: socketPath });
   } });
-  const old = await addPeer(current, { pid: 41_103, name: "MyProj", startedAt: 100,
+  const old = await addPeer(current, { pid: 41_103, name: displayName, nameSource: "peer", startedAt: 100,
     handler: (socket) => socket.on("data", () => assert.fail("old process received message bytes")) });
   let received!: () => void;
   const arrival = new Promise<void>((resolve) => { received = resolve; });
-  await addPeer(current, { pid: 41_104, name: "MyProj", startedAt: 200,
+  await addPeer(current, { pid: 41_104, name: displayName, nameSource: "peer", startedAt: 200,
     handler: (socket) => socket.on("data", (bytes) => { assert.match(String(bytes), /hello advisor/); received(); }) });
   await addPeer(current, { pid: 41_105, name: "Worker.1", kind: "daemon", sessionId: SESSION_THREE });
   await addPeer(current, { pid: 41_106, name: "Worker.1", kind: "daemon", sessionId: SESSION_THREE });
@@ -547,12 +572,12 @@ test("duplicate session warnings traverse real registry, broker and CLI; both di
     await cli(["register-codex", "--alias", "codex-builder@local"]);
     for (const command of [["refresh"], ["status", "--json"]]) {
       const { result, errors } = await cli(command);
-      assert.deepEqual(result.warnings, [{ code: "CLAUDE_SESSION_DUPLICATE", alias: "myproj@local", selectedPid: 41_104,
+      assert.deepEqual(result.warnings, [{ code: "CLAUDE_SESSION_DUPLICATE", alias: `${publicName}@local`, selectedPid: 41_104,
         newestPid: 41_104, otherPids: [41_103], reason: "stale_older" }]);
       assert.match(errors, /using newest PID 41104; older PID\(s\) 41103.*Exit the older Claude process/);
       assert.doesNotMatch(JSON.stringify(result), new RegExp(`${SESSION_ONE}|${current.socketDir}|Worker|MyProj`));
     }
-    const sent = await cli(["send", "--to", "myproj@local"], false, "hello advisor");
+    const sent = await cli(["send", "--to", `${publicName}@local`], false, "hello advisor");
     assert.match(sent.errors, /CLAUDE_SESSION_DUPLICATE/);
     const target = (await store.snapshot()).endpoints.find((row) => row.provider === "claude")!;
     await coordinator.wake(target); await arrival;
@@ -625,11 +650,10 @@ test("discovery isolates mixed real-world records across a Claude Code patch upg
   assert.equal((await lstat(manual.registryPath)).mode & 0o777, 0o644);
   const result = await current.adapter.discover();
   assert.deepEqual(result.rejected, {
-    REGISTRY_INVALID_SCHEMA: 1,
     PID_NOT_LIVE: 1,
   });
   assert.equal(result.entriesScanned, 6);
-  assert.equal(result.parseableRecords, 5);
+  assert.equal(result.parseableRecords, 6);
   assert.deepEqual(
     result.peers.map((peer) => peer.alias).sort(),
     [
@@ -637,6 +661,7 @@ test("discovery isolates mixed real-world records across a Claude Code patch upg
       "derived-peer",
       "manual-monitor",
       "print-session",
+      "project migration",
     ],
   );
   assert.equal(
