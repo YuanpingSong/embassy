@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [4.6.1] - 2026-09-19
 
 ### Fixed
 - Claude auto-renamed display names such as `name (2)` remain discoverable and can send and receive; public aliases stay normalized and collision-safe.
