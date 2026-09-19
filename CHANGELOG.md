@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [4.6.2] - 2026-09-19
 
 ### Fixed
 - Invalid Codex registration aliases now report `INVALID_ALIAS` with the actual local host and naming rule, instead of suggesting a broken gateway configuration.
