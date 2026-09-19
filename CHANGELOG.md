@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Fixed
+- Explicit same-thread Codex registration can recover a retired endpoint after fresh loaded/live attestation; automatic discovery stays fenced and old work/replies never retarget.
+- Retirement guidance warns that queued work in both directions is cancelled; documented which Codex hosts can receive messages.
+
+### Added
+- Redacted, memory-only `RPC_REJECTED` last-operation details (RPC code and resume/turn method) with method-specific recovery guidance. Private control protocol 8 requires matching CLI and broker; state and federation formats are unchanged.
+
 ## [4.6.2] - 2026-09-19
 
 ### Fixed

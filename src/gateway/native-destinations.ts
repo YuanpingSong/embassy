@@ -169,18 +169,22 @@ function mapCodexClean(
     | Extract<StatelessCodexOperationResult, { phase: "clean" }>
     | Extract<StatelessCodexActiveSteerResult, { phase: "clean" }>,
 ): WakeResult {
+  const detail = result.safeErrorCode === "RPC_REJECTED" && result.detail !== undefined
+    ? { detail: result.detail } : {};
   if (result.safeErrorCode === "MESSAGE_EXPIRED") {
     return { outcome: "expired", code: "MESSAGE_EXPIRED", unwritten: true };
   }
   return CODEX_CLEAN_RETRY_CODES.has(result.safeErrorCode)
-    ? { outcome: "deferred", code: result.safeErrorCode }
-    : { outcome: "failed", code: result.safeErrorCode };
+    ? { outcome: "deferred", code: result.safeErrorCode, ...detail }
+    : { outcome: "failed", code: result.safeErrorCode, ...detail };
 }
 
 function mapCodexStart(result: StatelessCodexOperationResult): WakeResult {
   if (result.phase === "clean") return mapCodexClean(result);
-  if (result.phase === "armed") return { outcome: "ambiguous", code: result.safeErrorCode };
-  if (result.phase === "accepted") return { outcome: "unconfirmed", code: result.safeErrorCode };
+  if (result.phase === "armed") return { outcome: "ambiguous", code: result.safeErrorCode,
+    ...(result.safeErrorCode === "RPC_REJECTED" && result.detail !== undefined ? { detail: result.detail } : {}) };
+  if (result.phase === "accepted") return { outcome: "unconfirmed", code: result.safeErrorCode,
+    ...(result.safeErrorCode === "RPC_REJECTED" && result.detail !== undefined ? { detail: result.detail } : {}) };
   if (result.outcome === "failed") return { outcome: "failed", code: "CODEX_TURN_FAILED" };
   if (result.outcome === "interrupted") {
     return { outcome: "cancelled", code: "CODEX_TURN_INTERRUPTED" };
@@ -190,7 +194,8 @@ function mapCodexStart(result: StatelessCodexOperationResult): WakeResult {
 
 function mapCodexSteer(result: StatelessCodexActiveSteerResult): WakeResult {
   if (result.phase === "clean") return mapCodexClean(result);
-  if (result.phase === "armed") return { outcome: "ambiguous", code: result.safeErrorCode };
+  if (result.phase === "armed") return { outcome: "ambiguous", code: result.safeErrorCode,
+    ...(result.safeErrorCode === "RPC_REJECTED" && result.detail !== undefined ? { detail: result.detail } : {}) };
   return { outcome: "delivered", code: "DELIVERED" };
 }
 

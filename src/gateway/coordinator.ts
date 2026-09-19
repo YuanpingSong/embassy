@@ -3,10 +3,12 @@ import { BridgeError } from "../errors.js";
 import { Ledger, NATIVE_FRAME_RESERVE_BYTES, bodyHash, sameEndpoint, type Delivery, type Endpoint, type EndpointRef, type LedgerLimits, type LedgerState, type Outcome } from "./ledger.js";
 import { OwnedStateFile } from "./owned-state.js";
 import { composeProvenanceEnvelope } from "./provenance-envelope.js";
+import type { RpcRejectionDetail } from "./codex-stateless-transport.js";
 
 export type WakeResult = Readonly<{
   outcome: Outcome | "deferred";
   code: string;
+  detail?: RpcRejectionDetail;
   unwritten?: true;
 }>;
 export type WakeInput = Readonly<{
@@ -48,7 +50,9 @@ export class Coordinator {
     const key = JSON.stringify([identity.host, identity.provider, identity.id]);
     this.observations.delete(key);
     this.observations.set(key, { outcome: result.outcome,
-      code: /^[A-Z][A-Z0-9_]{0,63}$/.test(result.code) ? result.code : "DISPATCH_OUTCOME_AMBIGUOUS" });
+      code: /^[A-Z][A-Z0-9_]{0,63}$/.test(result.code) ? result.code : "DISPATCH_OUTCOME_AMBIGUOUS",
+      ...(identity.provider === "codex" && result.code === "RPC_REJECTED" && result.detail !== undefined
+        ? { detail: result.detail } : {}) });
     if (this.observations.size > this.options.limits.endpoints + this.options.limits.queued)
       this.observations.delete(this.observations.keys().next().value!);
   }

@@ -144,3 +144,21 @@ test("Codex metadata is closed, bounded and cannot expose native identities thro
   assert.equal(isBrokerResult("list_snapshot", { ...project(codex), routes: [
     { ...snapshot.routes[0], provider: "claude", codex } ] }), false);
 });
+
+test("RPC rejection detail is a closed Codex-only last-operation projection", () => {
+  const detail = { method: "thread/resume", code: -32_601 };
+  const route = { ...snapshot.routes[0], lastOperation: {
+    outcome: "failed", code: "RPC_REJECTED", detail,
+  } };
+  assert.equal(isBrokerResult("list_snapshot", { ...snapshot, routes: [route] }), true);
+  for (const invalid of [
+    { ...detail, method: "initialize" }, { ...detail, method: "thread/read" },
+    { ...detail, code: 1.5 }, { ...detail, code: Number.MAX_SAFE_INTEGER + 1 },
+    { ...detail, message: "native refusal" }, { ...detail, threadId: uuid },
+  ]) assert.equal(isBrokerResult("list_snapshot", { ...snapshot, routes: [{ ...route,
+    lastOperation: { ...route.lastOperation, detail: invalid } }] }), false);
+  assert.equal(isBrokerResult("list_snapshot", { ...snapshot, routes: [{ ...route,
+    provider: "claude" }] }), false);
+  assert.equal(isBrokerResult("list_snapshot", { ...snapshot, routes: [{ ...route,
+    lastOperation: { ...route.lastOperation, code: "REQUEST_TIMEOUT" } }] }), false);
+});

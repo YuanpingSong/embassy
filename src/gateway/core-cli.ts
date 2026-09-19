@@ -95,6 +95,7 @@ async function body(input: Readable): Promise<string> {
 }
 
 function hint(command: string, code: string, stateDir: string, host?: string): string {
+  if (code === "RPC_REJECTED") return "The App Server refused an operation. Run embassy status --json for the route's lastOperation.detail (method and RPC code). If resume was refused, another Codex host may own the thread; only sessions attached to the managed App Server receive. If the session predates a daemon restart, restart that session.";
   if (code === "INVALID_ALIAS") return `Codex aliases must match codex-<name>@<host> where <host> is ${host ?? "the host in nodes.json"}, e.g. codex-career-helper@${host ?? "your-host"}. Before @: lowercase letters, digits, underscore, dash (at most 32 characters including codex-); dots are allowed only in the host. Replace your-host with the host from nodes.json.`;
   if (code === "SKILLS_TARGET_UNSAFE") return "Check that HOME and the selected skill paths are owned by this user and are real directories/files, not symlinks. Do not use sudo.";
   if (code === "SKILLS_PACKAGE_INVALID") return "Reinstall the Embassy CLI package; its bundled embassy-peer skill is missing or invalid.";
@@ -122,6 +123,8 @@ function renderStatus(value: unknown): string {
     const collision = value.routes.filter((candidate) => object(candidate) && candidate.alias === row.alias).length > 1;
     const codex = object(row.codex) ? `  ${String(row.codex.state)}` : "";
     lines.push(`${String(row.alias)}${collision ? ` [ambiguous name; endpoint ${row.id}]` : ""}  ${String(row.provider)}${codex}  queued ${String(row.queueDepth)}${last}`);
+    if (object(row.lastOperation) && row.lastOperation.code === "RPC_REJECTED" && object(row.lastOperation.detail))
+      lines.push(`  ${row.lastOperation.detail.method} / RPC ${row.lastOperation.detail.code}: ${rpcGuidance(row.lastOperation.detail.method)}`);
   }
   if (value.routes.length === 0) lines.push("No registered endpoints.");
   if (object(value.federation) && Array.isArray(value.federation.nodes)) {
@@ -137,6 +140,12 @@ function renderStatus(value: unknown): string {
   const retirements = value.retirements as Record<string, unknown>[];
   if (retirements.length) lines.push("Recent retirements:", ...retirements.slice(-10).map((row) => `  ${row.alias}  ${row.at}`));
   return `${lines.join("\n")}\n`;
+}
+
+function rpcGuidance(method: unknown): string {
+  return method === "thread/resume"
+    ? "The App Server refused to resume this thread; another host may own it. Use a session attached to the managed App Server. If its Codex session predates a daemon restart, restart that session."
+    : "The App Server refused the turn operation; inspect the Codex session and its status. A turn refusal does not prove a resume or host-ownership problem.";
 }
 
 export async function runCoreCli(args: readonly string[], dependencies: CoreCliDependencies = {}): Promise<number> {
@@ -253,6 +262,13 @@ export async function runCoreCli(args: readonly string[], dependencies: CoreCliD
     }
     if (command === "status" && !json && stdout.isTTY) stdout.write(renderStatus(result));
     else write(command, result);
+    if (command === "retire") stderr.write("[embassy] Retirement cancels queued/reserved work involving this endpoint in both directions; armed work becomes ambiguous and accepted work unconfirmed. Codex is removed from automatic discovery while retirement evidence is retained, unless it re-registers explicitly; Claude may reappear with a fresh endpoint ID.\n");
+    if (command === "status" && object(result) && Array.isArray(result.routes)) {
+      for (const row of result.routes.filter(object)) {
+        if (object(row.lastOperation) && row.lastOperation.code === "RPC_REJECTED" && object(row.lastOperation.detail))
+          stderr.write(`[embassy] ${row.alias}: RPC_REJECTED (${row.lastOperation.detail.method}, RPC ${row.lastOperation.detail.code}). ${rpcGuidance(row.lastOperation.detail.method)}\n`);
+      }
+    }
     if (object(result) && Array.isArray(result.warnings)) {
       for (const warning of result.warnings.filter(object)) {
         const otherPids = warning.otherPids as number[];

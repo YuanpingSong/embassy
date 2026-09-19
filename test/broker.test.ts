@@ -18,7 +18,9 @@ test("broker resolves inherited callers, sends/replies in one step, and retires 
     status: "idle" as const, compatibility: "compatible" as const };
   const codex = { kind: "codex" as const, handle: "00000000-0000-4000-8000-000000000002" };
   const caller = { kind: "claude" as const, address: "uds:/test-owned/123.sock" };
+  let attestations = 0;
   const directory = new EndpointDirectory({ host: "local", store, limits: ledgerDefaults,
+    attestLiveCodex: async (handle) => { assert.equal(handle, codex.handle); attestations++; },
     claude: {
       discover: async () => ({ peers: [claude], rejected: {}, truncated: false, entriesScanned: 1, parseableRecords: 1 }),
       resolveReplyAddress: async (address) => { assert.equal(address, caller.address); return claude; },
@@ -56,6 +58,17 @@ test("broker resolves inherited callers, sends/replies in one step, and retires 
   }
   assert.deepEqual(await broker.retire("codex-builder@local"), { cancelled: 0, ambiguous: 0, unconfirmed: 0 });
   await assert.rejects(broker.send(caller, { conversation: outbound.conversationId }, "old reply"), { code: "ROUTE_UNREGISTERED" });
+  await directory.reconcileCodex([{ id: codex.handle, loaded: true, status: "busy" }]);
+  assert.equal((await store.snapshot()).endpoints.some((row) => row.provider === "codex"), false);
+  const recovered = await broker.register(codex, "codex-builder@local");
+  assert.notEqual(recovered.id, registered.id);
+  assert.equal(attestations, 1);
+  await assert.rejects(broker.send(codex, { conversation: outbound.conversationId }, "old identity reply"), { code: "ROUTE_BINDING_MISMATCH" });
+  const fresh = await broker.send(caller, { to: "codex-builder@local" }, "fresh identity message");
+  await coordinator.wake((await store.snapshot()).endpoints.find((row) => row.id === recovered.id)!);
+  const freshReceipt = await broker.delivery(fresh.deliveryToken);
+  assert.equal(freshReceipt.found && freshReceipt.state, "delivered");
+  assert.equal(writes.length, 3);
 });
 
 test("an admission during the pump's empty snapshot re-arms without another command", async (t) => {

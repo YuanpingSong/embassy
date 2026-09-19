@@ -47,8 +47,9 @@ provider's final attestation.
 
 The ID is minted randomly for a new registration, then retained across rename
 and restart. Retirement retains a bounded private hash of the native binding
-to fence immediate re-enrollment. After that evidence is evicted, a later
-registration gets a new ID; old replies and remote references cannot revive.
+to suppress automatic Codex re-enrollment. Explicit same-thread Codex recovery
+requires fresh loaded/live attestation; Claude may reappear live automatically.
+Either re-enrollment creates a new ID; old replies and remote references cannot revive.
 
 Codex endpoints are discovered as bounded metadata from the same-user App
 Server daemon. The immutable native thread UUID is their private identity;
@@ -185,7 +186,9 @@ pin them in memory. Window aging preserves pending identities and drops unused
 automatic rows without settlement or retirement. Explicit registrations remain
 retained across restart. `thread/closed` marks a root dormant, not retired.
 Archive/delete evidence and explicit retirement use existing settlement; operator
-retirement evidence suppresses rediscovery. Identity storage stays bounded.
+retirement evidence suppresses automatic rediscovery. Explicit same-thread recovery
+uses fresh loaded/live App Server metadata (idle or busy), creates a new retained
+endpoint ID, and leaves old retirement evidence and reply fences intact. Identity storage stays bounded.
 
 The Codex adapter creates a fresh App Server connection per operation, checks
 the current interface, resumes the exact known
@@ -316,7 +319,7 @@ model interrupt.
 | Surface | Version | Compatibility policy |
 |---|---:|---|
 | Private state (`gateway-state.json`) | 7 | A valid schema-6 document is read forward with rows retained; ≤5 and unknown refuse without mutation (reset) |
-| Private control (CLI ↔ broker) | 7 | CLI and broker must come from one installation |
+| Private control (CLI ↔ broker) | 8 | CLI and broker must come from one installation |
 | Federation (`peer-stdio`) | 3 | Exact version and host handshake; no compatibility mode |
 | Consumed Claude peer protocol | 1 | Incompatible records are rejected in isolation |
 

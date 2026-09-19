@@ -38,6 +38,9 @@ const endpoints = (x: unknown, accepts = endpoint): boolean => rows(x, 128, acce
   new Set((x as Obj[]).map((row) => JSON.stringify([row.host, row.id]))).size === (x as Obj[]).length;
 const codexMetadata = (x: unknown): boolean => exact(x, ["state"]) &&
   ["dormant", "idle", "busy", "waiting", "systemError", "unknown"].includes(String(x.state));
+const rpcRejectionDetail = (x: unknown): boolean => exact(x, ["method", "code"]) &&
+  ["thread/resume", "turn/start", "turn/steer"].includes(String(x.method)) &&
+  Number.isSafeInteger(x.code);
 const pid = (x: unknown) => Number.isSafeInteger(x) && (x as number) > 0 && (x as number) <= 2_147_483_647;
 const warnings = (x: unknown): boolean => x === undefined || rows(x, 128, (row) =>
   exact(row, ["code", "alias", "selectedPid", "newestPid", "otherPids", "reason"]) &&
@@ -86,8 +89,10 @@ export function isBrokerResult(method: BrokerCommand["method"], value: unknown):
       endpoints(value.routes, (row) => exact(row, ["id", "alias", "provider", "host", "queueDepth"], ["lastOperation", "codex"]) &&
         endpoint({ id: row.id, alias: row.alias, provider: row.provider, host: row.host }) && count(row.queueDepth) &&
         (row.codex === undefined || row.provider === "codex" && codexMetadata(row.codex)) &&
-        (row.lastOperation === undefined || exact(row.lastOperation, ["outcome", "code"]) &&
-          [...outcomes, "deferred"].includes(String(row.lastOperation.outcome)) && code(row.lastOperation.code))) &&
+        (row.lastOperation === undefined || exact(row.lastOperation, ["outcome", "code"], ["detail"]) &&
+          [...outcomes, "deferred"].includes(String(row.lastOperation.outcome)) && code(row.lastOperation.code) &&
+          (row.lastOperation.detail === undefined || row.provider === "codex" &&
+            row.lastOperation.code === "RPC_REJECTED" && rpcRejectionDetail(row.lastOperation.detail)))) &&
       rows(value.messages, 600, (row) => exact(row, ["state", "ageMs"], ["source", "target", "safeErrorCode"]) &&
         [...outcomes, "queued", "reserved", "armed", "accepted"].includes(String(row.state)) && count(row.ageMs) &&
         (row.source === undefined || alias(row.source)) && (row.target === undefined || alias(row.target)) &&

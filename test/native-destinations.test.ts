@@ -333,6 +333,12 @@ test("Codex destination maps every operation phase without forwarding output", a
     [{ attemptId: "attempt-1", cleanupConfirmed: true, phase: "armed", state: "ambiguous",
       safeErrorCode: "TRANSPORT_WRITE_FAILED" },
     { outcome: "ambiguous", code: "TRANSPORT_WRITE_FAILED" }],
+    [{ attemptId: "attempt-1", cleanupConfirmed: true, phase: "clean", state: "failed",
+      safeErrorCode: "RPC_REJECTED", detail: { method: "thread/resume", code: -32_601 } },
+    { outcome: "failed", code: "RPC_REJECTED", detail: { method: "thread/resume", code: -32_601 } }],
+    [{ attemptId: "attempt-1", cleanupConfirmed: true, phase: "armed", state: "ambiguous",
+      safeErrorCode: "RPC_REJECTED", detail: { method: "turn/start", code: -32_602 } },
+    { outcome: "ambiguous", code: "RPC_REJECTED", detail: { method: "turn/start", code: -32_602 } }],
     [{ attemptId: "attempt-1", cleanupConfirmed: true, phase: "accepted", state: "unconfirmed",
       safeErrorCode: "REQUEST_TIMEOUT" }, { outcome: "unconfirmed", code: "REQUEST_TIMEOUT" }],
     [{ attemptId: "attempt-1", cleanupConfirmed: true, phase: "terminal", state: "terminal",
@@ -495,6 +501,30 @@ test("Codex accepted handle admits exact STEER and lives until completion", asyn
   await closing;
   assert.deepEqual(events, ["authorize:61", "accepted:unconfirmed",
     "steer:STEER: adjust", "authorize:17"]);
+});
+
+test("Codex destination preserves closed RPC detail from an active STEER", async () => {
+  const ready = deferred<void>(), finish = deferred<void>();
+  const detail = { method: "turn/steer", code: -32_603 } as const;
+  const destination = new CodexDestination({ host: "m5dev", operation: transport(async (input) => {
+    await input.onAccepted({
+      attemptId: input.attemptId,
+      turnId: "turn-rpc-refusal",
+      steer: async (steer) => ({ attemptId: steer.attemptId, phase: "armed",
+        state: "ambiguous", safeErrorCode: "RPC_REJECTED", detail }),
+    });
+    ready.resolve();
+    await finish.promise;
+    return { attemptId: input.attemptId, cleanupConfirmed: true,
+      phase: "terminal", state: "terminal", outcome: "completed" };
+  }) });
+  const started = destination.deliver(wake(codex));
+  await ready.promise;
+  assert.deepEqual(await destination.deliver(wake(codex, {
+    attempt: "attempt-rpc-steer", steer: true, text: "STEER: refusal",
+  })), { outcome: "ambiguous", code: "RPC_REJECTED", detail });
+  finish.resolve();
+  assert.deepEqual(await started, { outcome: "delivered", code: "DELIVERED" });
 });
 
 test("Codex accepted callback failure remains unconfirmed", async () => {

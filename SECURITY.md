@@ -125,7 +125,11 @@ Embassy never publishes a UUID. A retired or replaced endpoint remains fenced
 while its bounded retirement evidence is retained. A live Claude session may
 re-enroll immediately with a fresh opaque ID, even with the same native UUID;
 old deliveries and reply references remain fenced to the retired ID. Codex's
-native-identity retirement fence is unchanged. Public
+native-identity retirement fence still blocks automatic discovery, but an explicit
+same-thread registration may create a new retained endpoint after a fresh exact
+loaded/live App Server observation (idle or busy). That read performs no resume,
+turn start, steering, or approval operation. Recovery retains the old retirement
+evidence and refuses a changed retirement during attestation. Public
 endpoint IDs can select exact local operator retirement without exposing a
 native ID or authorizing remote mutation.
 
@@ -229,6 +233,10 @@ recent retirement times, and bounded remote catalog rows and observation times.
 Codex rows may additionally contain the observed busy, waiting, idle, dormant,
 systemError or unknown state. The explicit-registration retention marker
 remains private.
+Codex `RPC_REJECTED` last-operation detail may contain only the numeric JSON-RPC
+error code and a closed method label (`thread/resume`, `turn/start`, `turn/steer`).
+This bounded observation is memory-only; no provider error text, data or native
+identity is exposed or persisted, and it does not change settlement or replay.
 Duplicate Claude session warnings may expose the selected, newest and other
 process PIDs with the normalized public alias and whether the newest or none of
 the sockets answered, bounded to 128 warnings and 4096 PIDs. Only routable

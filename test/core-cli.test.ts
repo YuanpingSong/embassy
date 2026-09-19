@@ -23,6 +23,7 @@ test("CLI register, named send, retained reply and broker check traverse the rea
   await writeFile(path.join(stateDir, "nodes.json"), JSON.stringify({ version: 1, host: "local", nodes: [] }), { mode: 0o600 });
   await chmod(path.join(stateDir, "nodes.json"), 0o600);
   const writes: string[] = [];
+  let rejection: { method: "thread/resume" | "turn/start"; code: number } | undefined;
   const deps: CoreRuntimeDependencies = {
     createCodexDiscovery: () => undefined,
     loginHome: () => root,
@@ -32,6 +33,8 @@ test("CLI register, named send, retained reply and broker check traverse the rea
       resolveReplyAddress: async () => { throw new Error("no Claude session"); }, assertTargetWorkspaceDisjoint: async () => {},
       prepareSend: async () => { throw new Error("no Claude session"); }, close: async () => {} }),
     createCodexOperation: () => ({ execute: async (input) => {
+      if (rejection) return { attemptId: input.attemptId, cleanupConfirmed: true, phase: "clean", state: "failed",
+        safeErrorCode: "RPC_REJECTED", detail: rejection };
       assert.equal(await input.authorizeWrite({ attemptId: input.attemptId, kind: "codex_turn_start",
         bodyBytes: Buffer.byteLength(input.text), frameBytes: Buffer.byteLength(input.text) + 100,
         sha256: createHash("sha256").update(input.text).digest("hex") }), true);
@@ -91,7 +94,28 @@ test("CLI register, named send, retained reply and broker check traverse the rea
   assert.equal(writes.length, 2, "check must not call a native provider");
   const status = JSON.stringify((await cli(["status", "--json"])).result);
   for (const value of [a, b, "hello from A", "explicit reply", sent.result.conversationId, sent.result.deliveryToken]) assert.equal(status.includes(String(value)), false);
-  await cli(["retire", "--alias", "codex-b@local"]);
+  for (const method of ["thread/resume", "turn/start"] as const) {
+    rejection = { method, code: -32000 };
+    const denied = await cli(["send", "--to", "codex-b@local"], a, "not written");
+    const receiptOut = sink(), hintOut = sink();
+    assert.equal(await runCoreCli(["wait-delivery", "--token", String(denied.result.deliveryToken)], {
+      env: { EMBASSY_STATE_DIR: stateDir }, stdout: receiptOut.stream, stderr: hintOut.stream,
+    }), 6);
+    const snapshotOut = sink(), guidance = sink();
+    assert.equal(await runCoreCli(["status", "--json"], { env: { EMBASSY_STATE_DIR: stateDir },
+      stdout: snapshotOut.stream, stderr: guidance.stream }), 0);
+    const route = JSON.parse(snapshotOut.read()).result.routes.find((row: { alias: string }) => row.alias === "codex-b@local");
+    assert.deepEqual(route.lastOperation, { outcome: "failed", code: "RPC_REJECTED", detail: rejection });
+    if (method === "thread/resume") assert.match(guidance.read(), /another host may own it.*daemon restart/);
+    else { assert.match(guidance.read(), /refused the turn operation/); assert.doesNotMatch(guidance.read(), /restart that session/); }
+    assert.doesNotMatch(snapshotOut.read() + guidance.read(), new RegExp(a + "|" + b));
+  }
+  rejection = undefined;
+  const retireOut = sink(), retireHint = sink();
+  assert.equal(await runCoreCli(["retire", "--alias", "codex-b@local"], { env: { EMBASSY_STATE_DIR: stateDir },
+    stdout: retireOut.stream, stderr: retireHint.stream }), 0);
+  assert.match(retireHint.read(), /queued\/reserved work involving this endpoint in both directions/);
+  assert.match(retireHint.read(), /unless it re-registers explicitly; Claude may reappear/);
   const terminal = sink(), errors = sink();
   Object.assign(terminal.stream, { isTTY: true });
   assert.equal(await runCoreCli(["status"], { env: { EMBASSY_STATE_DIR: stateDir }, stdout: terminal.stream, stderr: errors.stream }), 0);

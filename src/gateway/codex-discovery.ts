@@ -1,4 +1,5 @@
 import { CORE_VERSION } from "./core-version.js";
+import { BridgeError } from "../errors.js";
 import type { CodexAppServerTransport } from "./codex-app-server.js";
 import {
   createLocalCodexTransportFactory,
@@ -18,6 +19,8 @@ const OPT_OUTS = [
   "turn/diff/updated", "turn/plan/updated",
 ] as const;
 const DEFAULT_RECONNECT_DELAYS = [250, 1_000, 5_000] as const;
+const LOADED_PAGE_SIZE = 256;
+const MAX_LOADED_PAGES = 16;
 
 type JsonObject = Record<string, unknown>;
 type Timer = ReturnType<typeof setTimeout>;
@@ -45,6 +48,7 @@ export type CodexDiscoverySnapshot = Readonly<{
 export type CodexDiscoveryObserver = Readonly<{
   start: () => void;
   refresh: () => Promise<void>;
+  attestLiveThread?: (handle: string) => Promise<void>;
   snapshot: () => CodexDiscoverySnapshot;
   close: () => Promise<void>;
 }>;
@@ -278,6 +282,75 @@ class Observer implements CodexDiscoveryObserver {
   }
 
   snapshot(): CodexDiscoverySnapshot { return this.#snapshot; }
+
+  async attestLiveThread(handle: string): Promise<void> {
+    try {
+      await this.#attestLiveThread(handle);
+    } catch (error) {
+      if (error instanceof BridgeError) throw error;
+      if (error instanceof LocalCodexTransportError) {
+        throw new BridgeError(error.code, "The managed Codex transport could not attest the thread.");
+      }
+      if (error instanceof DiscoveryError &&
+          ["RPC_REJECTED", "PROTOCOL_ERROR", "CLEANUP_FAILED"].includes(error.code)) {
+        throw new BridgeError(error.code, "The managed App Server could not attest the thread.");
+      }
+      throw new BridgeError("MANAGED_CODEX_UNAVAILABLE", "The managed App Server could not attest the thread.");
+    }
+  }
+
+  async #attestLiveThread(handle: string): Promise<void> {
+    if (!UUID.test(handle)) {
+      throw new BridgeError("THREAD_NOT_OBSERVED", "The Codex thread is not currently live.");
+    }
+    const id = handle.toLowerCase();
+    if (this.#closed) throw new DiscoveryError("TRANSPORT_CLOSED");
+    if (this.#session === undefined) await this.refresh();
+    const session = this.#session;
+    if (session === undefined) throw new DiscoveryError("TRANSPORT_CLOSED");
+
+    let cursor: string | undefined;
+    const cursors = new Set<string>();
+    let loaded = false;
+    for (let pageNumber = 0; pageNumber < MAX_LOADED_PAGES; pageNumber++) {
+      const page = await this.#serialRequest(session, "thread/loaded/list", {
+        limit: LOADED_PAGE_SIZE,
+        ...(cursor === undefined ? {} : { cursor }),
+      });
+      if (!record(page) || !Array.isArray(page.data) || page.data.length > LOADED_PAGE_SIZE ||
+          !page.data.every((value) => typeof value === "string" && UUID.test(value))) {
+        throw new DiscoveryError("PROTOCOL_ERROR");
+      }
+      loaded = page.data.some((value) => value.toLowerCase() === id);
+      if (loaded || page.nextCursor == null) break;
+      if (typeof page.nextCursor !== "string" || !page.nextCursor || page.nextCursor.length > 256 ||
+          cursors.has(page.nextCursor)) throw new DiscoveryError("PROTOCOL_ERROR");
+      cursor = page.nextCursor;
+      cursors.add(cursor);
+      if (pageNumber === MAX_LOADED_PAGES - 1) throw new DiscoveryError("PROTOCOL_ERROR");
+    }
+    if (!loaded) throw new BridgeError("THREAD_NOT_OBSERVED", "The Codex thread is not currently loaded.");
+
+    const response = await this.#serialRequest(session, "thread/read", { threadId: id, includeTurns: false });
+    if (!record(response) || !record(response.thread)) throw new DiscoveryError("PROTOCOL_ERROR");
+    if (!rootThread(response.thread)) {
+      throw new BridgeError("THREAD_NOT_OBSERVED", "The Codex thread is not an eligible root thread.");
+    }
+    const observed = parseThread(response.thread);
+    if (observed.id !== id) throw new DiscoveryError("PROTOCOL_ERROR");
+    if (!observed.loaded || observed.status === "dormant") {
+      throw new BridgeError("THREAD_NOT_OBSERVED", "The Codex thread is not currently loaded.");
+    }
+    if (observed.status === "waiting") {
+      throw new BridgeError("APPROVAL_REQUIRED", "The Codex thread is waiting for user input or approval.");
+    }
+    if (observed.status === "systemError") {
+      throw new BridgeError("MANAGED_CODEX_UNAVAILABLE", "The Codex thread is in a system-error state.");
+    }
+    if (observed.status !== "idle" && observed.status !== "busy") {
+      throw new DiscoveryError("PROTOCOL_ERROR");
+    }
+  }
 
   async close(): Promise<void> {
     if (this.#closed) return;

@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { BridgeError } from "../src/errors.js";
 
 import type { ClaudePeerDescriptor, ClaudePeerDiscovery } from "../src/gateway/claude-peer.js";
 import { EndpointDirectory, type ClaudeDirectoryAdapter, type RemoteEndpointResolver } from "../src/gateway/endpoint-directory.js";
@@ -39,7 +40,7 @@ class FakeClaude implements ClaudeDirectoryAdapter {
 }
 
 async function fixture(t: { after: (cleanup: () => Promise<void>) => void },
-  remote?: RemoteEndpointResolver, options: { limits?: LedgerLimits; randomIds?: boolean } = {}) {
+  remote?: RemoteEndpointResolver, options: { limits?: LedgerLimits; randomIds?: boolean; attestLiveCodex?: (handle: string) => Promise<void> } = {}) {
   const root = await mkdtemp(path.join(await realpath(os.tmpdir()), "embassy-directory-"));
   const stateDir = path.join(root, "state");
   await mkdir(path.dirname(stateDir), { recursive: true, mode: 0o700 });
@@ -52,6 +53,7 @@ async function fixture(t: { after: (cleanup: () => Promise<void>) => void },
   await store.initialize();
   const claude = new FakeClaude();
   const directory = new EndpointDirectory({ host: HOST, limits, store, claude,
+    ...(options.attestLiveCodex ? { attestLiveCodex: options.attestLiveCodex } : {}),
     ...(remote === undefined ? {} : { remote }),
     ...(options.randomIds ? {} : { createRegistrationId: (provider: "claude" | "codex", handle: string) =>
       `reg_${provider}_${handle.slice(-12)}` }) });
@@ -70,6 +72,59 @@ test("Codex registration reuses one stable identity and successor replacement is
   assert.equal(state.commit.sequence, before + 1);
   assert.deepEqual(state.endpoints, [successor]);
   assert.equal(state.retirements[0]?.endpoint.id, first.id);
+});
+
+test("Codex recovery requires explicit live attestation, retains retirement evidence and never retargets replies", async (t) => {
+  const attested: string[] = [];
+  const f = await fixture(t, undefined, { randomIds: true, attestLiveCodex: async (id) => { attested.push(id); } });
+  const first = await f.directory.registerCodex(UUID_A, "codex-a@local");
+  const other = await f.directory.registerCodex(UUID_B, "codex-b@local");
+  assert.deepEqual(attested, [], "ordinary registration performs no provider read");
+  const admitted = await f.store.transact((state, now) => {
+    const ledger = new Ledger(state, HOST, f.limits, now.getTime());
+    const incoming = ledger.admit({ id: `msg_${UUID_A}`, reply: "conv_abcdefghijklmnop", token: "dlv_abcdefghijklmnopqrstuvwx",
+      source: other, target: first, body: "incoming", deadline: 10_000, steer: false }).delivery;
+    const outgoing = ledger.admit({ id: `msg_${UUID_B}`, reply: "conv_qrstuvwxyzabcdef", token: "dlv_qrstuvwxyzabcdefghijklmn",
+      source: first, target: other, body: "outgoing", deadline: 10_000, steer: false }).delivery;
+    assert.deepEqual(ledger.retire(first), { cancelled: 2, ambiguous: 0, unconfirmed: 0 });
+    return [incoming, outgoing];
+  });
+  await f.directory.reconcileCodex([{ id: UUID_A, loaded: true, status: "idle" }]);
+  assert.equal((await f.store.snapshot()).endpoints.some((row) => row.handle === UUID_A), false);
+  const next = await f.directory.registerCodex(UUID_A, "codex-recovered@local", "codex-a@local");
+  assert.notEqual(next.id, first.id);
+  assert.deepEqual(attested, [UUID_A]);
+  await f.directory.reconcileCodex([{ id: UUID_A, name: "native-rename", loaded: true, status: "busy" }]);
+  assert.equal(f.directory.codexMetadata(next)?.state, "busy");
+  const state = await f.store.snapshot();
+  assert.equal(state.endpoints.find((row) => row.id === next.id)?.alias, "codex-recovered@local");
+  assert.ok(state.retirements.some((row) => row.endpoint.id === first.id));
+  assert.ok(state.deliveries.every((row) => row.state.phase === "terminal" && row.state.outcome === "cancelled"));
+  const restarted = new Ledger(JSON.parse(JSON.stringify(state)), HOST, f.limits, 1000);
+  restarted.restart();
+  assert.throws(() => restarted.replyTarget(admitted[0]!.reply, other), { code: "ROUTE_UNREGISTERED" });
+  assert.throws(() => restarted.replyTarget(admitted[1]!.reply, next), { code: "ROUTE_BINDING_MISMATCH" });
+  await assert.rejects(f.directory.registerCodex(UUID_B, "codex-b@local", "codex-a@local"), { code: "ROUTE_UNREGISTERED" });
+  assert.equal(await f.directory.exact(first), undefined);
+});
+
+test("failed recovery and a retirement racing fresh attestation leave the fence intact", async (t) => {
+  let attest: () => Promise<void> = async () => { throw new BridgeError("THREAD_NOT_OBSERVED", "not loaded"); };
+  const f = await fixture(t, undefined, { randomIds: true, attestLiveCodex: () => attest() });
+  const first = await f.directory.registerCodex(UUID_A, "codex-a@local");
+  await f.store.transact((state) => new Ledger(state, HOST, f.limits, 1000).retire(first));
+  const before = await f.store.snapshot();
+  await assert.rejects(f.directory.registerCodex(UUID_A, "codex-a@local"), { code: "THREAD_NOT_OBSERVED" });
+  assert.deepEqual(await f.store.snapshot(), before);
+  attest = async () => {
+    await f.store.transact((state) => {
+      const ledger = new Ledger(state, HOST, f.limits, 1000);
+      const competing = { ...first, id: "reg_competing", retained: true as const };
+      ledger.register(competing, first); ledger.retire(competing);
+    });
+  };
+  await assert.rejects(f.directory.registerCodex(UUID_A, "codex-a@local"), { code: "ROUTE_BINDING_MISMATCH" });
+  assert.deepEqual((await f.store.snapshot()).endpoints, []);
 });
 
 test("caller identity comes only from an inherited Codex handle or Claude reply socket", async (t) => {

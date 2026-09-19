@@ -122,9 +122,20 @@ Claude display names such as `compressor-pm (2)` normalize to `compressor-pm-2@h
 Retiring Claude cancels/fences the old endpoint, not the live session: rediscovery
 can give that session a new endpoint ID immediately. Old replies cannot follow it.
 
-Duplicate-session warnings require private control protocol 7. Upgrade the CLI
+RPC refusal details and duplicate-session warnings use private control protocol 8. Upgrade the CLI
 and broker together; after replacing the installed CLI, restart the broker before
 retrying a control-version mismatch.
+
+Never retire your own route to fix delivery; retirement cancels queued messages in
+both directions. Run `embassy refresh` and read the safe code instead. If already
+retired, a Codex thread may explicitly re-register after the managed App Server
+confirms it is loaded and live (idle or busy); `--succeeds` may name its own retired
+predecessor, not another thread's. The new ID cannot receive old messages/replies.
+For `RPC_REJECTED`, `status --json` exposes the route's memory-only
+`lastOperation.detail` with a method and numeric RPC code, never the raw error.
+A resume refusal may mean another host owns the thread (other hosts are send-only)
+or its session predates a daemon restart; use a managed-daemon CLI TUI/exec session
+or restart that session. Turn refusals are reported separately without that diagnosis.
 
 ## Other Macs
 

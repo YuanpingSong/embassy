@@ -138,9 +138,13 @@ use the task's chosen `codex-` name with this machine's exact `@host` suffix.
 
 `register-codex --succeeds <old-alias>` atomically retires a predecessor and
 installs the caller. It never reanchors pending work to a new identity.
+If the predecessor is already retired, only its own native thread may recover it,
+after fresh exact loaded/live managed App Server observation (idle or busy).
+Ordinary first registration remains independent of provider availability.
 
-Explicit retirement suppresses re-discovery of that native identity while its
-bounded retirement evidence remains. Embassy never answers approvals or
+Explicit Codex retirement suppresses automatic re-discovery of that native identity
+while its bounded retirement evidence remains; explicit live same-thread registration
+may create a new ID without reviving old work or replies. Embassy never answers approvals or
 changes a task's sandbox or approval policy. It consumes only the App Server
 metadata and operation methods needed for discovery, unsubscribe, resume,
 delivery and exact-turn STEER; it exposes no generic provider RPC.

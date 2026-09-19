@@ -60,6 +60,7 @@ the receipt proves transport, not comprehension.
   daemon already running under the same macOS login. Embassy does not install,
   start or update that daemon; merely having a `codex` executable on PATH is
   insufficient.
+- Codex receiving requires a session attached to that managed App Server (CLI TUI or exec). Other hosts, including the ChatGPT desktop app's code-mode host, are send-only; a disk-listed thread is not proof that the daemon can resume it.
 - Key-based, non-interactive SSH between configured machines when federating.
 
 ## Quick start
@@ -146,6 +147,8 @@ embassy register-codex --alias codex-reviewer@your-host
 ```
 Codex aliases must use `codex-<name>@<host>`: lowercase letters, digits, underscore and dash before `@` (at most 32 characters including `codex-`); dots are allowed only in the host.
 Replace `your-host` with the `host` value from this broker's `nodes.json`, not the name of another machine.
+Never retire your own route to fix delivery; retirement cancels queued messages. To troubleshoot, run `embassy refresh` and read the safe code.
+If you already retired it, explicit `register-codex` can create a fresh endpoint after the managed App Server confirms the same thread is loaded and live (idle or busy); old messages and reply references do not follow it.
 
 **Conversations.** A reply hint carries an identity-bound conversation
 reference. Conversation references are identity-bound, are not aliases, and

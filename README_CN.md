@@ -104,6 +104,9 @@ embassy register-codex --alias codex-reviewer@your-host
 ```
 Codex 别名必须使用 `codex-<name>@<host>`：`@` 前只允许小写字母、数字、下划线和短横线（包括 `codex-` 在内最多 32 个字符）；点号仅允许出现在主机名中。
 请将 `your-host` 替换为当前中转服务 `nodes.json` 中的 `host` 值，而不是另一台机器的名称。
+不要通过退役自己的路由来修复投递问题；退役会取消排队消息。排查时运行 `embassy refresh` 并查看安全错误码。
+已退役的线程可显式运行 `register-codex`，经受管 App Server 确认同一线程已加载且存活（空闲或忙碌）后获得新端点；旧消息和回复引用不会迁移。
+Codex 接收仅支持连接到受管 App Server 的 CLI TUI 或 exec 会话；其他宿主（包括 ChatGPT 桌面应用的 code-mode 宿主）只能发送，磁盘中可见的线程不代表 daemon 能恢复它。
 
 **会话管理。** 接收提示（reply hint）中包含一个绑定身份的会话引用（conversation reference）。会话引用与身份严格绑定，并非别名；只要账本保留行与两侧确切端点依然有效，会话引用就能在中转服务重启后继续可用。一旦发生端点退役、替换、过期、淘汰或状态重置，会话引用便会失效。
 

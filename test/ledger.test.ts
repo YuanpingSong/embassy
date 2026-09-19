@@ -68,6 +68,11 @@ test("Claude retirement fences one endpoint while Codex retirement fences its na
   f.ledger().retire(f.target);
   const returningCodex = { ...endpoint("returning-codex", "codex"), handle: f.target.handle };
   assert.throws(() => f.ledger().register(returningCodex), { code: "ROUTE_UNREGISTERED" });
+  assert.throws(() => f.ledger().register({ ...returningCodex, retained: true }, f.source), { code: "ROUTE_UNREGISTERED" });
+  assert.throws(() => f.ledger().register({ ...f.target, retained: true }, f.target), { code: "ROUTE_UNREGISTERED" });
+  f.ledger().register({ ...returningCodex, retained: true }, f.target);
+  assert.equal(f.ledger().endpoint(returningCodex)?.retained, true);
+  assert.ok(f.state.retirements.some((row) => row.endpoint.id === f.target.id));
 });
 
 test("duplicate display names are unresolvable without hiding either exact identity", () => {

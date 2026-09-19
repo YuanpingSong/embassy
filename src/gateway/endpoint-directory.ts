@@ -30,6 +30,7 @@ export type ClaudeSessionWarning = Readonly<{
 export type EndpointDirectoryOptions = Readonly<{
   host: string; limits: LedgerLimits; store: OwnedStateFile<LedgerState>;
   automaticCodex?: boolean;
+  attestLiveCodex?: (handle: string) => Promise<void>;
   claude: ClaudeDirectoryAdapter; remote?: RemoteEndpointResolver;
   createRegistrationId?: (provider: "claude" | "codex", handle: string) => string;
 }>;
@@ -87,16 +88,32 @@ export class EndpointDirectory {
     if (!UUID.test(handle)) {
       throw new BridgeError("INVALID_GATEWAY_CONFIGURATION", "The Codex registration is invalid.");
     }
+    const normalizedHandle = handle.toLowerCase();
+    const before = await this.options.store.snapshot();
+    const retiredForThread = (state: LedgerState) => state.retirements.filter((row) =>
+      row.nativeKey === nativeKey({ provider: "codex", handle: normalizedHandle })).at(-1);
+    const recovery = !before.endpoints.some((row) => row.provider === "codex" && row.handle === normalizedHandle)
+      ? retiredForThread(before) : undefined;
+    if (recovery) {
+      if (!this.options.attestLiveCodex) throw new BridgeError("MANAGED_CODEX_UNAVAILABLE", "Live Codex attestation is unavailable.");
+      await this.options.attestLiveCodex(normalizedHandle);
+    }
     return await this.options.store.transact((state, now) => {
       const ledger = new Ledger(state, this.options.host, this.options.limits, now.getTime());
-      const normalizedHandle = handle.toLowerCase();
+      const latest = retiredForThread(state);
+      if (recovery && latest && !sameEndpoint(recovery.endpoint, latest.endpoint))
+        throw new BridgeError("ROUTE_BINDING_MISMATCH", "The retirement changed during live attestation.");
       const existing = state.endpoints.find((row) => row.provider === "codex" && row.handle === normalizedHandle);
       if (succeeds !== undefined) {
         const predecessor = ledger.resolve(succeeds);
-        if (predecessor === undefined || predecessor.provider !== "codex") {
-          throw new BridgeError("ROUTE_UNREGISTERED", "The predecessor route is absent.");
+        if (predecessor === undefined) {
+          const retired = state.retirements.filter((row) => row.alias === succeeds).at(-1);
+          if (!recovery || !retired || retired.nativeKey !== nativeKey({ provider: "codex", handle: normalizedHandle }))
+            throw new BridgeError("ROUTE_UNREGISTERED", "The retired predecessor does not belong to this thread.");
+        } else {
+          if (predecessor.provider !== "codex") throw new BridgeError("ROUTE_UNREGISTERED", "The predecessor is not Codex.");
+          if (predecessor.handle !== normalizedHandle) ledger.retire(reference(predecessor));
         }
-        if (predecessor.handle !== normalizedHandle) ledger.retire(reference(predecessor));
       }
       const endpoint: Endpoint = {
         id: existing?.id ?? this.#id("codex", normalizedHandle), host: this.options.host, provider: "codex",
@@ -105,7 +122,7 @@ export class EndpointDirectory {
       if (state.endpoints.some((row) => row.alias === alias && !sameEndpoint(row, endpoint))) {
         throw new BridgeError("PEER_ALIAS_COLLISION", "The requested Codex alias is already in use.");
       }
-      ledger.register(endpoint);
+      ledger.register(endpoint, recovery?.endpoint);
       return endpoint;
     });
   }
@@ -136,7 +153,7 @@ export class EndpointDirectory {
       const metadata: [string, CodexThread][] = [];
       for (const [handle, thread] of current) {
         const existing = state.endpoints.find((row) => row.provider === "codex" && row.handle === handle);
-        if (state.retirements.some((row) => row.nativeKey === nativeKey({ provider: "codex", handle }))) continue;
+        if (!existing && state.retirements.some((row) => row.nativeKey === nativeKey({ provider: "codex", handle }))) continue;
         if (existing === undefined && state.endpoints.length >= this.options.limits.endpoints) {
           overflow = true;
           continue;

@@ -78,14 +78,16 @@ export class Ledger {
     return matches[0];
   }
 
-  register(endpoint: Endpoint): void {
+  register(endpoint: Endpoint, recoveredRetirement?: EndpointRef): void {
     this.prune();
     if (endpoint.host !== this.host) reject("FEDERATED_ROUTE_READ_ONLY");
     const owned = this.state.endpoints.find((e) => e.id === endpoint.id);
     if (owned && (!sameEndpoint(owned, endpoint) || owned.handle !== endpoint.handle)) reject("ROUTE_BINDING_MISMATCH");
     if (this.state.endpoints.some((e) => e.provider === endpoint.provider && e.handle === endpoint.handle && e.id !== endpoint.id)) reject("ROUTE_BINDING_MISMATCH");
+    const recovery = endpoint.provider === "codex" && endpoint.retained && recoveredRetirement &&
+      this.state.retirements.some((r) => sameEndpoint(r.endpoint, recoveredRetirement) && r.nativeKey === nativeKey(endpoint));
     if (this.state.retirements.some((r) => sameEndpoint(r.endpoint, endpoint) ||
-      (endpoint.provider === "codex" && r.nativeKey === nativeKey(endpoint)))) reject("ROUTE_UNREGISTERED");
+      (endpoint.provider === "codex" && r.nativeKey === nativeKey(endpoint) && !recovery && !owned?.retained))) reject("ROUTE_UNREGISTERED");
     if (!owned && this.state.endpoints.length >= this.limits.endpoints) reject("ROUTE_CAPACITY_EXCEEDED");
     if (owned) { owned.alias = endpoint.alias; if (endpoint.retained) owned.retained = true; }
     else this.state.endpoints.push({ ...endpoint });

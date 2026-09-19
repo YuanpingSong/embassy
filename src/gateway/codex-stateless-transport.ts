@@ -38,6 +38,11 @@ const APPROVAL_REQUEST_METHODS = new Set([
 type JsonObject = Record<string, unknown>;
 type OperationPhase = "clean" | "armed" | "accepted" | "terminal";
 type TurnOutcome = "completed" | "failed" | "interrupted";
+type RequestMethod = "initialize" | "thread/resume" | "thread/unsubscribe" | "turn/start" | "turn/steer";
+export type RpcRejectionDetail = Readonly<{
+  method: "thread/resume" | "turn/start" | "turn/steer";
+  code: number;
+}>;
 export type StatelessCodexRoute = Readonly<{
   alias: string; hostId: string; registrationId: string; threadId: string;
 }>;
@@ -65,10 +70,12 @@ export type StatelessCodexActiveSteerResult =
   | (ActiveSteerResultCommon & Readonly<{
       phase: "clean"; state: "deferred" | "failed";
       safeErrorCode: StatelessCodexSafeErrorCode;
+      detail?: RpcRejectionDetail;
     }>)
   | (ActiveSteerResultCommon & Readonly<{
       phase: "armed"; state: "ambiguous";
       safeErrorCode: StatelessCodexSafeErrorCode;
+      detail?: RpcRejectionDetail;
     }>)
   | (ActiveSteerResultCommon & Readonly<{
       phase: "terminal"; state: "terminal"; outcome: "delivered";
@@ -114,16 +121,19 @@ export type StatelessCodexOperationResult =
       Readonly<{
         phase: "clean"; state: "deferred" | "failed";
         safeErrorCode: StatelessCodexSafeErrorCode;
+        detail?: RpcRejectionDetail;
       }>)
   | (ResultCommon &
       Readonly<{
         phase: "armed"; state: "ambiguous";
         safeErrorCode: StatelessCodexSafeErrorCode;
+        detail?: RpcRejectionDetail;
       }>)
   | (ResultCommon &
       Readonly<{
         phase: "accepted"; state: "unconfirmed";
         safeErrorCode: StatelessCodexSafeErrorCode;
+        detail?: RpcRejectionDetail;
       }>)
   | (ResultCommon &
       Readonly<{
@@ -162,6 +172,7 @@ type NormalizedOptions = Readonly<{
 
 type PendingRequest = {
   id: number;
+  method: RequestMethod;
   reject: (error: OperationError) => void;
   resolve: (value: unknown) => void;
   sent: boolean;
@@ -174,6 +185,7 @@ type PreparedRequest = Readonly<{
   frame: string;
   frameBytes: number;
   id: number;
+  method: RequestMethod;
 }>;
 
 type FastCandidate = { terminal: TurnOutcome | null };
@@ -202,6 +214,7 @@ class OperationError extends Error {
 class RpcRejectedError extends OperationError {
   constructor(
     readonly reason: "closing" | "not_found" | "overloaded" | "other",
+    readonly detail?: RpcRejectionDetail,
   ) {
     super("RPC_REJECTED");
     this.name = "StatelessCodexRpcRejectedError";
@@ -519,7 +532,7 @@ class OperationSession {
       try {
         result = await responsePromise;
       } catch (error) {
-        return this.armedAmbiguous(this.errorCode(error));
+        return this.armedAmbiguous(this.errorCode(error), error);
       }
 
       if (!isRecord(result)) {
@@ -561,10 +574,10 @@ class OperationSession {
       }
     } catch (error) {
       const code = this.errorCode(error);
-      if (this.phase === "accepted") return this.acceptedUnconfirmed(code);
-      if (this.phase === "armed") return this.armedAmbiguous(code);
+      if (this.phase === "accepted") return this.acceptedUnconfirmed(code, error);
+      if (this.phase === "armed") return this.armedAmbiguous(code, error);
       if (error instanceof CleanDeferredError) return this.cleanDeferred(code);
-      return this.cleanFailure(code);
+      return this.cleanFailure(code, error);
     }
   }
 
@@ -674,6 +687,7 @@ class OperationSession {
                   phase: "armed",
                   safeErrorCode: this.errorCode(error),
                   state: "ambiguous",
+                  ...this.rejectionDetail(error),
                 };
               }
             }
@@ -682,8 +696,8 @@ class OperationSession {
       }
     } catch (error) {
       result = phase === "armed"
-        ? { phase, safeErrorCode: this.errorCode(error), state: "ambiguous" }
-        : { phase, safeErrorCode: this.errorCode(error), state: "failed" };
+        ? { phase, safeErrorCode: this.errorCode(error), state: "ambiguous", ...this.rejectionDetail(error) }
+        : { phase, safeErrorCode: this.errorCode(error), state: "failed", ...this.rejectionDetail(error) };
     } finally {
       if (ownsSteerSlot) this.activeSteerInFlight = false;
     }
@@ -769,7 +783,7 @@ class OperationSession {
     return status === "idle" ? undefined : this.cleanDeferred("ROUTE_BUSY");
   }
 
-  private request(method: string, params: JsonObject): Promise<unknown> {
+  private request(method: RequestMethod, params: JsonObject): Promise<unknown> {
     const prepared = this.prepareRequest(method, params);
     const response = this.reservePreparedRequest(prepared);
     if (!this.markPendingSent(prepared.id)) return response;
@@ -785,7 +799,7 @@ class OperationSession {
     return response;
   }
 
-  private prepareRequest(method: string, params: JsonObject): PreparedRequest {
+  private prepareRequest(method: RequestMethod, params: JsonObject): PreparedRequest {
     if (
       method !== "initialize" &&
       method !== "thread/resume" &&
@@ -805,7 +819,7 @@ class OperationSession {
     if (frameBytes > this.options.maxFrameBytes) {
       throw new OperationError("INPUT_INVALID");
     }
-    return { frame, frameBytes, id };
+    return { frame, frameBytes, id, method };
   }
 
   private reservePreparedRequest(prepared: PreparedRequest): Promise<unknown> {
@@ -814,7 +828,7 @@ class OperationSession {
       throw new OperationError("TRANSPORT_CLOSED");
     }
     return new Promise<unknown>((resolve, reject) => {
-      this.pending = { id: prepared.id, reject, resolve, sent: false };
+      this.pending = { id: prepared.id, method: prepared.method, reject, resolve, sent: false };
     });
   }
 
@@ -904,7 +918,11 @@ class OperationSession {
             message === `session ${this.input.route.threadId} is archived. Run \`codex unarchive ${this.input.route.threadId}\` to unarchive it first.`)
             ? "not_found"
             : "other";
-      pending.reject(new RpcRejectedError(reason));
+      const method = pending.method === "thread/resume" || pending.method === "turn/start" ||
+        pending.method === "turn/steer" ? pending.method : undefined;
+      pending.reject(new RpcRejectedError(reason, method === undefined ? undefined : {
+        method, code: parsed.error.code,
+      }));
       return;
     }
     pending.resolve(parsed.result);
@@ -1192,16 +1210,24 @@ class OperationSession {
     return { phase: "clean", safeErrorCode: code, state: "deferred" };
   }
 
-  private cleanFailure(code: StatelessCodexSafeErrorCode): InnerResult {
-    return { phase: "clean", safeErrorCode: code, state: "failed" };
+  private rejectionDetail(error: unknown): { detail: RpcRejectionDetail } | Record<string, never> {
+    return error instanceof RpcRejectedError && error.detail !== undefined
+      ? { detail: error.detail } : {};
   }
 
-  private armedAmbiguous(code: StatelessCodexSafeErrorCode): InnerResult {
-    return { phase: "armed", safeErrorCode: code, state: "ambiguous" };
+  private cleanFailure(code: StatelessCodexSafeErrorCode, error?: unknown): InnerResult {
+    return { phase: "clean", safeErrorCode: code, state: "failed",
+      ...(code === "RPC_REJECTED" ? this.rejectionDetail(error) : {}) };
   }
 
-  private acceptedUnconfirmed(code: StatelessCodexSafeErrorCode): InnerResult {
-    return { phase: "accepted", safeErrorCode: code, state: "unconfirmed" };
+  private armedAmbiguous(code: StatelessCodexSafeErrorCode, error?: unknown): InnerResult {
+    return { phase: "armed", safeErrorCode: code, state: "ambiguous",
+      ...(code === "RPC_REJECTED" ? this.rejectionDetail(error) : {}) };
+  }
+
+  private acceptedUnconfirmed(code: StatelessCodexSafeErrorCode, error?: unknown): InnerResult {
+    return { phase: "accepted", safeErrorCode: code, state: "unconfirmed",
+      ...(code === "RPC_REJECTED" ? this.rejectionDetail(error) : {}) };
   }
 
   private terminal(result: TerminalResult): InnerResult {

@@ -87,6 +87,7 @@ type Mode =
   | "failed" | "interrupted" | "duplicate" | "init-loss" | "resume-loss"
   | "nonempty" | "resume-drift" | "steer-loss" | "wrong-reply" | "malformed-output"
   | "accepted-timeout" | "accepted-close" | "steer-reject"
+  | "init-reject" | "start-reject" | "resume-reject"
   | "resume-overloaded" | "resume-closing" | "resume-missing" | "resume-archived" | "resume-thread-missing";
 
 function statelessFixture(
@@ -110,10 +111,12 @@ function statelessFixture(
       const wire = new ScriptTransport((frame, peer) => {
         operationFrames.push(frame);
         if (frame.method === "initialize") {
+          if (mode === "init-reject") return peer.reject(frame, "initialization refused", -32_099);
           if (mode === "init-loss") return Promise.reject(new Error("initialize loss"));
           peer.result(frame, {});
         }
         else if (frame.method === "thread/resume") {
+          if (mode === "resume-reject") return peer.reject(frame, "resume refused", -32_098);
           if (mode === "resume-missing") return peer.reject(frame, `no rollout found for thread id ${THREAD}`);
           if (mode === "resume-thread-missing") return peer.reject(frame, `thread not found: ${THREAD}`);
           if (mode === "resume-archived") return peer.reject(frame,
@@ -150,6 +153,9 @@ function statelessFixture(
           if (mode === "close") return peer.close();
           if (mode === "timeout") return;
           if (mode === "malformed") return peer.result(frame, { turn: null });
+          if (mode === "start-reject" && frame.method === "turn/start") {
+            return peer.reject(frame, "turn refused", -32_097);
+          }
           if (frame.method === "turn/steer") {
             if (mode === "steer-reject") return peer.reject(frame);
             return peer.result(frame, { turnId: TURN });
@@ -736,8 +742,35 @@ test("same-connector steer RPC rejection is ambiguous and never replayed", async
   const main = await execution;
   assertState(main, "terminal", "terminal");
   assertState(steerResult!, "armed", "ambiguous");
+  assert.deepEqual("detail" in steerResult ? steerResult.detail : undefined,
+    { method: "turn/steer", code: -32602 });
   assert.equal(current.counts().semanticWrites, 2);
   assert.equal(current.frames[0]?.filter(({ method }) => method === "turn/steer").length, 1);
+});
+
+test("RPC rejection retains only the closed method label and numeric error code", async () => {
+  const resume = statelessFixture(["resume-reject"]);
+  const resumeResult = await resume.operation.execute(input(async () => true));
+  assertState(resumeResult, "clean", "failed");
+  assertCode(resumeResult, "RPC_REJECTED");
+  assert.deepEqual("detail" in resumeResult ? resumeResult.detail : undefined,
+    { method: "thread/resume", code: -32_098 });
+  assert.equal(JSON.stringify(resumeResult).includes("resume refused"), false);
+
+  const start = statelessFixture(["start-reject"]);
+  const startResult = await start.operation.execute(input(async () => true));
+  assertState(startResult, "armed", "ambiguous");
+  assertCode(startResult, "RPC_REJECTED");
+  assert.deepEqual("detail" in startResult ? startResult.detail : undefined,
+    { method: "turn/start", code: -32_097 });
+  assert.equal(JSON.stringify(startResult).includes("turn refused"), false);
+
+  const initialize = statelessFixture(["init-reject"]);
+  const initializeResult = await initialize.operation.execute(input(async () => true));
+  assertState(initializeResult, "clean", "failed");
+  assertCode(initializeResult, "RPC_REJECTED");
+  assert.equal("detail" in initializeResult ? initializeResult.detail : undefined, undefined);
+  assert.equal(JSON.stringify(initializeResult).includes("initialization refused"), false);
 });
 
 test("paused steer authorization is fenced by terminal, approval, status, close, or protocol drift", async () => {

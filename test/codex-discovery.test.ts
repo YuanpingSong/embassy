@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { BridgeError } from "../src/errors.js";
 import type { CodexAppServerTransport } from "../src/gateway/codex-app-server.js";
 import { CORE_VERSION } from "../src/gateway/core-version.js";
 import type { ThreadSortKey } from "./fixtures/codex-ad931a4/ThreadSortKey.js";
+import type {
+  ThreadLoadedListParams,
+  ThreadLoadedListResponse,
+  ThreadReadParams,
+} from "./fixtures/codex-a5290028/ThreadLiveAttestation.js";
 const nativeSortKeys: Record<ThreadSortKey, true> = {
   created_at: true, updated_at: true, recency_at: true, section_position: true,
 };
@@ -20,6 +26,8 @@ const A = "00000000-0000-7000-8000-0000000000a1";
 const B = "00000000-0000-7000-8000-0000000000b2";
 const C = "00000000-0000-7000-8000-0000000000c3";
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+const refusal = (code: string) => (error: unknown): boolean =>
+  error instanceof BridgeError && error.code === code;
 
 type Frame = Record<string, unknown>;
 
@@ -164,6 +172,107 @@ test("discovery initializes before a bounded paged scan and projects only consum
     },
   });
   assert.equal(JSON.stringify(discovery.snapshot()).includes("preview"), false);
+  await discovery.close();
+});
+
+test("fresh exact attestation accepts loaded idle and busy roots without a provider write", async () => {
+  let observedStatus: Record<string, unknown> = { type: "idle" };
+  const wire = new FakeTransport((frame) => {
+    if (frame.method === "initialize") return {};
+    if (frame.method === "thread/list") return { data: [thread(A)], nextCursor: null };
+    if (frame.method === "thread/loaded/list") {
+      assert.deepEqual(frame.params, { limit: 256 } satisfies ThreadLoadedListParams);
+      return { data: [A], nextCursor: null } satisfies ThreadLoadedListResponse;
+    }
+    if (frame.method === "thread/read") {
+      assert.deepEqual(frame.params, { threadId: A, includeTurns: false } satisfies ThreadReadParams);
+      return { thread: thread(A, { status: observedStatus }) };
+    }
+    throw new Error(`unexpected ${String(frame.method)}`);
+  });
+  const discovery = observer(wire, []);
+  await discovery.refresh();
+  wire.frames.length = 0;
+
+  await discovery.attestLiveThread!(A);
+  observedStatus = { type: "active", activeFlags: [] };
+  await discovery.attestLiveThread!(A.toUpperCase());
+
+  assert.deepEqual(wire.frames.map(({ method }) => method), [
+    "thread/loaded/list", "thread/read", "thread/loaded/list", "thread/read",
+  ]);
+  assert.equal(wire.frames.some(({ method }) =>
+    ["thread/resume", "turn/start", "turn/steer"].includes(String(method))), false);
+  await discovery.close();
+});
+
+test("fresh attestation pages loaded ids and does not trust the cached top-20 row", async () => {
+  let loaded = true;
+  const wire = new FakeTransport((frame) => {
+    if (frame.method === "initialize") return {};
+    if (frame.method === "thread/list") return { data: [thread(A)], nextCursor: null };
+    if (frame.method === "thread/loaded/list") {
+      const params = frame.params as ThreadLoadedListParams;
+      if (params.cursor === undefined) return {
+        data: loaded ? [B] : [], nextCursor: loaded ? "second" : null,
+      } satisfies ThreadLoadedListResponse;
+      assert.equal(params.cursor, "second");
+      return { data: [A], nextCursor: null } satisfies ThreadLoadedListResponse;
+    }
+    if (frame.method === "thread/read") return { thread: thread(A) };
+    throw new Error(`unexpected ${String(frame.method)}`);
+  });
+  const discovery = observer(wire, []);
+  await discovery.refresh();
+  loaded = false;
+  await assert.rejects(discovery.attestLiveThread!(A), refusal("THREAD_NOT_OBSERVED"));
+  loaded = true;
+  await discovery.attestLiveThread!(A);
+  await discovery.close();
+});
+
+test("fresh attestation refuses dormant, waiting, system-error, non-root, and mismatched threads", async () => {
+  let returned = thread(A);
+  const wire = new FakeTransport((frame) => {
+    if (frame.method === "initialize") return {};
+    if (frame.method === "thread/list") return { data: [], nextCursor: null };
+    if (frame.method === "thread/loaded/list") {
+      return { data: [A], nextCursor: null } satisfies ThreadLoadedListResponse;
+    }
+    if (frame.method === "thread/read") return { thread: returned };
+    throw new Error(`unexpected ${String(frame.method)}`);
+  });
+  const discovery = observer(wire, []);
+  await discovery.refresh();
+
+  returned = thread(A, { status: { type: "notLoaded" } });
+  await assert.rejects(discovery.attestLiveThread!(A), refusal("THREAD_NOT_OBSERVED"));
+  returned = thread(A, { status: { type: "active", activeFlags: ["waitingOnUserInput"] } });
+  await assert.rejects(discovery.attestLiveThread!(A), refusal("APPROVAL_REQUIRED"));
+  returned = thread(A, { status: { type: "systemError" } });
+  await assert.rejects(discovery.attestLiveThread!(A), refusal("MANAGED_CODEX_UNAVAILABLE"));
+  returned = thread(A, { parentThreadId: B });
+  await assert.rejects(discovery.attestLiveThread!(A), refusal("THREAD_NOT_OBSERVED"));
+  returned = thread(B);
+  await assert.rejects(discovery.attestLiveThread!(A), refusal("PROTOCOL_ERROR"));
+  await discovery.close();
+});
+
+test("transport loss during fresh attestation refuses unavailable without starting or resuming a thread", async () => {
+  const wire = new FakeTransport((frame, peer) => {
+    if (frame.method === "initialize") return {};
+    if (frame.method === "thread/list") return { data: [], nextCursor: null };
+    if (frame.method === "thread/loaded/list") {
+      queueMicrotask(() => peer.lose());
+      return { data: [A], nextCursor: null } satisfies ThreadLoadedListResponse;
+    }
+    throw new Error(`unexpected ${String(frame.method)}`);
+  });
+  const discovery = observer(wire, []);
+  await discovery.refresh();
+  await assert.rejects(discovery.attestLiveThread!(A), refusal("MANAGED_CODEX_UNAVAILABLE"));
+  assert.equal(wire.frames.some(({ method }) =>
+    ["thread/read", "thread/resume", "turn/start", "turn/steer"].includes(String(method))), false);
   await discovery.close();
 });
 

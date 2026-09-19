@@ -11,6 +11,17 @@ const read = async (relative: string): Promise<string> =>
   await readFile(path.join(root, relative), "utf8");
 const squash = (value: string): string => value.replace(/\s+/g, " ");
 
+test("recovery and receiving-host guidance distinguish live registration from message delivery", async () => {
+  for (const file of ["README.md", "skills/embassy-peer/SKILL.md"]) {
+    const text = squash(await read(file));
+    assert.match(text, /Never retire your own route to fix delivery; retirement cancels queued messages/);
+    assert.match(text, /managed App Server.*CLI TUI or exec/);
+    assert.match(text, /Other hosts.*send-only/);
+    assert.match(text, /loaded and live \(idle or busy\)/);
+  }
+  assert.match(await read("SECURITY.md"), /memory-only; no provider error text/);
+});
+
 test("fallback registration docs name the exact alias rule and replaceable host placeholder", async () => {
   for (const file of ["README.md", "skills/embassy-peer/SKILL.md"]) {
     const text = squash(await read(file));
@@ -145,7 +156,7 @@ test("protocol and reset documentation pins the v4-only boundary", async () => {
     read("docs/GATEWAY-ARCHITECTURE.md"), read("SECURITY.md"),
   ]);
   assert.match(architecture, /Private state \(`gateway-state\.json`\) \| 7/);
-  assert.match(architecture, /Private control \(CLI ↔ broker\) \| 7/);
+  assert.match(architecture, /Private control \(CLI ↔ broker\) \| 8/);
   assert.match(architecture, /Federation \(`peer-stdio`\) \| 3/);
   assert.match(architecture, /Consumed Claude peer protocol \| 1/);
   for (const document of [config, architecture, security]) {

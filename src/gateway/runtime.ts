@@ -141,6 +141,10 @@ export async function runCoreRuntime(options: CoreRuntimeOptions, dependencies: 
     loopback = new LoopbackDestination(codex);
     federation = d.createFederation(config.hostId, config.peerNodes);
     const directory = new EndpointDirectory({ host: config.hostId, limits: ledgerLimits, store, claude: peer, remote: federation,
+      attestLiveCodex: async (handle) => {
+        if (!discovery?.attestLiveThread) throw new BridgeError("MANAGED_CODEX_UNAVAILABLE", "Live Codex attestation is unavailable.");
+        await discovery.attestLiveThread(handle);
+      },
       automaticCodex: true });
     let codexObservation: CodexDiscoveryObservation = { complete: false, truncated: false };
     discovery = d.createCodexDiscovery({ hostId: config.hostId, local: { environment: codexEnvironment(env) },

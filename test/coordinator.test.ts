@@ -162,6 +162,28 @@ test("uncertain destination results settle from the committed write phase and ke
   });
 });
 
+test("RPC refusal detail is memory-only, Codex-only, and bound to the matching safe code", async (t) => {
+  const detail = { method: "thread/resume", code: -32_601 } as const;
+  const f = await fixture(t, async () => ({ outcome: "failed", code: "RPC_REJECTED", detail }));
+  await f.admit("refused");
+  await f.coordinator.wake(f.target);
+  assert.deepEqual(f.coordinator.observation(f.target), { outcome: "failed", code: "RPC_REJECTED", detail });
+  assert.equal(JSON.stringify(await f.store.snapshot()).includes("thread/resume"), false);
+
+  const claudeTarget = endpoint("claude-target", "claude");
+  await f.change((ledger) => ledger.register(claudeTarget));
+  await f.admit("claude refusal", f.source, claudeTarget);
+  await f.coordinator.wake(claudeTarget);
+  assert.deepEqual(f.coordinator.observation(claudeTarget), { outcome: "failed", code: "RPC_REJECTED" });
+
+  const wrongCode = await fixture(t, async () => ({ outcome: "failed", code: "REQUEST_TIMEOUT", detail }));
+  await wrongCode.admit("wrong code");
+  await wrongCode.coordinator.wake(wrongCode.target);
+  assert.deepEqual(wrongCode.coordinator.observation(wrongCode.target), {
+    outcome: "failed", code: "REQUEST_TIMEOUT",
+  });
+});
+
 test("rename during preparation refuses the old envelope and a later clean attempt uses the new name", async (t) => {
   let rename!: () => Promise<void>, calls = 0;
   const f = await fixture(t, async (input) => {
