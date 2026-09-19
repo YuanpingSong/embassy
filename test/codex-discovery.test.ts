@@ -206,6 +206,53 @@ test("fresh exact attestation accepts loaded idle and busy roots without a provi
   await discovery.close();
 });
 
+test("attestation drops a drifted session but capacity and missing methods are not protocol faults", async () => {
+  let mode: "drift" | "capacity" | "missing" = "drift", pages = 0;
+  const wires: FakeTransport[] = [];
+  const discovery = createCodexDiscoveryObserver({ hostId: "m5dev", onSnapshot: () => {}, refreshIntervalMs: 60_000 }, {
+    createFactory: async () => {
+      const wire = new FakeTransport((frame) => {
+        if (frame.method === "initialize") return {};
+        if (frame.method === "thread/list") return { data: [], nextCursor: null };
+        if (frame.method === "thread/loaded/list") {
+          if (mode === "drift") return { data: "not an array" };
+          pages++;
+          return { data: Array.from({ length: 256 }, (_, i) =>
+            `00000000-0000-7000-8000-${(1000 + pages * 256 + i).toString(16).padStart(12, "0")}`), nextCursor: `page-${pages}` };
+        }
+        throw new Error("unexpected read or write");
+      });
+      const send = wire.send.bind(wire);
+      wire.send = async (payload) => {
+        const frame = JSON.parse(payload) as Frame;
+        if (mode === "missing" && frame.method === "thread/loaded/list") {
+          wire.frames.push(frame);
+          queueMicrotask(() => wire.emit({ id: frame.id, error: { code: -32601, message: `private ${A}` } }));
+        } else await send(payload);
+      };
+      wires.push(wire); return factory(wire);
+    },
+  });
+  try {
+    await discovery.refresh();
+    await assert.rejects(discovery.attestLiveThread!(A), refusal("PROTOCOL_ERROR"));
+    assert.equal(wires[0]!.closed, true);
+    assert.equal(discovery.snapshot().observation.safeErrorCode, "PROTOCOL_ERROR");
+    mode = "capacity";
+    await discovery.refresh();
+    assert.equal(wires.length, 2);
+    await assert.rejects(discovery.attestLiveThread!(A), refusal("CODEX_ATTESTATION_LIMIT"));
+    assert.equal(pages, 16);
+    assert.equal(wires[1]!.closed, false);
+    mode = "missing";
+    await assert.rejects(discovery.attestLiveThread!(A), (error: unknown) =>
+      error instanceof BridgeError && error.code === "RPC_REJECTED" && !error.message.includes(A));
+    assert.equal(wires[1]!.closed, false);
+    assert.ok(wires.flatMap((wire) => wire.frames).every((frame) =>
+      ["initialize", "initialized", "thread/list", "thread/loaded/list"].includes(String(frame.method))));
+  } finally { await discovery.close(); }
+});
+
 test("fresh attestation pages loaded ids and does not trust the cached top-20 row", async () => {
   let loaded = true;
   const wire = new FakeTransport((frame) => {

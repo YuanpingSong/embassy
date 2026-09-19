@@ -95,7 +95,9 @@ async function body(input: Readable): Promise<string> {
 }
 
 function hint(command: string, code: string, stateDir: string, host?: string): string {
-  if (code === "RPC_REJECTED") return "The App Server refused an operation. Run embassy status --json for the route's lastOperation.detail (method and RPC code). If resume was refused, another Codex host may own the thread; only sessions attached to the managed App Server receive. If the session predates a daemon restart, restart that session.";
+  if (code === "RPC_REJECTED" && command === "register-codex") return "The App Server refused the liveness check for this thread; do not restart the session. Check the App Server version and support for thread/loaded/list and thread/read, then retry from the same session.";
+  if (code === "CODEX_ATTESTATION_LIMIT") return "The liveness check reached its 4096 loaded-thread scan limit; the endpoint remains retired. Reduce loaded threads before retrying from the same session; do not restart this session.";
+  if (code === "RPC_REJECTED" && ["send", "delivery-status", "wait-delivery", "status", "tui"].includes(command)) return "The App Server refused a delivery operation. Run embassy status --json for the route's lastOperation.detail (method and RPC code). If resume was refused, another Codex host may own the thread; only sessions attached to the managed App Server receive. If the session predates a daemon restart, restart that session.";
   if (code === "INVALID_ALIAS") return `Codex aliases must match codex-<name>@<host> where <host> is ${host ?? "the host in nodes.json"}, e.g. codex-career-helper@${host ?? "your-host"}. Before @: lowercase letters, digits, underscore, dash (at most 32 characters including codex-); dots are allowed only in the host. Replace your-host with the host from nodes.json.`;
   if (code === "SKILLS_TARGET_UNSAFE") return "Check that HOME and the selected skill paths are owned by this user and are real directories/files, not symlinks. Do not use sudo.";
   if (code === "SKILLS_PACKAGE_INVALID") return "Reinstall the Embassy CLI package; its bundled embassy-peer skill is missing or invalid.";
@@ -262,7 +264,7 @@ export async function runCoreCli(args: readonly string[], dependencies: CoreCliD
     }
     if (command === "status" && !json && stdout.isTTY) stdout.write(renderStatus(result));
     else write(command, result);
-    if (command === "retire") stderr.write("[embassy] Retirement cancels queued/reserved work involving this endpoint in both directions; armed work becomes ambiguous and accepted work unconfirmed. Codex is removed from automatic discovery while retirement evidence is retained, unless it re-registers explicitly; Claude may reappear with a fresh endpoint ID.\n");
+    if (command === "retire") stderr.write("[embassy] Retirement cancels queued/reserved work involving this endpoint in both directions; armed work becomes ambiguous and accepted work ambiguous or unconfirmed. Codex is removed from automatic discovery while retirement evidence is retained, unless it re-registers explicitly; Claude may reappear with a fresh endpoint ID.\n");
     if (command === "status" && object(result) && Array.isArray(result.routes)) {
       for (const row of result.routes.filter(object)) {
         if (object(row.lastOperation) && row.lastOperation.code === "RPC_REJECTED" && object(row.lastOperation.detail))

@@ -107,8 +107,9 @@ export class EndpointDirectory {
       if (succeeds !== undefined) {
         const predecessor = ledger.resolve(succeeds);
         if (predecessor === undefined) {
-          const retired = state.retirements.filter((row) => row.alias === succeeds).at(-1);
-          if (!recovery || !retired || retired.nativeKey !== nativeKey({ provider: "codex", handle: normalizedHandle }))
+          const retired = state.retirements.some((row) => row.alias === succeeds &&
+            row.nativeKey === nativeKey({ provider: "codex", handle: normalizedHandle }));
+          if (!recovery || !retired)
             throw new BridgeError("ROUTE_UNREGISTERED", "The retired predecessor does not belong to this thread.");
         } else {
           if (predecessor.provider !== "codex") throw new BridgeError("ROUTE_UNREGISTERED", "The predecessor is not Codex.");

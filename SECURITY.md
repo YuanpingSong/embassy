@@ -126,8 +126,11 @@ while its bounded retirement evidence is retained. A live Claude session may
 re-enroll immediately with a fresh opaque ID, even with the same native UUID;
 old deliveries and reply references remain fenced to the retired ID. Codex's
 native-identity retirement fence still blocks automatic discovery, but an explicit
-same-thread registration may create a new retained endpoint after a fresh exact
-loaded/live App Server observation (idle or busy). That read performs no resume,
+a caller presenting the retired thread's inherited `CODEX_THREAD_ID` may create
+a new retained endpoint while that exact thread is loaded and live, as freshly
+observed through the App Server (idle or busy). This is the existing same-user,
+inherited-identity model, not independent proof of which agent presented it.
+That read performs no resume,
 turn start, steering, or approval operation. Recovery retains the old retirement
 evidence and refuses a changed retirement during attestation. Public
 endpoint IDs can select exact local operator retirement without exposing a

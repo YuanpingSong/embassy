@@ -130,12 +130,23 @@ Never retire your own route to fix delivery; retirement cancels queued messages 
 both directions. Run `embassy refresh` and read the safe code instead. If already
 retired, a Codex thread may explicitly re-register after the managed App Server
 confirms it is loaded and live (idle or busy); `--succeeds` may name its own retired
-predecessor, not another thread's. The new ID cannot receive old messages/replies.
-For `RPC_REJECTED`, `status --json` exposes the route's memory-only
+predecessor by matching any retained retirement row with that alias and the caller's
+native key, not another thread's row. The new ID cannot receive old messages/replies.
+Recovery requires `thread/loaded/list` and metadata-only `thread/read` in the
+managed daemon; use Codex App Server 0.153.4 or newer as the integration baseline,
+not a claim about the first upstream version containing those methods. Method
+support is checked by the actual requests, not a version-string routing gate.
+A missing method (`-32601`) returns `RPC_REJECTED` with registration-specific
+guidance: check the App Server version and retry from the same session; do not
+restart the session. No route or delivery `lastOperation.detail` is promised for
+this liveness-check failure. A bounded scan exceeding 16 pages (at most 4096
+loaded threads) refuses with `CODEX_ATTESTATION_LIMIT`, not a protocol fault.
+For delivery `RPC_REJECTED` failures, `status --json` exposes the route's memory-only
 `lastOperation.detail` with a method and numeric RPC code, never the raw error.
 A resume refusal may mean another host owns the thread (other hosts are send-only)
 or its session predates a daemon restart; use a managed-daemon CLI TUI/exec session
-or restart that session. Turn refusals are reported separately without that diagnosis.
+or restart that session. Turn refusals and registration-attestation refusals are
+reported separately without that diagnosis.
 
 ## Other Macs
 

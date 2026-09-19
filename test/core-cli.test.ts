@@ -116,6 +116,7 @@ test("CLI register, named send, retained reply and broker check traverse the rea
     stdout: retireOut.stream, stderr: retireHint.stream }), 0);
   assert.match(retireHint.read(), /queued\/reserved work involving this endpoint in both directions/);
   assert.match(retireHint.read(), /unless it re-registers explicitly; Claude may reappear/);
+  assert.match(retireHint.read(), /accepted work ambiguous or unconfirmed/);
   const terminal = sink(), errors = sink();
   Object.assign(terminal.stream, { isTTY: true });
   assert.equal(await runCoreCli(["status"], { env: { EMBASSY_STATE_DIR: stateDir }, stdout: terminal.stream, stderr: errors.stream }), 0);
@@ -215,6 +216,15 @@ test("the real CLI preserves post-write uncertainty and rejects extra public fie
     assert.equal(JSON.parse(output.read()).error.code, "CONTROL_WRITE_OUTCOME_AMBIGUOUS");
     assert.equal((output.read() + errors.read()).includes(a), false);
   }
+  reply = { ok: false, code: "RPC_REJECTED" };
+  const attestationOut = sink(), attestationHint = sink();
+  assert.equal(await runCoreCli(["register-codex", "--alias", "codex-test@local"], {
+    env: { EMBASSY_STATE_DIR: root, CODEX_THREAD_ID: a }, stdout: attestationOut.stream, stderr: attestationHint.stream,
+  }), 3);
+  assert.equal(JSON.parse(attestationOut.read()).error.code, "RPC_REJECTED");
+  assert.match(attestationHint.read(), /refused the liveness check.*do not restart the session/);
+  assert.match(attestationHint.read(), /App Server version.*retry from the same session/);
+  assert.doesNotMatch(attestationHint.read(), /lastOperation|another.*host|restart that session/);
   reply = { ok: true, result: { status: "healthy", private: a } };
   const output = sink(), errors = sink();
   assert.equal(await runCoreCli(["health"], { env: { EMBASSY_STATE_DIR: root }, stdout: output.stream, stderr: errors.stream }), 3);

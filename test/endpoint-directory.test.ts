@@ -127,6 +127,21 @@ test("failed recovery and a retirement racing fresh attestation leave the fence 
   assert.deepEqual((await f.store.snapshot()).endpoints, []);
 });
 
+test("retired succeeds searches alias history for the caller's own native key", async (t) => {
+  const f = await fixture(t, undefined, { randomIds: true, attestLiveCodex: async () => {} });
+  for (const handle of [UUID_A, UUID_B]) {
+    const row = await f.directory.registerCodex(handle, "codex-reused@local");
+    await f.store.transact((state) => new Ledger(state, HOST, f.limits, 1000).retire(row));
+  }
+  const recovered = await f.directory.registerCodex(UUID_A, "codex-first@local", "codex-reused@local");
+  assert.equal(recovered.handle, UUID_A);
+  const second = await f.directory.registerCodex(UUID_B, "codex-second@local", "codex-reused@local");
+  assert.equal(second.handle, UUID_B);
+  const other = await f.directory.registerCodex(UUID_C, "codex-unrelated@local");
+  await f.store.transact((state) => new Ledger(state, HOST, f.limits, 1000).retire(other));
+  await assert.rejects(f.directory.registerCodex(UUID_C, "codex-no@local", "codex-reused@local"), { code: "ROUTE_UNREGISTERED" });
+});
+
 test("caller identity comes only from an inherited Codex handle or Claude reply socket", async (t) => {
   const f = await fixture(t);
   const codex = await f.directory.registerCodex(UUID_A, "codex-main@local");

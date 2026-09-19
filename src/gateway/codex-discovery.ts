@@ -309,46 +309,55 @@ class Observer implements CodexDiscoveryObserver {
     const session = this.#session;
     if (session === undefined) throw new DiscoveryError("TRANSPORT_CLOSED");
 
-    let cursor: string | undefined;
-    const cursors = new Set<string>();
-    let loaded = false;
-    for (let pageNumber = 0; pageNumber < MAX_LOADED_PAGES; pageNumber++) {
-      const page = await this.#serialRequest(session, "thread/loaded/list", {
-        limit: LOADED_PAGE_SIZE,
-        ...(cursor === undefined ? {} : { cursor }),
-      });
-      if (!record(page) || !Array.isArray(page.data) || page.data.length > LOADED_PAGE_SIZE ||
-          !page.data.every((value) => typeof value === "string" && UUID.test(value))) {
+    try {
+      let cursor: string | undefined;
+      const cursors = new Set<string>();
+      let loaded = false;
+      for (let pageNumber = 0; pageNumber < MAX_LOADED_PAGES; pageNumber++) {
+        const page = await this.#serialRequest(session, "thread/loaded/list", {
+          limit: LOADED_PAGE_SIZE,
+          ...(cursor === undefined ? {} : { cursor }),
+        });
+        if (!record(page) || !Array.isArray(page.data) || page.data.length > LOADED_PAGE_SIZE ||
+            !page.data.every((value) => typeof value === "string" && UUID.test(value))) {
+          throw new DiscoveryError("PROTOCOL_ERROR");
+        }
+        loaded = page.data.some((value) => value.toLowerCase() === id);
+        if (loaded || page.nextCursor == null) break;
+        if (typeof page.nextCursor !== "string" || !page.nextCursor || page.nextCursor.length > 256 ||
+            cursors.has(page.nextCursor)) throw new DiscoveryError("PROTOCOL_ERROR");
+        cursor = page.nextCursor;
+        cursors.add(cursor);
+        if (pageNumber === MAX_LOADED_PAGES - 1)
+          throw new BridgeError("CODEX_ATTESTATION_LIMIT", "The loaded-thread liveness scan reached its capacity.");
+      }
+      if (!loaded) throw new BridgeError("THREAD_NOT_OBSERVED", "The Codex thread is not currently loaded.");
+
+      const response = await this.#serialRequest(session, "thread/read", { threadId: id, includeTurns: false });
+      if (!record(response) || !record(response.thread)) throw new DiscoveryError("PROTOCOL_ERROR");
+      if (!rootThread(response.thread)) {
+        throw new BridgeError("THREAD_NOT_OBSERVED", "The Codex thread is not an eligible root thread.");
+      }
+      const observed = parseThread(response.thread);
+      if (observed.id !== id) throw new DiscoveryError("PROTOCOL_ERROR");
+      if (!observed.loaded || observed.status === "dormant") {
+        throw new BridgeError("THREAD_NOT_OBSERVED", "The Codex thread is not currently loaded.");
+      }
+      if (observed.status === "waiting") {
+        throw new BridgeError("APPROVAL_REQUIRED", "The Codex thread is waiting for user input or approval.");
+      }
+      if (observed.status === "systemError") {
+        throw new BridgeError("MANAGED_CODEX_UNAVAILABLE", "The Codex thread is in a system-error state.");
+      }
+      if (observed.status !== "idle" && observed.status !== "busy") {
         throw new DiscoveryError("PROTOCOL_ERROR");
       }
-      loaded = page.data.some((value) => value.toLowerCase() === id);
-      if (loaded || page.nextCursor == null) break;
-      if (typeof page.nextCursor !== "string" || !page.nextCursor || page.nextCursor.length > 256 ||
-          cursors.has(page.nextCursor)) throw new DiscoveryError("PROTOCOL_ERROR");
-      cursor = page.nextCursor;
-      cursors.add(cursor);
-      if (pageNumber === MAX_LOADED_PAGES - 1) throw new DiscoveryError("PROTOCOL_ERROR");
-    }
-    if (!loaded) throw new BridgeError("THREAD_NOT_OBSERVED", "The Codex thread is not currently loaded.");
-
-    const response = await this.#serialRequest(session, "thread/read", { threadId: id, includeTurns: false });
-    if (!record(response) || !record(response.thread)) throw new DiscoveryError("PROTOCOL_ERROR");
-    if (!rootThread(response.thread)) {
-      throw new BridgeError("THREAD_NOT_OBSERVED", "The Codex thread is not an eligible root thread.");
-    }
-    const observed = parseThread(response.thread);
-    if (observed.id !== id) throw new DiscoveryError("PROTOCOL_ERROR");
-    if (!observed.loaded || observed.status === "dormant") {
-      throw new BridgeError("THREAD_NOT_OBSERVED", "The Codex thread is not currently loaded.");
-    }
-    if (observed.status === "waiting") {
-      throw new BridgeError("APPROVAL_REQUIRED", "The Codex thread is waiting for user input or approval.");
-    }
-    if (observed.status === "systemError") {
-      throw new BridgeError("MANAGED_CODEX_UNAVAILABLE", "The Codex thread is in a system-error state.");
-    }
-    if (observed.status !== "idle" && observed.status !== "busy") {
-      throw new DiscoveryError("PROTOCOL_ERROR");
+    } catch (error) {
+      if (error instanceof DiscoveryError && error.code === "PROTOCOL_ERROR") {
+        this.#connectionLost(session, error);
+        await this.#cleanup;
+      }
+      throw error;
     }
   }
 
