@@ -42,7 +42,7 @@ Steps, in order — each gates the next:
      `gh workflow run release.yml -f tag=vVERSION`, then watch that run.
    - Any test-job failure: stop, verbatim output.
 7. Verify from the outside: `gh release view vVERSION` exists and is not
-   a draft; `npm view agent-embassy version` serves VERSION (allow up to
+   a draft; `npm view agent-embassy version --prefer-online` serves VERSION (allow up to
    two 30s propagation waits).
 8. Report: tag, pipeline run id, npm version served, and the pass counts
    from step 4.
