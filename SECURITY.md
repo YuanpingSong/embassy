@@ -125,7 +125,7 @@ Embassy never publishes a UUID. A retired or replaced endpoint remains fenced
 while its bounded retirement evidence is retained. A live Claude session may
 re-enroll immediately with a fresh opaque ID, even with the same native UUID;
 old deliveries and reply references remain fenced to the retired ID. Codex's
-native-identity retirement fence still blocks automatic discovery, but an explicit
+native-identity retirement fence still blocks automatic discovery, but
 a caller presenting the retired thread's inherited `CODEX_THREAD_ID` may create
 a new retained endpoint while that exact thread is loaded and live, as freshly
 observed through the App Server (idle or busy). This is the existing same-user,
