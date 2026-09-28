@@ -477,7 +477,7 @@ test("300 unrelated stale registry files do not gate an exact prepared write or 
   let received!: () => void;
   const arrival = new Promise<void>((resolve) => { received = resolve; });
   const live = await addPeer(current, { pid: 41_103, handler: (socket) => socket.on("data", () => received()) });
-  await current.adapter.discover();
+  const selection = (await current.adapter.discover()).peers[0]!;
   await current.adapter.assertTargetWorkspaceDisjoint(SESSION_ONE, current.stateDir);
   const prepared = await current.adapter.prepareSend(SESSION_ONE, "bounded", { deadlineAt: Date.now() + 10_000 });
   const template = JSON.parse(await readFile(live.registryPath, "utf8"));
@@ -489,7 +489,7 @@ test("300 unrelated stale registry files do not gate an exact prepared write or 
   await prepared.perform(async () => true);
   await arrival;
   assert.equal(inspections, 3); // one group check and two exact-generation checks
-  const next = await current.adapter.prepareSend(SESSION_ONE, "newer beyond display window", { deadlineAt: Date.now() + 10_000 });
+  const next = await current.adapter.prepareSend(SESSION_ONE, "newer beyond display window", { deadlineAt: Date.now() + 10_000, selection });
   await addPeer(current, { pid: 60_000, startedAt: 1_786_148_833_000 });
   current.processes.get = get;
   await assert.rejects(next.perform(async () => assert.fail("missed newer duplicate beyond display bound")), { code: "CLAUDE_PEER_TARGET_CHANGED" });
