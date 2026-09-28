@@ -698,3 +698,48 @@ test("cleanup refuses any process group not exactly owned", async () => {
     false,
   );
 });
+
+test("a relocated control socket is followed only through an owned private link", async () => {
+  const fixture = await installationFixture();
+  const daemon = await mkdtemp(path.join(await realpath("/tmp"), "cld-"));
+  const relocated = path.join(daemon, "sock");
+  const server = createServer();
+  try {
+    await chmod(daemon, 0o700);
+    server.listen(relocated);
+    await once(server, "listening");
+    await chmod(relocated, 0o600);
+    const direct = await resolveManagedLocalCodexInstallation(fixture.home);
+    await rm(fixture.socket, { force: true });
+    await symlink(relocated, fixture.socket);
+    const linked = await resolveManagedLocalCodexInstallation(fixture.home);
+    assert.equal(linked.availabilityFailure, undefined);
+    assert.equal(linked.controlSocketPath, fixture.socket);
+    assert.notEqual(linked.endpointGeneration, direct.endpointGeneration);
+
+    const unsafe = (error: unknown) =>
+      error instanceof LocalCodexTransportError &&
+      error.code === "LOCAL_APP_SERVER_ENDPOINT_UNSAFE";
+    await chmod(relocated, 0o666);
+    await assert.rejects(resolveManagedLocalCodexInstallation(fixture.home), unsafe);
+    await chmod(relocated, 0o600);
+    await chmod(daemon, 0o755);
+    await assert.rejects(resolveManagedLocalCodexInstallation(fixture.home), unsafe);
+    await chmod(daemon, 0o700);
+
+    const hop = path.join(daemon, "hop");
+    await symlink(relocated, hop);
+    await rm(fixture.socket, { force: true });
+    await symlink(hop, fixture.socket);
+    await assert.rejects(resolveManagedLocalCodexInstallation(fixture.home), unsafe);
+
+    await rm(fixture.socket, { force: true });
+    await symlink(path.join(daemon, "missing"), fixture.socket);
+    const dangling = await resolveManagedLocalCodexInstallation(fixture.home);
+    assert.equal(dangling.availabilityFailure, "CODEX_CONTROL_SOCKET_UNAVAILABLE");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(daemon, { recursive: true, force: true });
+    await fixture.close();
+  }
+});
