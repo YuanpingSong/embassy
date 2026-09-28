@@ -75,6 +75,8 @@ export type ManagedLocalCodexInstallation = {
   availabilityFailure?: "CODEX_CONTROL_SOCKET_UNAVAILABLE";
   binaryPath: string;
   controlSocketPath: string;
+  /** Private resolved target for a relocated socket; never re-resolve its link in the proxy. */
+  resolvedControlSocketPath?: string;
   endpointGeneration: string;
   home: string;
 };
@@ -345,6 +347,8 @@ async function resolveManagedLocalCodexInstallationWithReleaseLeaves(
   );
   const controlSocketPath = managedCodexControlSocketPath(home);
   let socketMetadata: Awaited<ReturnType<typeof lstat>> | undefined;
+  let linkMetadata: Awaited<ReturnType<typeof lstat>> | undefined;
+  let resolvedControlSocketPath: string | undefined;
   let availabilityFailure:
     | "CODEX_CONTROL_SOCKET_UNAVAILABLE"
     | undefined;
@@ -377,7 +381,11 @@ async function resolveManagedLocalCodexInstallationWithReleaseLeaves(
         // Codex 0.158.0 keeps the socket in a private per-user directory and
         // leaves a link here. Follow exactly one owned link to an owned
         // private socket whose parent is an owned private directory.
-        assertOwnedPrivate(socketMetadata, undefined);
+        // Symlink mode bits are not an access boundary (Linux reports 0777).
+        if (socketMetadata.uid !== process.getuid?.()) {
+          throw new LocalCodexTransportError("LOCAL_APP_SERVER_ENDPOINT_UNSAFE");
+        }
+        linkMetadata = socketMetadata;
         const target = await readlink(controlSocketPath);
         if (!path.isAbsolute(target) || path.normalize(target) !== target) {
           throw new LocalCodexTransportError(
@@ -397,6 +405,7 @@ async function resolveManagedLocalCodexInstallationWithReleaseLeaves(
         }
         assertOwnedPrivate(targetDirectoryMetadata, 0o700);
         socketMetadata = await lstat(target);
+        resolvedControlSocketPath = target;
       }
       if (socketMetadata.isSymbolicLink() || !socketMetadata.isSocket()) {
         throw new LocalCodexTransportError("LOCAL_APP_SERVER_ENDPOINT_UNSAFE");
@@ -417,6 +426,7 @@ async function resolveManagedLocalCodexInstallationWithReleaseLeaves(
         error.code === "ENOENT"
       ) {
         availabilityFailure = "CODEX_CONTROL_SOCKET_UNAVAILABLE";
+        socketMetadata = undefined;
       } else {
         throw new LocalCodexTransportError("LOCAL_APP_SERVER_ENDPOINT_UNSAFE");
       }
@@ -437,6 +447,12 @@ async function resolveManagedLocalCodexInstallationWithReleaseLeaves(
     .update(":")
     .update(String(binaryMetadata.ctimeMs))
     .update("\0");
+  // Include the link, not only the final socket, so replacement is detected
+  // even if it points back to the original target. Directory permissions are
+  // revalidated, but unrelated sibling/lock-file churn is not a new endpoint.
+  if (linkMetadata !== undefined) {
+    generationHash.update(`${linkMetadata.dev}:${linkMetadata.ino}:${linkMetadata.birthtimeMs}:${linkMetadata.ctimeMs}\0`);
+  }
   if (socketMetadata === undefined) {
     generationHash.update("control_socket_unavailable");
   } else {
@@ -457,6 +473,7 @@ async function resolveManagedLocalCodexInstallationWithReleaseLeaves(
     ...(availabilityFailure === undefined ? {} : { availabilityFailure }),
     binaryPath: resolvedBinary,
     controlSocketPath,
+    ...(resolvedControlSocketPath === undefined ? {} : { resolvedControlSocketPath }),
     endpointGeneration,
     home,
   };
@@ -776,7 +793,8 @@ class Factory implements LocalCodexTransportFactory {
     try {
       child = this.dependencies.spawn(
         this.installation.binaryPath,
-        ["app-server", "proxy"],
+        ["app-server", "proxy", ...(this.installation.resolvedControlSocketPath === undefined
+          ? [] : ["--sock", this.installation.resolvedControlSocketPath])],
         {
           cwd: path.parse(this.installation.home).root,
           detached: true,

@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Fixed
+- Accept Codex 0.158.0's relocated managed control socket through one owned link to a private owned socket; pin the proxy to the validated target and retain generation checks.
+- Explain `LOCAL_APP_SERVER_ENDPOINT_UNSAFE` without suggesting permission relaxation; discovery and loaded/live attestation verified against the 0.158.0 daemon.
+
 ## [4.7.0] - 2026-09-19
 
 ### Fixed

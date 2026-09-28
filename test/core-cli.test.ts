@@ -225,6 +225,22 @@ test("the real CLI preserves post-write uncertainty and rejects extra public fie
   assert.match(attestationHint.read(), /refused the liveness check.*do not restart the session/);
   assert.match(attestationHint.read(), /App Server version.*retry from the same session/);
   assert.doesNotMatch(attestationHint.read(), /lastOperation|another.*host|restart that session/);
+  reply = { ok: false, code: "LOCAL_APP_SERVER_ENDPOINT_UNSAFE" };
+  const unsafeOut = sink(), unsafeHint = sink();
+  assert.equal(await runCoreCli(["register-codex", "--alias", "codex-test@local"], {
+    env: { EMBASSY_STATE_DIR: root, CODEX_THREAD_ID: a }, stdout: unsafeOut.stream, stderr: unsafeHint.stream,
+  }), 3);
+  assert.equal(JSON.parse(unsafeOut.read()).error.code, "LOCAL_APP_SERVER_ENDPOINT_UNSAFE");
+  assert.match(unsafeHint.read(), /ownership, type, path or permission/);
+  assert.match(unsafeHint.read(), /0700.*0600.*one owned link/);
+  assert.match(unsafeHint.read(), /never loosens permissions itself/);
+  reply = { ok: true, result: { health: "healthy", revision: 0, routes: [], messages: [], retirements: [],
+    codex: { complete: false, truncated: false, safeErrorCode: "LOCAL_APP_SERVER_ENDPOINT_UNSAFE" } } };
+  const statusOut = sink(), statusHint = sink();
+  assert.equal(await runCoreCli(["status", "--json"], { env: { EMBASSY_STATE_DIR: root },
+    stdout: statusOut.stream, stderr: statusHint.stream }), 0);
+  assert.match(statusHint.read(), /LOCAL_APP_SERVER_ENDPOINT_UNSAFE.*never loosens permissions itself/);
+  assert.deepEqual(JSON.parse(statusOut.read()), { ...(reply as object), command: "status" });
   reply = { ok: true, result: { status: "healthy", private: a } };
   const output = sink(), errors = sink();
   assert.equal(await runCoreCli(["health"], { env: { EMBASSY_STATE_DIR: root }, stdout: output.stream, stderr: errors.stream }), 3);

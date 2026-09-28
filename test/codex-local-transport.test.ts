@@ -715,7 +715,10 @@ test("a relocated control socket is followed only through an owned private link"
     const linked = await resolveManagedLocalCodexInstallation(fixture.home);
     assert.equal(linked.availabilityFailure, undefined);
     assert.equal(linked.controlSocketPath, fixture.socket);
+    assert.equal(linked.resolvedControlSocketPath, relocated);
     assert.notEqual(linked.endpointGeneration, direct.endpointGeneration);
+    await writeFile(path.join(daemon, "sock.lock"), "fixture lock", { mode: 0o644 });
+    assert.equal((await resolveManagedLocalCodexInstallation(fixture.home)).endpointGeneration, linked.endpointGeneration);
 
     const unsafe = (error: unknown) =>
       error instanceof LocalCodexTransportError &&
@@ -733,10 +736,56 @@ test("a relocated control socket is followed only through an owned private link"
     await symlink(hop, fixture.socket);
     await assert.rejects(resolveManagedLocalCodexInstallation(fixture.home), unsafe);
 
+    const parentLink = path.join(daemon, "parent-link");
+    await symlink(daemon, parentLink);
+    for (const invalidTarget of ["relative.sock", `${daemon}/../${path.basename(daemon)}/sock`, path.join(parentLink, "sock")]) {
+      await rm(fixture.socket); await symlink(invalidTarget, fixture.socket);
+      await assert.rejects(resolveManagedLocalCodexInstallation(fixture.home), unsafe);
+    }
+
     await rm(fixture.socket, { force: true });
     await symlink(path.join(daemon, "missing"), fixture.socket);
     const dangling = await resolveManagedLocalCodexInstallation(fixture.home);
     assert.equal(dangling.availabilityFailure, "CODEX_CONTROL_SOCKET_UNAVAILABLE");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(daemon, { recursive: true, force: true });
+    await fixture.close();
+  }
+});
+
+test("relocated proxy pins its target and refuses link replacement during handshake", async () => {
+  const fixture = await installationFixture();
+  const daemon = await mkdtemp(path.join(await realpath("/tmp"), "clp-"));
+  const target = path.join(daemon, "sock");
+  const server = createServer();
+  const child = new FakeChild(), transport = new FakeTransport();
+  const killed = syntheticKill(child);
+  try {
+    await chmod(daemon, 0o700);
+    server.listen(target); await once(server, "listening");
+    await chmod(target, 0o600);
+    await rm(fixture.socket); await symlink(target, fixture.socket);
+    const factory = await createLocalCodexTransportFactory({
+      hostId: "local", environment: { HOME: fixture.home },
+      gracefulExitMs: 1, signalTimeoutMs: 10, spawnTimeoutMs: 100,
+    }, {
+      loginHome: () => fixture.home, sleep: async () => undefined,
+      killProcess: killed.killProcess,
+      spawn: (_command, args) => {
+        assert.deepEqual(args, ["app-server", "proxy", "--sock", target]);
+        queueMicrotask(() => child.emit("spawn")); return child as never;
+      },
+      connectWebSocket: async () => {
+        // Even a replacement pointing back at the same target changes the link generation.
+        await rm(fixture.socket); await symlink(target, fixture.socket);
+        return transport;
+      },
+    });
+    await assert.rejects(factory.connectTransport(), { code: "ENDPOINT_GENERATION_CHANGED" });
+    assert.equal(transport.closed, true);
+    assert.deepEqual(killed.signals, ["SIGTERM"]);
+    await factory.close();
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(daemon, { recursive: true, force: true });

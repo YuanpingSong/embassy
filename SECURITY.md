@@ -97,6 +97,15 @@ self-register from inherited `CODEX_THREAD_ID` as a fallback; discovery and
 registration reconcile the same identity. Each operation resumes and attests
 that exact task immediately before write.
 
+The managed Codex control endpoint is an owned 0600 socket in an owned 0700
+control directory, either directly or behind one user-owned symbolic link.
+A relocated target must be absolute and normalized, with a real, canonical,
+user-owned 0700 parent and an owned 0600 socket (no second link). The directory
+name is not authority. The proxy connects to the validated target explicitly;
+link and socket generations are checked before and after its handshake.
+Directory permissions are rechecked without treating sibling lock-file churn
+as endpoint replacement. Embassy does not repair or relax provider permissions.
+
 Claude callers are resolved from inherited `CLAUDE_CODE_MESSAGING_SOCKET`,
 which must be an absolute path. The path may become an in-memory `uds:`
 capability only; it is never a CLI argument, public output, or persisted field.

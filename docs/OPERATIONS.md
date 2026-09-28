@@ -133,8 +133,9 @@ confirms it is loaded and live (idle or busy); `--succeeds` may name its own ret
 predecessor by matching any retained retirement row with that alias and the caller's
 native key, not another thread's row. The new ID cannot receive old messages/replies.
 Recovery requires `thread/loaded/list` and metadata-only `thread/read` in the
-managed daemon; use Codex App Server 0.153.4 or newer as the integration baseline,
-not a claim about the first upstream version containing those methods. Method
+managed daemon. Discovery and loaded/live recovery attestation were verified
+against Codex App Server 0.158.0 on 2026-09-28 (previous baseline: 0.153.4);
+this is not a claim about the first upstream version containing those methods. Method
 support is checked by the actual requests, not a version-string routing gate.
 A missing method (`-32601`) returns `RPC_REJECTED` with registration-specific
 guidance: check the App Server version and retry from the same session; do not
@@ -147,6 +148,22 @@ A resume refusal may mean another host owns the thread (other hosts are send-onl
 or its session predates a daemon restart; use a managed-daemon CLI TUI/exec session
 or restart that session. Turn refusals and registration-attestation refusals are
 reported separately without that diagnosis.
+
+## Codex control socket relocation
+
+Codex 0.158.0 may leave a symbolic link at
+`~/.codex/app-server-control/app-server-control.sock`, pointing into a private
+temporary directory. Embassy accepts one user-owned link with an absolute,
+normalized target: a user-owned 0600 socket in a real, canonical, user-owned
+0700 directory. The original control directory must remain owned and 0700.
+Directory names are not pinned; additional links or unsafe ownership/modes are
+refused as `LOCAL_APP_SERVER_ENDPOINT_UNSAFE`, while a missing target is
+`CODEX_CONTROL_SOCKET_UNAVAILABLE`. The proxy is pinned to the validated target,
+and a changed link/socket generation aborts the connection. Ask the operator
+to inspect the managed Codex installation when these checks fail; Embassy never
+loosens permissions itself. No daemon restart or state reset is needed for this
+Embassy update. Live verification covered discovery and metadata-only recovery
+attestation, not a model turn or STEER delivery.
 
 ## Other Macs
 

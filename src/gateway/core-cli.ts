@@ -95,6 +95,7 @@ async function body(input: Readable): Promise<string> {
 }
 
 function hint(command: string, code: string, stateDir: string, host?: string): string {
+  if (code === "LOCAL_APP_SERVER_ENDPOINT_UNSAFE") return "The managed Codex control socket failed ownership, type, path or permission checks. Its directory must be owned and 0700; the socket owned and 0600. A relocated socket requires one owned link to an absolute canonical target in an owned 0700 directory. Ask the operator to check the Codex installation; Embassy never loosens permissions itself. See docs/OPERATIONS.md.";
   if (code === "RPC_REJECTED" && command === "register-codex") return "The App Server refused the liveness check for this thread; do not restart the session. Check the App Server version and support for thread/loaded/list and thread/read, then retry from the same session.";
   if (code === "CODEX_ATTESTATION_LIMIT") return "The liveness check reached its 4096 loaded-thread scan limit; the endpoint remains retired. Reduce loaded threads before retrying from the same session; do not restart this session.";
   if (code === "RPC_REJECTED" && ["send", "delivery-status", "wait-delivery", "status", "tui"].includes(command)) return "The App Server refused a delivery operation. Run embassy status --json for the route's lastOperation.detail (method and RPC code). If resume was refused, another Codex host may own the thread; only sessions attached to the managed App Server receive. If the session predates a daemon restart, restart that session.";
@@ -266,6 +267,8 @@ export async function runCoreCli(args: readonly string[], dependencies: CoreCliD
     else write(command, result);
     if (command === "retire") stderr.write("[embassy] Retirement cancels queued/reserved work involving this endpoint in both directions; armed work becomes ambiguous and accepted work ambiguous or unconfirmed. Codex is removed from automatic discovery while retirement evidence is retained, unless it re-registers explicitly; Claude may reappear with a fresh endpoint ID.\n");
     if (command === "status" && object(result) && Array.isArray(result.routes)) {
+      if (object(result.codex) && result.codex.safeErrorCode === "LOCAL_APP_SERVER_ENDPOINT_UNSAFE")
+        stderr.write(`[embassy] LOCAL_APP_SERVER_ENDPOINT_UNSAFE: ${hint(command, result.codex.safeErrorCode, stateDir)}\n`);
       for (const row of result.routes.filter(object)) {
         if (object(row.lastOperation) && row.lastOperation.code === "RPC_REJECTED" && object(row.lastOperation.detail))
           stderr.write(`[embassy] ${row.alias}: RPC_REJECTED (${row.lastOperation.detail.method}, RPC ${row.lastOperation.detail.code}). ${rpcGuidance(row.lastOperation.detail.method)}\n`);
