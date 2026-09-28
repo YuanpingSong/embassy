@@ -8,6 +8,7 @@ import { constants as fsConstants } from "node:fs";
 import {
   access,
   lstat,
+  readlink,
   realpath,
   stat,
 } from "node:fs/promises";
@@ -372,6 +373,31 @@ async function resolveManagedLocalCodexInstallationWithReleaseLeaves(
   if (availabilityFailure === undefined) {
     try {
       socketMetadata = await lstat(controlSocketPath);
+      if (socketMetadata.isSymbolicLink()) {
+        // Codex 0.158.0 keeps the socket in a private per-user directory and
+        // leaves a link here. Follow exactly one owned link to an owned
+        // private socket whose parent is an owned private directory.
+        assertOwnedPrivate(socketMetadata, undefined);
+        const target = await readlink(controlSocketPath);
+        if (!path.isAbsolute(target) || path.normalize(target) !== target) {
+          throw new LocalCodexTransportError(
+            "LOCAL_APP_SERVER_ENDPOINT_UNSAFE",
+          );
+        }
+        const targetDirectory = path.dirname(target);
+        const targetDirectoryMetadata = await lstat(targetDirectory);
+        if (
+          targetDirectoryMetadata.isSymbolicLink() ||
+          !targetDirectoryMetadata.isDirectory() ||
+          (await realpath(targetDirectory)) !== targetDirectory
+        ) {
+          throw new LocalCodexTransportError(
+            "LOCAL_APP_SERVER_ENDPOINT_UNSAFE",
+          );
+        }
+        assertOwnedPrivate(targetDirectoryMetadata, 0o700);
+        socketMetadata = await lstat(target);
+      }
       if (socketMetadata.isSymbolicLink() || !socketMetadata.isSocket()) {
         throw new LocalCodexTransportError("LOCAL_APP_SERVER_ENDPOINT_UNSAFE");
       }
